@@ -174,7 +174,7 @@ const PRODUCT_DEFS = PRODUCTS.map(p => ({
   key: p.id,
   label: p.label,
   fallback: p.partners || [],
-  module: p.id === 'evalue' || p.id === 'bbps',   // these render their own breakdown
+  module: p.kind === 'module',   // kiosk/evalue/bbps — render their own /summary breakdown, not the core ledger
 }))
 
 function PartnerRow({ slug, displayName, data }) {
@@ -355,12 +355,108 @@ function ModuleBreakdown({ module, summary }) {
   )
 }
 
+// SBI Kiosk breakdown for Zone 2 — SBI reconciles in its OWN tables across four
+// processes (P01 settlement · P02 bank↔txn · P03 CSP↔txn↔bank · P04 wallet balance),
+// never the core ledger, so it is fed by /sbi/summary (not dashboard-summary, which
+// is why the tab used to show "No data" despite data being present). Same column
+// layout as ProductTable, one row per process.
+const SBI_PROC_META = [
+  { key: 'p01', name: 'P01 · Settlement', sub: 'Wallet withdrawals ↔ bank settlements' },
+  { key: 'p02', name: 'P02 · Bank ↔ Txn', sub: 'Bank statement ↔ txn report (by ref)' },
+  { key: 'p03', name: 'P03 · CSP flow',   sub: 'Money out ↔ in (CSP + amount)' },
+  { key: 'p04', name: 'P04 · Wallet',     sub: 'Wallet balance → action' },
+]
+function SbiBreakdown({ summary }) {
+  const navigate = useNavigate()
+  if (summary === undefined) return <div className="text-center py-10 text-sm text-gray-400">Loading SBI Kiosk summary…</div>
+
+  const counts   = summary?.counts || {}
+  const uploaded = Object.values(counts).reduce((a, b) => a + (b || 0), 0)
+  const procs    = summary?.processes || {}
+  const rows     = SBI_PROC_META.map(m => ({ ...m, ...(procs[m.key] || { total: 0, matched: 0, exceptions: 0 }) }))
+  const tot      = { total: summary?.total || 0, matched: summary?.matched || 0, open: summary?.exceptions || 0 }
+  const rate     = summary?.match_rate
+  const rateColor = rate == null ? 'text-gray-400' : rate >= 95 ? 'text-green-600' : rate >= 75 ? 'text-amber-600' : 'text-red-500'
+
+  // Nothing uploaded at all → genuine empty state.
+  if (!summary || (!summary.has_data && tot.total === 0)) return (
+    <div className="text-center py-12">
+      <div className="text-3xl mb-3">📂</div>
+      <div className="text-sm font-medium text-gray-500">No SBI Kiosk data yet</div>
+      <div className="text-xs text-gray-400 mt-1">Upload bank statement, txn report &amp; KO limits to begin</div>
+      <Link to="/sbi-kiosk" className="inline-flex items-center gap-1.5 mt-3 text-xs text-primary hover:underline font-medium">Open SBI Kiosk <ArrowRight size={11} /></Link>
+    </div>
+  )
+
+  // Data uploaded but the four processes haven't been run yet (no result rows).
+  if (tot.total === 0) return (
+    <>
+      <div className="flex items-center gap-6 px-5 py-2.5 bg-gray-50 border-b border-gray-100 text-xs text-gray-600 flex-wrap">
+        <span className="font-semibold text-gray-500 uppercase tracking-wide text-xs">SBI Kiosk</span>
+        <span>Uploaded records: <strong className="text-gray-800">{uploaded.toLocaleString()}</strong></span>
+        <span className="text-amber-600 font-medium">Not yet reconciled — run P01–P04</span>
+      </div>
+      <div className="px-5 py-8 text-center">
+        <div className="text-sm text-gray-600 mb-1">Data is uploaded but the four processes haven't been run.</div>
+        <div className="text-xs text-gray-400 mb-3">
+          Bank {(counts.bank_statement || 0).toLocaleString()} · Txn {(counts.txn_reports || 0).toLocaleString()} · KO limits {(counts.ko_limits || 0).toLocaleString()} · CSP {(counts.csp_master || 0).toLocaleString()}
+        </div>
+        <Link to="/sbi-kiosk" className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline font-medium">Open SBI Kiosk &amp; run processes <ArrowRight size={11} /></Link>
+      </div>
+    </>
+  )
+
+  // Reconciled — per-process breakdown.
+  return (
+    <>
+      <div className="flex items-center gap-6 px-5 py-2.5 bg-gray-50 border-b border-gray-100 text-xs text-gray-600 flex-wrap">
+        <span className="font-semibold text-gray-500 uppercase tracking-wide text-xs">SBI Kiosk Totals</span>
+        <span>Entries: <strong className="text-gray-800">{tot.total.toLocaleString()}</strong></span>
+        <span>Matched: <strong className="text-green-600">{tot.matched.toLocaleString()}</strong></span>
+        <span>Open: <strong className={tot.open > 0 ? 'text-red-500' : 'text-gray-400'}>{tot.open.toLocaleString()}</strong></span>
+        <span>Match Rate: <strong className={rateColor}>{rate == null ? '—' : rate + '%'}</strong></span>
+        {uploaded > 0 && <span className="text-gray-400">Uploaded records: {uploaded.toLocaleString()}</span>}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-gray-100 bg-gray-50/50">
+              <th className="text-left py-2.5 px-5 text-xs font-semibold text-gray-400 uppercase tracking-wide">Process</th>
+              <th className="text-right py-2.5 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wide">Entries</th>
+              <th className="text-right py-2.5 px-4 text-xs font-semibold text-green-500 uppercase tracking-wide">Matched</th>
+              <th className="text-right py-2.5 px-4 text-xs font-semibold text-red-400 uppercase tracking-wide">Open</th>
+              <th className="py-2.5 px-5 text-xs font-semibold text-gray-400 uppercase tracking-wide">Match Rate</th>
+              <th className="py-2.5 px-3" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => {
+              const rr = r.total > 0 ? (r.matched / r.total) * 100 : 0
+              return (
+                <tr key={r.key} className={`border-b border-gray-50 hover:bg-gray-50/80 transition-colors cursor-pointer group ${r.total === 0 ? 'opacity-50' : ''}`} onClick={() => navigate('/sbi-kiosk')}>
+                  <td className="py-3 px-5"><div className="font-semibold text-gray-800 text-sm">{r.name}</div><div className="text-xs text-gray-400 mt-0.5">{r.sub}</div></td>
+                  <td className="py-3 px-4 text-right text-sm text-gray-700 tabular-nums">{r.total.toLocaleString()}</td>
+                  <td className="py-3 px-4 text-right text-sm font-semibold text-green-600 tabular-nums">{r.matched.toLocaleString()}</td>
+                  <td className={`py-3 px-4 text-right text-sm font-semibold tabular-nums ${r.exceptions > 0 ? 'text-red-500' : 'text-gray-300'}`}>{r.exceptions.toLocaleString()}</td>
+                  <td className="py-3 px-5"><div className="min-w-[100px]"><RateBar rate={rr} size="sm" /></div></td>
+                  <td className="py-3 px-3 text-right text-gray-200 group-hover:text-gray-400 transition-colors"><ChevronRight size={14} /></td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  )
+}
+
 function ProductTabs({ partnerConfigs, data }) {
   const [activeTab, setActiveTab] = useState('dmt')
-  const [modSummary, setModSummary] = useState({})  // { evalue: {...}, bbps: {...} }
+  const [modSummary, setModSummary] = useState({})  // { evalue: {...}, bbps: {...}, kiosk: {...} }
   useEffect(() => {
     api.get('/evalue/summary').then(({ data }) => setModSummary(s => ({ ...s, evalue: data }))).catch(() => setModSummary(s => ({ ...s, evalue: null })))
     api.get('/bbps/summary').then(({ data }) => setModSummary(s => ({ ...s, bbps: data }))).catch(() => setModSummary(s => ({ ...s, bbps: null })))
+    api.get('/sbi/summary').then(({ data }) => setModSummary(s => ({ ...s, kiosk: data }))).catch(() => setModSummary(s => ({ ...s, kiosk: null })))
   }, [])
 
   const { productMap, nameMap } = useMemo(() => {
@@ -395,11 +491,21 @@ function ProductTabs({ partnerConfigs, data }) {
   const openCounts = useMemo(() => {
     const counts = {}
     for (const def of PRODUCT_DEFS) {
+      // Module products keep their open counts in their own tables, so the tab
+      // badge reads from the /summary endpoints — not the core-ledger rows.
+      if (def.key === 'kiosk') { counts.kiosk = modSummary.kiosk?.exceptions || 0; continue }
+      if (def.key === 'bbps')  { counts.bbps  = modSummary.bbps?.overall?.exceptions || 0; continue }
+      if (def.key === 'evalue') {
+        counts.evalue = (modSummary.evalue?.accounts || []).reduce((s, a) =>
+          s + Math.max((a.bank_credits || 0) -
+            ((a.matched_online || 0) + (a.matched_cash || 0) + (a.matched_manual || 0) + (a.interbank_matched || 0)), 0), 0)
+        continue
+      }
       const partners = productMap[def.key] || def.fallback
       counts[def.key] = partners.reduce((sum, slug) => sum + sumRows(data?.internal?.[slug]).open, 0)
     }
     return counts
-  }, [productMap, data])
+  }, [productMap, data, modSummary])
 
   return (
     <div className="card overflow-hidden p-0 mb-5">
@@ -441,8 +547,12 @@ function ProductTabs({ partnerConfigs, data }) {
         </div>
       </div>
 
-      {/* E-Value / BBPS render their own breakdown from their summary endpoints. */}
-      {(activeTab === 'evalue' || activeTab === 'bbps') ? (
+      {/* Module products (SBI Kiosk, E-Value, BBPS) reconcile in their OWN tables,
+          so they render a bespoke breakdown from their /summary endpoints instead of
+          the core-ledger ProductTable (which would always be empty for them). */}
+      {activeTab === 'kiosk' ? (
+        <SbiBreakdown summary={modSummary.kiosk} />
+      ) : (activeTab === 'evalue' || activeTab === 'bbps') ? (
         <ModuleBreakdown module={activeTab} summary={modSummary[activeTab]} />
       ) : (
       <>
