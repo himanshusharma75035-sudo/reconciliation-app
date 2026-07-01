@@ -1048,6 +1048,32 @@ class SBIManualMatch(Base):
     )
 
 
+class SBISrcAssignment(Base):
+    """
+    Operator SRC disposition for SBI Kiosk recon (persistent overlay, additive).
+
+    Like SBIManualMatch, an SRC tag can't live on the P01–P04 result rows because
+    those are delete-and-recreated on every run (behavior-contract #17). It is stored
+    here keyed by the row's stable BUSINESS key and overlaid onto results + exports at
+    READ time, so a tagged SRC survives re-runs without touching the run logic.
+    Deletable by an operator to undo. Mirrors core-ledger assign-src (src_code+src_note).
+    """
+    __tablename__ = "sbi_src_assignments"
+
+    id           = Column(String(36),  primary_key=True, default=generate_id)
+    recon_date   = Column(String(10),  index=True)
+    process      = Column(String(5),   index=True)      # p01 | p02 | p03 | p04
+    match_key    = Column(String(200), index=True)      # stable business key of the row
+    src_code     = Column(String(50))
+    src_note     = Column(String(500), nullable=True)
+    created_by   = Column(String(100))
+    created_at   = Column(DateTime,    default=datetime.datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_sbisrc_lookup", "recon_date", "process", "match_key"),
+    )
+
+
 # ─── QR Collection Settlement & Chargeback Models ─────────────────────────────
 
 class QRSettlement(Base):
@@ -1160,6 +1186,9 @@ class EvalueWalletLoad(Base):
     override_by       = Column(String(100), nullable=True)
     override_at       = Column(DateTime,    nullable=True)
     prev_recon_status = Column(String(30),  nullable=True)
+    # SRC disposition (parity with core-ledger assign-src)
+    src_code          = Column(String(50),  nullable=True)
+    src_note          = Column(String(500), nullable=True)
     created_at      = Column(DateTime, default=datetime.datetime.utcnow)
 
     __table_args__ = (
@@ -1203,6 +1232,9 @@ class EvalueBankTxn(Base):
     override_by       = Column(String(100), nullable=True)
     override_at       = Column(DateTime,    nullable=True)
     prev_recon_status = Column(String(30),  nullable=True)
+    # SRC disposition (parity with core-ledger assign-src)
+    src_code          = Column(String(50),  nullable=True)
+    src_note          = Column(String(500), nullable=True)
     created_at   = Column(DateTime, default=datetime.datetime.utcnow)
 
     __table_args__ = (
@@ -1303,6 +1335,9 @@ class BbpsInternal(Base):
     override_by       = Column(String(100), nullable=True)
     override_at       = Column(DateTime, nullable=True)
     prev_recon_status = Column(String(30), nullable=True)
+    # SRC disposition (parity with core-ledger assign-src)
+    src_code          = Column(String(50),  nullable=True)
+    src_note          = Column(String(500), nullable=True)
     created_at      = Column(DateTime, default=datetime.datetime.utcnow)
 
     __table_args__ = (Index("ix_bbps_int_prov_date", "provider", "transaction_date"),
@@ -1332,6 +1367,9 @@ class BbpsBankTxn(Base):
     override_by       = Column(String(100), nullable=True)
     override_at       = Column(DateTime, nullable=True)
     prev_recon_status = Column(String(30), nullable=True)
+    # SRC disposition (parity with core-ledger assign-src)
+    src_code          = Column(String(50),  nullable=True)
+    src_note          = Column(String(500), nullable=True)
     created_at      = Column(DateTime, default=datetime.datetime.utcnow)
 
     __table_args__ = (Index("ix_bbps_bank_prov_date", "provider", "transaction_date"),
@@ -1385,10 +1423,21 @@ def _run_migrations():
             ("recovery_status", "VARCHAR(20)"), ("recovery_note", "VARCHAR(300)"),
             ("override_by", "VARCHAR(100)"), ("override_at", "DATETIME"),
             ("prev_recon_status", "VARCHAR(30)"),
+            # SRC disposition (parity with core-ledger assign-src)
+            ("src_code", "VARCHAR(50)"), ("src_note", "VARCHAR(500)"),
         ],
         "evalue_wallet_loads": [
             ("override_by", "VARCHAR(100)"), ("override_at", "DATETIME"),
             ("prev_recon_status", "VARCHAR(30)"), ("bank_ref", "VARCHAR(120)"),
+            ("src_code", "VARCHAR(50)"), ("src_note", "VARCHAR(500)"),
+        ],
+        # BBPS module tables gain SRC parity (added here so the ALTER runs on
+        # already-deployed DBs — create_all only makes missing tables).
+        "bbps_bank_txns": [
+            ("src_code", "VARCHAR(50)"), ("src_note", "VARCHAR(500)"),
+        ],
+        "bbps_internal": [
+            ("src_code", "VARCHAR(50)"), ("src_note", "VARCHAR(500)"),
         ],
         "api_keys": [("allowed_ips", "VARCHAR(500)")],
         "partner_configs": [("settlement_carry_days", "INTEGER")],

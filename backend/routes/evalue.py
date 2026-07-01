@@ -201,10 +201,16 @@ async def upload_bank(
 
 # ─── Run reconciliation ───────────────────────────────────────────────────────
 def _run_one(db: Session, reco_acc_no: str) -> dict:
-    bank_objs = db.query(EvalueBankTxn).filter(EvalueBankTxn.reco_acc_no == reco_acc_no).all()
-    load_objs = db.query(EvalueWalletLoad).filter(EvalueWalletLoad.reco_acc_no == reco_acc_no).all()
-    if not bank_objs:
+    all_bank = db.query(EvalueBankTxn).filter(EvalueBankTxn.reco_acc_no == reco_acc_no).all()
+    if not all_bank:
         return {"reco_acc_no": reco_acc_no, "error": "no bank statement uploaded"}
+    # SRC-disposed rows are excluded from re-matching and left untouched — parity with
+    # core run_reconciliation (which only feeds unmatched rows). This preserves a manual
+    # SRC tag (src_code/src_note + status) across a recon re-run instead of clobbering it.
+    bank_objs = [b for b in all_bank if b.recon_status != "src_assigned"]
+    load_objs = [l for l in db.query(EvalueWalletLoad).filter(
+                    EvalueWalletLoad.reco_acc_no == reco_acc_no).all()
+                 if l.recon_status != "src_assigned"]
 
     # Build dicts carrying a backref to the DB object
     bank_rows = []
@@ -350,7 +356,8 @@ def summary(date_from: str = Query(""), date_to: str = Query(""),
     """Per-account roll-up of the latest recon state (SQL aggregates — no full-table loads)."""
     from sqlalchemy import func
     STAT = ["matched_online", "matched_cash", "matched_manual", "interbank_matched",
-            "twice_credit", "wrong_amount", "unmatched_bank", "transaction_fee", "bank_debit"]
+            "twice_credit", "wrong_amount", "unmatched_bank", "transaction_fee", "bank_debit",
+            "src_assigned"]
 
     accts = [r[0] for r in db.query(EvalueBankTxn.reco_acc_no).distinct().all()]
 
@@ -584,6 +591,69 @@ def override_status(body: OverrideIn, db: Session = Depends(get_db), user=Depend
     return {"message": "Status updated", "id": body.id, "status": body.status}
 
 
+# ── SRC disposition (parity with core-ledger /recon/assign-src) ────────────────
+# Tags an unmatched E-Value row with a source code + note → recon_status='src_assigned'.
+# Same access level as override-status (any authed user) so no permission regression.
+# Preserved across recon re-runs by _run_one (src_assigned rows are not re-fed).
+class EvalueSRCIn(BaseModel):
+    id: str
+    side: str          # "bank" | "load"
+    src_code: str
+    src_note: str = ""
+
+
+class EvalueBulkSRCIn(BaseModel):
+    ids: List[str]
+    side: str
+    src_code: str
+    src_note: str = ""
+
+
+@router.post("/assign-src")
+def assign_src(body: EvalueSRCIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Assign an SRC code + note to one E-Value row (bank credit or wallet load)."""
+    from routes.recon import SRC_CODES
+    if body.src_code not in SRC_CODES:
+        raise HTTPException(400, f"Invalid SRC code. Allowed: {SRC_CODES}")
+    Model = EvalueBankTxn if body.side == "bank" else EvalueWalletLoad
+    row = db.query(Model).filter(Model.id == body.id).first()
+    if not row:
+        raise HTTPException(404, "Row not found")
+    prev = {"recon_status": row.recon_status, "src_code": row.src_code, "match_id": row.match_id}
+    row.prev_recon_status = row.recon_status
+    row.recon_status = "src_assigned"
+    row.src_code = body.src_code
+    row.src_note = (body.src_note or "")[:500]
+    row.override_by = getattr(user, "username", None)
+    row.override_at = datetime.datetime.utcnow()
+    _ev_audit(db, user, "evalue_assign_src",
+              {"id": body.id, "side": body.side, "src_code": body.src_code, "src_note": body.src_note},
+              entity_id=body.id, prev=prev)
+    db.commit()
+    return {"message": "SRC assigned", "id": body.id, "src_code": body.src_code}
+
+
+@router.post("/assign-src-bulk")
+def assign_src_bulk(body: EvalueBulkSRCIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Assign one SRC code + note to many E-Value rows in one shot."""
+    from routes.recon import SRC_CODES
+    if body.src_code not in SRC_CODES:
+        raise HTTPException(400, f"Invalid SRC code. Allowed: {SRC_CODES}")
+    Model = EvalueBankTxn if body.side == "bank" else EvalueWalletLoad
+    rows = db.query(Model).filter(Model.id.in_(body.ids or [])).all()
+    for row in rows:
+        row.prev_recon_status = row.recon_status
+        row.recon_status = "src_assigned"
+        row.src_code = body.src_code
+        row.src_note = (body.src_note or "")[:500]
+        row.override_by = getattr(user, "username", None)
+        row.override_at = datetime.datetime.utcnow()
+    _ev_audit(db, user, "evalue_assign_src_bulk",
+              {"side": body.side, "src_code": body.src_code, "count": len(rows)})
+    db.commit()
+    return {"updated": len(rows), "src_code": body.src_code}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  CROSS-PRODUCT INTERBANK MATCHING
 #  An E-Value bank entry can correspond to a transfer that appears as a credit /
@@ -761,7 +831,8 @@ def report_summary(frm: str = Query(None, alias="from"), to: str = Query(None),
     bank_rows = _ev_filtered_bank(db, frm, to, bank, reco_acc_no)
     loads = _ev_filtered_loads(db, frm, to, reco_acc_no)
     STAT = ["matched_online", "matched_cash", "matched_manual", "interbank_matched",
-            "twice_credit", "wrong_amount", "unmatched_bank", "transaction_fee", "bank_debit"]
+            "twice_credit", "wrong_amount", "unmatched_bank", "transaction_fee", "bank_debit",
+            "src_assigned"]
     from collections import defaultdict
     accts = sorted(set([b.reco_acc_no for b in bank_rows] + [l.reco_acc_no for l in loads]))
     rows = []

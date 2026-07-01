@@ -46,6 +46,7 @@ export const STATUS_GROUPS = [
       { v: 'unmatched_internal',   l: 'Unmatched (Internal)' },
       { v: 'failed_pending_refund',l: 'Failed – Pending Refund' },
       { v: 'refunded_but_success', l: 'Refunded but Success' },
+      { v: 'src_assigned',         l: 'SRC Assigned' },
     ],
   },
   {
@@ -54,6 +55,7 @@ export const STATUS_GROUPS = [
       { v: 'unmatched_load', l: 'Unmatched (Load)' },
       { v: 'twice_credit',   l: 'Twice Credit' },
       { v: 'wrong_amount',   l: 'Wrong Amount' },
+      { v: 'src_assigned',   l: 'SRC Assigned' },
     ],
   },
 ]
@@ -81,9 +83,11 @@ export const STATUS_LABEL_BY_VALUE = (() => {
 })()
 
 // Which scalar filter fields apply to the selected partner.
-// Only SRC is core-ledger-only; all other fields are universal across open-items partners.
+// SRC now applies to the core ledger AND the open-items module products (E-Value, BBPS),
+// which gained assign-src parity. Still N/A for products without dispositionable rows.
 export function fieldApplies(field, partner) {
-  if (field === 'src_code') return !partner || isCoreLedgerPartner(partner)
+  if (field === 'src_code')
+    return !partner || isCoreLedgerPartner(partner) || partner === 'evalue' || partner === 'bbps'
   return true
 }
 

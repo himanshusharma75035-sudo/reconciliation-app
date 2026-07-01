@@ -4,6 +4,11 @@ import toast from 'react-hot-toast'
 import api from '../utils/api'
 import { isCoreLedgerPartner } from '../productRegistry'
 
+// Amount gap between the two sides of a pending pair. Beyond ₹1 the backend flags the
+// match `amount_mismatch` (parity with the auto-matcher), so we warn before submit.
+const amtDiff = (a, b) => Math.abs((Number(a?.amount) || 0) - (Number(b?.amount) || 0))
+const fmtRs   = (n) => `₹${(Number(n) || 0).toLocaleString('en-IN')}`
+
 export default function ManualMatch() {
   const [filters, setFilters]         = useState({ partner: '', date_from: '', date_to: '', eko_tid: '' })
   const [partnerList, setPartnerList] = useState([])
@@ -73,7 +78,12 @@ export default function ManualMatch() {
     try {
       const pairs = queue.map(p => ({ bank_txn_id: p.bankItem.id, internal_txn_id: p.internalItem.id }))
       const { data } = await api.post('/recon/manual-match-bulk', { pairs })
-      toast.success(`Matched ${data.matched} pair(s)${data.errors > 0 ? `, ${data.errors} failed` : ''}`)
+      const mism = data.mismatch || 0
+      const msg = `Matched ${data.matched} pair(s)`
+        + (mism > 0 ? ` — ${mism} flagged as amount mismatch` : '')
+        + (data.errors > 0 ? `, ${data.errors} failed` : '')
+      if (mism > 0) toast(msg, { icon: '⚠️', duration: 5000 })
+      else toast.success(msg)
       // Remove successfully matched items from the panels
       const matchedBankIds     = data.results.filter(r => r.status === 'ok').map(r => r.bank_txn_id)
       const matchedInternalIds = data.results.filter(r => r.status === 'ok').map(r => r.internal_txn_id)
@@ -163,12 +173,16 @@ export default function ManualMatch() {
       </div>
 
       {/* Pending pair bar */}
-      {(pendingBank || pendingInternal) && (
-        <div className="bg-primary text-white rounded-xl px-4 py-3 mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-4 text-sm">
-            <span>Bank: <span className="font-semibold">{pendingBank?.eko_tid || pendingBank?.tracking_number || '—'}</span></span>
+      {(pendingBank || pendingInternal) && (() => {
+        const diff = (pendingBank && pendingInternal) ? amtDiff(pendingBank, pendingInternal) : 0
+        const mism = diff > 1
+        return (
+        <div className={`${mism ? 'bg-amber-500' : 'bg-primary'} text-white rounded-xl px-4 py-3 mb-4 flex items-center justify-between gap-3 flex-wrap`}>
+          <div className="flex items-center gap-3 text-sm flex-wrap">
+            <span>Bank: <span className="font-semibold">{pendingBank?.eko_tid || pendingBank?.tracking_number || '—'}</span>{pendingBank && <span className="opacity-80"> · {fmtRs(pendingBank.amount)}</span>}</span>
             <GitMerge size={16} />
-            <span>Internal: <span className="font-semibold">{pendingInternal?.eko_tid || pendingInternal?.tracking_number || '—'}</span></span>
+            <span>Internal: <span className="font-semibold">{pendingInternal?.eko_tid || pendingInternal?.tracking_number || '—'}</span>{pendingInternal && <span className="opacity-80"> · {fmtRs(pendingInternal.amount)}</span>}</span>
+            {mism && <span className="bg-white/25 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap">⚠ differ by {fmtRs(diff)} → will flag as Amount Mismatch</span>}
           </div>
           <div className="flex gap-2">
             <button onClick={() => { setPendingBank(null); setPendingInternal(null) }}
@@ -177,12 +191,12 @@ export default function ManualMatch() {
             </button>
             <button onClick={addToQueue}
               disabled={!pendingBank || !pendingInternal}
-              className="bg-white text-primary text-xs px-3 py-1 rounded-lg font-medium hover:bg-white/90 disabled:opacity-50 flex items-center gap-1">
+              className="bg-white text-gray-800 text-xs px-3 py-1 rounded-lg font-medium hover:bg-white/90 disabled:opacity-50 flex items-center gap-1">
               <Plus size={14} /> Add to Queue
             </button>
           </div>
         </div>
-      )}
+      )})()}
 
       {/* Match queue */}
       {queue.length > 0 && (
@@ -198,25 +212,31 @@ export default function ManualMatch() {
             </button>
           </div>
           <div className="space-y-1.5">
-            {queue.map((pair, idx) => (
-              <div key={idx} className="flex items-center gap-3 bg-primary/5 rounded-lg px-3 py-2 text-xs">
+            {queue.map((pair, idx) => {
+              const diff = amtDiff(pair.bankItem, pair.internalItem)
+              const mism = diff > 1
+              return (
+              <div key={idx} className={`flex items-center gap-3 rounded-lg px-3 py-2 text-xs ${mism ? 'bg-amber-50 border border-amber-200' : 'bg-primary/5'}`}>
                 <span className="text-gray-500 w-4">{idx + 1}.</span>
                 <span className="font-mono text-blue-700 flex-1">
                   {pair.bankItem.eko_tid || pair.bankItem.tracking_number || pair.bankItem.id.slice(0,8)}
-                  {' · ₹'}{pair.bankItem.amount?.toLocaleString('en-IN')}
+                  {' · '}{fmtRs(pair.bankItem.amount)}
                 </span>
                 <ArrowRight size={12} className="text-gray-400 shrink-0" />
                 <span className="font-mono text-green-700 flex-1">
                   {pair.internalItem.eko_tid || pair.internalItem.tracking_number || pair.internalItem.id.slice(0,8)}
-                  {' · ₹'}{pair.internalItem.amount?.toLocaleString('en-IN')}
+                  {' · '}{fmtRs(pair.internalItem.amount)}
                 </span>
+                {mism && <span title="Amounts differ — this pair will be recorded as Amount Mismatch (needs review), not a clean match"
+                  className="text-amber-700 bg-amber-100 rounded-full px-2 py-0.5 font-medium whitespace-nowrap">⚠ Δ {fmtRs(diff)}</span>}
                 <button onClick={() => removeFromQueue(idx)}
                   className="text-gray-400 hover:text-red-500 ml-2">
                   <Trash2 size={12} />
                 </button>
               </div>
-            ))}
+            )})}
           </div>
+          <p className="text-[11px] text-gray-400 mt-2">Pairs marked <span className="text-amber-700 font-medium">⚠ Δ</span> have different amounts — they’re still linked but recorded as <span className="font-medium">Amount Mismatch</span> (needs review), not a clean match.</p>
         </div>
       )}
 

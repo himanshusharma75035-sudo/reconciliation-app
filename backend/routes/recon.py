@@ -521,9 +521,15 @@ def rematch_transactions(req: RematchRequest,
     from core.matching_engine import _make_match_id
     mid = _make_match_id(p, d, seq)
 
+    # Amount guard — parity with manual_match()/the auto-matcher: beyond ±₹1 the
+    # re-matched pair is flagged `amount_mismatch` (still linked, remark preserved)
+    # rather than presented as a clean match.
+    amt_diff = abs(float(bank_txn.amount or 0) - float(new_int.amount or 0))
+    final_status = ReconStatus.amount_mismatch if amt_diff > 1.0 else ReconStatus.manual_matched
+
     for txn, partner_id in [(bank_txn, new_int.id), (new_int, bank_txn.id)]:
         prev = txn.recon_status
-        txn.recon_status    = ReconStatus.manual_matched
+        txn.recon_status    = final_status
         txn.match_id        = mid
         txn.matched_with_id = partner_id
         txn.override_note   = req.remark
@@ -531,11 +537,12 @@ def rematch_transactions(req: RematchRequest,
         txn.override_at     = datetime.datetime.utcnow()
         txn.prev_recon_status = str(prev)
         _human_log(db, current_user, "human_rematch", txn.id,
-                   str(prev), "manual_matched", req.remark,
+                   str(prev), final_status.value, req.remark,
                    {"new_match_id": mid, "partner_txn_id": partner_id})
 
     db.commit()
-    return {"message": "Re-matched successfully", "new_match_id": mid,
+    return {"message": "Re-matched successfully", "new_match_id": mid, "status": final_status.value,
+            "amount_diff": round(amt_diff, 2), "amount_mismatch": amt_diff > 1.0,
             "bank_txn_id": req.bank_txn_id, "internal_txn_id": req.new_internal_txn_id}
 
 
@@ -696,16 +703,21 @@ def do_manual_match_bulk(
         try:
             result = manual_match(bank_id, int_id, db)
             _log(db, current_user, "manual_match", "transaction", bank_id,
-                 {"matched_with": int_id, "match_id": result.get("match_id")})
+                 {"matched_with": int_id, "match_id": result.get("match_id"),
+                  "amount_mismatch": result.get("amount_mismatch"), "amount_diff": result.get("amount_diff")})
             results.append({"bank_txn_id": bank_id, "internal_txn_id": int_id, "status": "ok",
-                            "match_id": result.get("match_id")})
+                            "match_id": result.get("match_id"),
+                            "amount_mismatch": result.get("amount_mismatch", False),
+                            "amount_diff": result.get("amount_diff", 0),
+                            "recon_status": result.get("status")})
         except Exception as e:
             results.append({"bank_txn_id": bank_id, "internal_txn_id": int_id,
                             "status": "error", "detail": str(e)})
 
-    ok_count  = sum(1 for r in results if r["status"] == "ok")
-    err_count = sum(1 for r in results if r["status"] == "error")
-    return {"matched": ok_count, "errors": err_count, "results": results}
+    ok_count       = sum(1 for r in results if r["status"] == "ok")
+    err_count      = sum(1 for r in results if r["status"] == "error")
+    mismatch_count = sum(1 for r in results if r.get("amount_mismatch"))
+    return {"matched": ok_count, "errors": err_count, "mismatch": mismatch_count, "results": results}
 
 
 @router.post("/assign-src")
@@ -762,12 +774,74 @@ def do_manual_match(req: ManualMatchRequest, db: Session = Depends(get_db),
     _log(db, current_user, "manual_match", "transaction", req.bank_txn_id, result)
     return result
 
+
+class EditIdentifiersRequest(BaseModel):
+    # None = leave unchanged; "" = clear the field. TID=eko_tid, Tracking/RRN=tracking_number, UTR=utr_number.
+    eko_tid: Optional[str] = None
+    tracking_number: Optional[str] = None
+    utr_number: Optional[str] = None
+    remark: str = ""
+
+
+# Statuses that mean the row is part of a live match — its identifiers must not change
+# under it (identifiers are matching keys + audit references). Break the match first.
+_ID_LOCKED_STATUSES = {
+    ReconStatus.matched, ReconStatus.manual_matched,
+    ReconStatus.interbank_matched, ReconStatus.amount_mismatch,
+}
+
+
+@router.patch("/transaction/{txn_id}/identifiers")
+def edit_transaction_identifiers(
+    txn_id: str,
+    body: EditIdentifiersRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("override")),
+):
+    """
+    Correct a transaction's identifiers — TID (eko_tid), Tracking/RRN (tracking_number),
+    UTR (utr_number). Override-gated. BLOCKED on rows that are part of a match (matched /
+    manual_matched / interbank_matched / amount_mismatch, or any row carrying a match_id) —
+    un-match first so a live pair's keys can never silently change under it. Every change
+    is audited old→new with a mandatory remark.
+    """
+    txn = db.query(Transaction).filter(Transaction.id == txn_id).first()
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if txn.match_id or txn.recon_status in _ID_LOCKED_STATUSES:
+        st = txn.recon_status.value if hasattr(txn.recon_status, "value") else str(txn.recon_status)
+        raise HTTPException(
+            status_code=400,
+            detail=f"This entry is part of a match ({st}{', ' + txn.match_id if txn.match_id else ''}). "
+                   f"Un-match it first, then edit its identifiers.")
+    _require_remark(body.remark, "edit_identifiers")
+
+    changes = {}
+    for field, newval in (("eko_tid", body.eko_tid),
+                          ("tracking_number", body.tracking_number),
+                          ("utr_number", body.utr_number)):
+        if newval is None:
+            continue
+        nv = newval.strip() or None
+        oldv = getattr(txn, field)
+        if nv != oldv:
+            changes[field] = {"old": oldv, "new": nv}
+            setattr(txn, field, nv)
+    if not changes:
+        raise HTTPException(status_code=400, detail="No identifier changes provided")
+
+    prev = str(txn.recon_status)
+    db.commit()
+    _human_log(db, current_user, "edit_identifiers", txn.id, prev, prev, body.remark,
+               {"changes": changes})
+    return {"updated": txn.id, "changes": changes}
+
 # Products whose data lives in their own tables (not the core transactions ledger).
 # Open Items can still surface their unmatched / exception rows via this adapter.
 _MODULE_OPEN = {
     "bbps":   ["unmatched_bank", "unmatched_internal", "failed_pending_refund",
-               "refunded_but_success", "amount_mismatch"],
-    "evalue": ["unmatched_bank", "unmatched_load", "twice_credit", "wrong_amount"],
+               "refunded_but_success", "amount_mismatch", "src_assigned"],
+    "evalue": ["unmatched_bank", "unmatched_load", "twice_credit", "wrong_amount", "src_assigned"],
 }
 
 # Product-level selections that fan out to several core-ledger partners. Lets the
@@ -873,7 +947,7 @@ def _module_rows(module, *, recon_date=None, date_from=None, date_to=None, side=
             "transaction_date": b.transaction_date, "eko_tid": b.client_ref,
             "tracking_number": b.operator_ref, "utr_number": None, "amount": b.amount,
             "dr_cr": None, "status": b.status, "recon_status": b.recon_status,
-            "match_id": b.match_id, "src_code": None, "src_note": None,
+            "match_id": b.match_id, "src_code": b.src_code, "src_note": b.src_note,
             "assigned_to": None, "exception_reason": None, "row_type": "txn",
             "bank_description": None,  # BBPS operator reports carry no free-text narration
             "csp_code": None, "csp_name": None,  # CSP is on the internal side only
@@ -883,7 +957,7 @@ def _module_rows(module, *, recon_date=None, date_from=None, date_to=None, side=
             "transaction_date": i.transaction_date, "eko_tid": i.eko_trxn_id,
             "tracking_number": i.tracking_number, "utr_number": None, "amount": i.amount,
             "dr_cr": None, "status": i.status, "recon_status": i.recon_status,
-            "match_id": i.match_id, "src_code": None, "src_note": None,
+            "match_id": i.match_id, "src_code": i.src_code, "src_note": i.src_note,
             "assigned_to": None, "exception_reason": None, "row_type": "txn",
             "bank_description": None,
             "csp_code": i.csp_code, "csp_name": i.merchant_name,  # CSP already stored
@@ -895,7 +969,7 @@ def _module_rows(module, *, recon_date=None, date_from=None, date_to=None, side=
             "transaction_date": b.txn_date, "eko_tid": b.utr or b.atm_ref,
             "tracking_number": b.reco_acc_no, "utr_number": b.utr, "amount": b.amount,
             "dr_cr": b.dr_cr, "status": None, "recon_status": b.recon_status,
-            "match_id": b.match_id, "src_code": None, "src_note": None,
+            "match_id": b.match_id, "src_code": b.src_code, "src_note": b.src_note,
             "assigned_to": None, "exception_reason": None, "row_type": "txn",
             "bank_description": b.description,  # E-Value bank txns already store the narration
             "csp_code": None, "csp_name": None,  # CSP is on the internal side only
@@ -905,7 +979,7 @@ def _module_rows(module, *, recon_date=None, date_from=None, date_to=None, side=
             "transaction_date": l.transaction_date, "eko_tid": l.eko_trxn_id,
             "tracking_number": l.reco_acc_no, "utr_number": l.utr_number, "amount": l.amount,
             "dr_cr": None, "status": l.status, "recon_status": l.recon_status,
-            "match_id": l.match_id, "src_code": None, "src_note": None,
+            "match_id": l.match_id, "src_code": l.src_code, "src_note": l.src_note,
             "assigned_to": None, "exception_reason": None, "row_type": "txn",
             "bank_description": None,
             "csp_code": l.csp_code, "csp_name": l.merchant_name,  # CSP already stored

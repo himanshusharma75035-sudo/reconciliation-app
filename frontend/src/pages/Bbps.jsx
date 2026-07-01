@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import {
   Receipt, Upload, Play, Download, RefreshCw, FileSpreadsheet, CheckCircle2,
-  AlertTriangle, RotateCcw, Undo2, Tag,
+  AlertTriangle, RotateCcw, Undo2, Tag, Tags,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
@@ -20,6 +20,8 @@ const STATUS_META = {
   under_review:          { label: 'Under Review', cls: 'bg-yellow-50 text-yellow-700' },
 }
 const OVERRIDE = ['matched', 'failed_refunded', 'failed_pending_refund', 'refunded_but_success', 'written_off', 'under_review']
+const SRC_CODES = ['UNCLAIMED', 'ADVANCE_CREDIT', 'BANK_CHARGES', 'TWICE_CREDITED', 'INTERNAL_TXN', 'DELAYED_TXN', 'DUPLICATE', 'MISSING_TID', 'OTHER']
+const SRC_ASSIGNABLE = ['unmatched_bank', 'unmatched_internal', 'failed_pending_refund', 'refunded_but_success', 'amount_mismatch', 'src_assigned']
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 
 export default function Bbps() {
@@ -142,6 +144,15 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
       ] },
     action: async (v) => { await api.post('/bbps/override-status', { id: row.id, side: row._side, status: v.status, note: v.note }); toast.success('Status updated') },
   })
+  const assignSrc = (row) => setModal({
+    config: { title: 'Assign SRC', confirmLabel: 'Assign',
+      description: `${row.client_ref || row.eko_trxn_id || row.id} — current status: ${row.recon_status}`,
+      fields: [
+        { name: 'src_code', label: 'SRC code', type: 'select', options: SRC_CODES, required: true, default: row.src_code || 'UNCLAIMED' },
+        { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional context for this SRC assignment' },
+      ] },
+    action: async (v) => { const { data } = await api.post('/bbps/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); toast.success(`SRC assigned: ${data.src_code}`) },
+  })
   const runModal = async (v) => {
     setModalBusy(true)
     try { await modal.action(v); setModal(null); fetchRows(); refresh() }
@@ -221,10 +232,14 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
                   <td className="table-td">{r._side === 'internal' ? (r.is_refunded ? 'Yes' : '—') : '—'}</td>
                   <td className="table-td font-mono">{r.transaction_date}</td>
                   <td className="table-td font-mono text-primary">{r.match_id || '—'}</td>
-                  <td className="table-td"><span className={`px-2 py-0.5 rounded-full ${m.cls}`}>{m.label}</span></td>
+                  <td className="table-td"><div className="flex items-center gap-1 flex-wrap">
+                    <span className={`px-2 py-0.5 rounded-full ${m.cls}`}>{m.label}</span>
+                    {r.src_code && <span title={r.src_note || ''} className="px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-800 font-medium">{r.src_code}</span>}
+                  </div></td>
                   <td className="table-td"><div className="flex gap-1">
                     {r.match_id && <button title="Unmatch" onClick={() => unmatch(r.match_id)} className="p-1 rounded hover:bg-red-50 text-red-500"><Undo2 size={12} /></button>}
                     <button title="Override" onClick={() => override(r)} className="p-1 rounded hover:bg-amber-50 text-amber-600"><Tag size={12} /></button>
+                    {SRC_ASSIGNABLE.includes(r.recon_status) && <button title="Assign SRC" onClick={() => assignSrc(r)} className="p-1 rounded hover:bg-yellow-50 text-yellow-700"><Tags size={12} /></button>}
                   </div></td>
                 </tr>
               )

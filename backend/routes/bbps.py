@@ -116,10 +116,13 @@ def run_recon(db: Session = Depends(get_db), user=Depends(get_current_user)):
     bank_objs = db.query(BbpsBankTxn).all()
     if not int_objs and not bank_objs:
         raise HTTPException(400, "Nothing to reconcile — upload the dump and a statement first.")
+    # SRC-disposed rows are excluded from re-matching and left untouched (parity with
+    # core run_reconciliation) so a manual SRC tag survives a recon re-run.
     internal = [{"_db": o, "eko_trxn_id": o.eko_trxn_id, "amount": float(o.amount or 0),
-                 "is_refunded": bool(o.is_refunded), "status": o.status, "provider": o.provider} for o in int_objs]
+                 "is_refunded": bool(o.is_refunded), "status": o.status, "provider": o.provider}
+                for o in int_objs if o.recon_status != "src_assigned"]
     bank = [{"_db": o, "provider": o.provider, "client_ref": o.client_ref, "amount": float(o.amount or 0),
-             "status": o.status} for o in bank_objs]
+             "status": o.status} for o in bank_objs if o.recon_status != "src_assigned"]
     res = BB.reconcile(internal, bank)
     for d in res["internal_rows"]:
         o = d["_db"]; o.recon_status = d["recon_status"]; o.match_id = d.get("match_id", ""); o.match_note = (d.get("match_note") or "")[:300]
@@ -296,3 +299,64 @@ def override_status(body: OverrideIn, db: Session = Depends(get_db), user=Depend
                                               "note": body.note}, entity_id=body.id, prev=prev)
     db.commit()
     return {"message": "Status updated", "status": body.status}
+
+
+# ── SRC disposition (parity with core-ledger /recon/assign-src) ────────────────
+# Tags an unmatched BBPS row with a source code + note → recon_status='src_assigned'.
+# Same access level as override-status; preserved across re-runs by run_recon.
+class BbpsSRCIn(BaseModel):
+    id: str
+    side: str          # "bank" | "internal"
+    src_code: str
+    src_note: str = ""
+
+
+class BbpsBulkSRCIn(BaseModel):
+    ids: List[str]
+    side: str
+    src_code: str
+    src_note: str = ""
+
+
+@router.post("/assign-src")
+def assign_src(body: BbpsSRCIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Assign an SRC code + note to one BBPS row (operator/bank or internal)."""
+    from routes.recon import SRC_CODES
+    if body.src_code not in SRC_CODES:
+        raise HTTPException(400, f"Invalid SRC code. Allowed: {SRC_CODES}")
+    Model = BbpsBankTxn if body.side == "bank" else BbpsInternal
+    row = db.query(Model).filter(Model.id == body.id).first()
+    if not row:
+        raise HTTPException(404, "Row not found")
+    prev = {"recon_status": row.recon_status, "src_code": row.src_code, "match_id": row.match_id}
+    row.prev_recon_status = row.recon_status
+    row.recon_status = "src_assigned"
+    row.src_code = body.src_code
+    row.src_note = (body.src_note or "")[:500]
+    row.override_by = getattr(user, "username", None)
+    row.override_at = datetime.datetime.utcnow()
+    _audit(db, user, "bbps_assign_src",
+           {"id": body.id, "side": body.side, "src_code": body.src_code, "src_note": body.src_note},
+           entity_id=body.id, prev=prev)
+    db.commit()
+    return {"message": "SRC assigned", "id": body.id, "src_code": body.src_code}
+
+
+@router.post("/assign-src-bulk")
+def assign_src_bulk(body: BbpsBulkSRCIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Assign one SRC code + note to many BBPS rows in one shot."""
+    from routes.recon import SRC_CODES
+    if body.src_code not in SRC_CODES:
+        raise HTTPException(400, f"Invalid SRC code. Allowed: {SRC_CODES}")
+    Model = BbpsBankTxn if body.side == "bank" else BbpsInternal
+    rows = db.query(Model).filter(Model.id.in_(body.ids or [])).all()
+    for row in rows:
+        row.prev_recon_status = row.recon_status
+        row.recon_status = "src_assigned"
+        row.src_code = body.src_code
+        row.src_note = (body.src_note or "")[:500]
+        row.override_by = getattr(user, "username", None)
+        row.override_at = datetime.datetime.utcnow()
+    _audit(db, user, "bbps_assign_src_bulk", {"side": body.side, "src_code": body.src_code, "count": len(rows)})
+    db.commit()
+    return {"updated": len(rows), "src_code": body.src_code}

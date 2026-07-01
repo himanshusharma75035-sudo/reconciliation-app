@@ -640,7 +640,13 @@ export default function Reports() {
                   const params = new URLSearchParams({ process: p })
                   if (filters.to_date) params.append('recon_date', filters.to_date)
                   api.get(`/sbi/export?${params}`, { responseType: 'blob' })
-                    .then(r => _download(r.data, `${file}${filters.to_date ? '_' + filters.to_date : ''}.xlsx`))
+                    .then(r => {
+                      const used = r.headers['x-recon-date']
+                      if (used === 'none') { toast(`No ${p.toUpperCase()} data uploaded/reconciled yet`, { icon: 'ℹ️' }); return }
+                      _download(r.data, `${file}${used && used !== 'none' ? '_' + used : ''}.xlsx`)
+                      if (filters.to_date && used && used !== filters.to_date)
+                        toast(`No ${p.toUpperCase()} data for ${filters.to_date} — exported latest (${used})`, { icon: 'ℹ️' })
+                    })
                     .catch(() => toast.error('Export failed'))
                 }} className="btn-ghost flex items-center gap-2 justify-start">
                   <Download size={14} /> {label}
@@ -651,7 +657,13 @@ export default function Reports() {
               const params = new URLSearchParams({ process: 'all' })
               if (filters.to_date) params.append('recon_date', filters.to_date)
               api.get(`/sbi/export?${params}`, { responseType: 'blob' })
-                .then(r => _download(r.data, `sbi_all_processes${filters.to_date ? '_' + filters.to_date : ''}.xlsx`))
+                .then(r => {
+                  const used = r.headers['x-recon-date']
+                  _download(r.data, `sbi_all_processes${used && used !== 'none' ? '_' + used : ''}.xlsx`)
+                  if (used === 'none') toast('No SBI recon results yet — run P01–P04 first', { icon: 'ℹ️' })
+                  else if (filters.to_date && used && used !== filters.to_date)
+                    toast(`No data for ${filters.to_date} — exported latest (${used})`, { icon: 'ℹ️' })
+                })
                 .catch(() => toast.error('Export failed'))
             }} className="btn-primary flex items-center gap-2 mt-3">
               <Download size={14} /> Download All Processes (multi-sheet)

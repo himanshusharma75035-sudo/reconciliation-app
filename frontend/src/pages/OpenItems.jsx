@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Download, Search, RefreshCw, Tag, X, Trash2, Tags, Banknote, ArrowLeftRight, ShieldAlert } from 'lucide-react'
+import { Download, Search, RefreshCw, Tag, X, Trash2, Tags, Banknote, ArrowLeftRight, ShieldAlert, Pencil } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
 import SavedViews from '../components/SavedViews'
@@ -47,6 +47,14 @@ const SRC_CODES = [
   'UNCLAIMED','ADVANCE_CREDIT','BANK_CHARGES','TWICE_CREDITED',
   'INTERNAL_TXN','DELAYED_TXN','DUPLICATE','MISSING_TID','OTHER'
 ]
+
+// Statuses where an SRC tag is offered — open/exception rows across the core ledger
+// AND the module products (E-Value / BBPS), plus src_assigned itself (to re-tag).
+const SRC_ELIGIBLE = new Set([
+  'unmatched', 'amount_mismatch', 'src_assigned',                        // core
+  'unmatched_bank', 'unmatched_load', 'twice_credit', 'wrong_amount',    // E-Value
+  'unmatched_internal', 'failed_pending_refund', 'refunded_but_success', // BBPS
+])
 
 const COLS = 17  // checkbox + 15 data cols (incl. Description, CSP) + actions
 
@@ -103,6 +111,9 @@ export default function OpenItems() {
   const [bulkOverrideOpen, setBulkOverrideOpen] = useState(false)
   const [bulkOverrideForm, setBulkOverrideForm] = useState({ new_status: 'unmatched', remark: '' })
   const [bulkOverrideSaving, setBulkOverrideSaving] = useState(false)
+  const [editIdModal, setEditIdModal]     = useState(null)
+  const [editForm, setEditForm]           = useState({ eko_tid: '', tracking_number: '', utr_number: '', remark: '' })
+  const [editSaving, setEditSaving]       = useState(false)
 
   // ── Derived values (no hooks below) ─────────────────────────────────────────
   // permissions may be stored as an object or a JSON string — handle both safely
@@ -159,27 +170,77 @@ export default function OpenItems() {
   }
 
   // ── Single SRC assign ─────────────────────────────────────────────────────
+  // Module rows (E-Value / BBPS) live in their own tables, so dispatch to the
+  // product's assign-src endpoint (keyed by id + side); core rows use /recon.
   const handleAssignSrc = async () => {
     if (!srcForm.src_code) return toast.error('Select a SRC code')
     try {
-      await api.post('/recon/assign-src', { transaction_id: srcModal.id, ...srcForm })
+      const it = srcModal
+      if (it.partner === 'evalue' || it.partner === 'bbps') {
+        await api.post(`/${it.partner}/assign-src`, { id: it.id, side: it.side, ...srcForm })
+      } else {
+        await api.post('/recon/assign-src', { transaction_id: it.id, ...srcForm })
+      }
       toast.success('SRC assigned')
       setSrcModal(null)
       load(page)
     } catch { toast.error('Failed') }
   }
 
+  // ── Edit identifiers (TID / Tracking-RRN / UTR) — core ledger, un-matched only ──
+  // Override-gated; the backend blocks matched rows and audits every change old→new.
+  const MODULE_PARTNERS = new Set(['evalue', 'bbps'])
+  const ID_LOCKED = new Set(['matched', 'manual_matched', 'interbank_matched', 'amount_mismatch'])
+  const canEditIds = (it) => hasOverride && !MODULE_PARTNERS.has(it.partner) && !ID_LOCKED.has(it.recon_status) && !it.match_id
+  const handleEditIds = async () => {
+    const it = editIdModal
+    if ((editForm.remark || '').trim().length < 5) return toast.error('Remark (≥5 chars) required')
+    const body = { remark: editForm.remark.trim() }
+    for (const f of ['eko_tid', 'tracking_number', 'utr_number'])
+      if ((editForm[f] ?? '') !== (it[f] ?? '')) body[f] = editForm[f]
+    if (Object.keys(body).length === 1) return toast.error('No identifier changed')
+    setEditSaving(true)
+    try {
+      await api.patch(`/recon/transaction/${it.id}/identifiers`, body)
+      toast.success('Identifiers updated')
+      setEditIdModal(null); load(page)
+    } catch (e) { toast.error(e.response?.data?.detail || 'Update failed') }
+    finally { setEditSaving(false) }
+  }
+
   // ── Bulk SRC assign ───────────────────────────────────────────────────────
+  // A selection can span products; dispatch each row to its product's bulk
+  // endpoint (module bulk is per-side, so split module ids by side).
   const handleBulkSrc = async () => {
     if (!bulkForm.src_code) return toast.error('Select a SRC code')
     setBulkSaving(true)
     try {
-      const { data } = await api.post('/recon/assign-src-bulk', {
-        transaction_ids: [...selected],
-        src_code:        bulkForm.src_code,
-        src_note:        bulkForm.src_note,
-      })
-      toast.success(`SRC assigned to ${data.updated} transaction(s)`)
+      const byProduct = { core: [], evalue: [], bbps: [] }
+      const sideById = {}
+      for (const it of items) {
+        if (!selected.has(it.id)) continue
+        const p = (it.partner === 'evalue' || it.partner === 'bbps') ? it.partner : 'core'
+        byProduct[p].push(it.id); sideById[it.id] = it.side
+      }
+      let updated = 0
+      if (byProduct.core.length) {
+        const { data } = await api.post('/recon/assign-src-bulk', {
+          transaction_ids: byProduct.core, src_code: bulkForm.src_code, src_note: bulkForm.src_note,
+        })
+        updated += data.updated || 0
+      }
+      for (const prod of ['evalue', 'bbps']) {
+        if (!byProduct[prod].length) continue
+        const bySide = {}
+        for (const id of byProduct[prod]) { const s = sideById[id]; (bySide[s] = bySide[s] || []).push(id) }
+        for (const [side, ids] of Object.entries(bySide)) {
+          const { data } = await api.post(`/${prod}/assign-src-bulk`, {
+            ids, side, src_code: bulkForm.src_code, src_note: bulkForm.src_note,
+          })
+          updated += data.updated || 0
+        }
+      }
+      toast.success(`SRC assigned to ${updated} item(s)`)
       setBulkSrcOpen(false)
       setBulkForm({ src_code: '', src_note: '' })
       load(page)
@@ -527,12 +588,20 @@ export default function OpenItems() {
                     </td>
                     <td className="table-td">
                       <div className="flex flex-col gap-1">
-                        {(item.recon_status === 'unmatched' || item.recon_status === 'amount_mismatch') && (
+                        {SRC_ELIGIBLE.has(item.recon_status) && (
                           <button
                             onClick={() => { setSrcModal(item); setSrcForm({ src_code: item.src_code || '', src_note: item.src_note || '' }) }}
                             className="text-xs text-primary hover:underline flex items-center gap-1"
                           >
                             <Tag size={12} /> Assign SRC
+                          </button>
+                        )}
+                        {canEditIds(item) && (
+                          <button
+                            onClick={() => { setEditIdModal(item); setEditForm({ eko_tid: item.eko_tid || '', tracking_number: item.tracking_number || '', utr_number: item.utr_number || '', remark: '' }) }}
+                            className="text-xs text-gray-600 hover:underline flex items-center gap-1"
+                          >
+                            <Pencil size={12} /> Edit IDs
                           </button>
                         )}
                         {item.side === 'bank' && item.recon_status === 'unmatched' && (
@@ -636,6 +705,47 @@ export default function OpenItems() {
             <div className="flex gap-3 mt-4">
               <button onClick={() => setSrcModal(null)} className="btn-ghost flex-1">Cancel</button>
               <button onClick={handleAssignSrc} className="btn-primary flex-1">Assign SRC</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Identifiers Modal */}
+      {editIdModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-gray-800 flex items-center gap-2">
+                <Pencil size={16} className="text-gray-500" /> Edit Identifiers
+              </h3>
+              <button onClick={() => setEditIdModal(null)} className="text-gray-400 hover:text-gray-600"><X size={18}/></button>
+            </div>
+            <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 text-xs text-gray-600 mb-4">
+              <span className="capitalize">{editIdModal.partner}</span> · {editIdModal.side} · ₹{editIdModal.amount?.toLocaleString('en-IN') || '—'} · <span className="font-medium">{editIdModal.recon_status}</span>
+              <div className="mt-1 text-[11px] text-gray-400">Editable only while un-matched — the change is audited (old → new).</div>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-medium text-gray-500 block mb-1">TID <span className="text-gray-400">(eko_tid)</span></label>
+                <input className="input font-mono text-sm" value={editForm.eko_tid} onChange={e => setEditForm({...editForm, eko_tid: e.target.value})} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-500 block mb-1">Tracking / RRN <span className="text-gray-400">(tracking_number)</span></label>
+                <input className="input font-mono text-sm" value={editForm.tracking_number} onChange={e => setEditForm({...editForm, tracking_number: e.target.value})} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-500 block mb-1">UTR <span className="text-gray-400">(utr_number)</span></label>
+                <input className="input font-mono text-sm" value={editForm.utr_number} onChange={e => setEditForm({...editForm, utr_number: e.target.value})} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-500 block mb-1">Remark <span className="text-gray-400">(required, ≥5 chars)</span></label>
+                <textarea className="input" rows={2} placeholder="Why the correction? (kept in the audit log)"
+                  value={editForm.remark} onChange={e => setEditForm({...editForm, remark: e.target.value})} />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-4">
+              <button onClick={() => setEditIdModal(null)} className="btn-ghost flex-1">Cancel</button>
+              <button onClick={handleEditIds} disabled={editSaving} className="btn-primary flex-1">{editSaving ? 'Saving…' : 'Save changes'}</button>
             </div>
           </div>
         </div>

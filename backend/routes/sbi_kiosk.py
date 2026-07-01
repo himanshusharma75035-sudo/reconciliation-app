@@ -41,7 +41,7 @@ from models.database import (
     SBIBankTransaction, SBITxnReport, SBIKOLimits,
     SBIKOCashHolding, SBILimitFailure, SBICSPMaster,
     SBIP01Result, SBIP02Result, SBIP03Result, SBIP04Result,
-    SBIManualMatch,
+    SBIManualMatch, SBISrcAssignment,
 )
 from core.auth import get_current_user, require_permission
 
@@ -965,7 +965,70 @@ def get_p01_results(
         grand["bank_settled"]     += r.bank_settled or 0
         grand["difference"]       += r.difference or 0
         data.append({k: getattr(r, k) for k in ('id','ko_id','wallet_withdrawn','bank_settled','difference','status','deduct_date','bank_txn_date','notes','recon_date')})
+    data = _apply_src_assignments(db, "p01", recon_date, data)
     return {"rows": data, "grand": {k: round(v, 2) for k, v in grand.items()}, "count": len(data)}
+
+
+@router.get("/p01/lines")
+def get_p01_lines(
+    recon_date: str,
+    upload_date: Optional[str] = None,
+    ko_id: Optional[str] = None,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    P01 line-level (bank <-> data) drill — the P02-style view for P01: the individual
+    EKOSETTLEMENT bank lines and KO-withdrawal lines that make up each KO's P01 totals.
+    Source rows are keyed by upload_date (defaults to recon_date — the common same-day
+    case; override if the run used a different upload_date; see behaviour-contract #17
+    on the SBI upload_date coupling).
+    """
+    ud = upload_date or recon_date
+    p01q = db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date)
+    if ko_id:  p01q = p01q.filter(SBIP01Result.ko_id.like(f"%{ko_id}%"))
+    if status: p01q = p01q.filter(SBIP01Result.status == status)
+    p01 = {r.ko_id: r for r in p01q.all()}
+    wanted = set(p01.keys())
+
+    groups = {}
+    def _g(ko):
+        if ko not in groups:
+            r = p01.get(ko)
+            groups[ko] = {
+                "ko_id": ko,
+                "status": r.status if r else None,
+                "wallet_withdrawn": r.wallet_withdrawn if r else 0.0,
+                "bank_settled": r.bank_settled if r else 0.0,
+                "difference": r.difference if r else 0.0,
+                "deduct_date": r.deduct_date if r else "",
+                "bank_txn_date": r.bank_txn_date if r else "",
+                "withdrawals": [], "settlements": [],
+            }
+        return groups[ko]
+
+    for w in db.query(SBIKOLimits).filter(
+            SBIKOLimits.txn_type == "KO Withdrawal", SBIKOLimits.upload_date == ud).all():
+        if wanted and w.ko_id not in wanted:
+            continue
+        _g(w.ko_id)["withdrawals"].append({
+            "amount": w.amount, "txn_date": w.txn_date, "datetime": w.txn_datetime,
+            "configured_by": w.limit_configured_by})
+    for s in db.query(SBIBankTransaction).filter(
+            SBIBankTransaction.is_settlement == True, SBIBankTransaction.upload_date == ud).all():
+        if not s.ko_id or (wanted and s.ko_id not in wanted):
+            continue
+        _g(s.ko_id)["settlements"].append({
+            "amount": s.debit, "txn_date": s.txn_date, "deduct_date": s.deduct_date,
+            "description": s.description, "ref": s.ref_number})
+
+    for ko in wanted:               # KOs with a P01 row but no source lines still show
+        _g(ko)
+
+    rows = sorted(groups.values(), key=lambda x: x["ko_id"] or "")
+    rows = _apply_src_assignments(db, "p01", recon_date, rows)   # KO-level SRC overlay
+    return {"recon_date": recon_date, "upload_date": ud, "kos": rows, "count": len(rows)}
 
 
 @router.get("/p02/results")
@@ -1000,14 +1063,39 @@ def get_p02_results(
     rows = q.order_by(SBIP02Result.reference_number).offset((page-1)*page_size).limit(page_size).all()
     # Bank-statement narration (read-only) for this page's rows, via the
     # SBIP02Result → SBIBankTransaction FK. One batched lookup, no N+1.
+    # Read-only enrichment for the paired view (purely additive — no match-logic change):
+    # the bank line's date + narration (via bank_txn_id) and the matched transaction
+    # report's date/journal/status/ref (via txn_report_id). Two batched lookups, no N+1.
     _bt_ids = [r.bank_txn_id for r in rows if r.bank_txn_id]
-    _desc_map = {}
+    _bank_map = {}
     if _bt_ids:
-        _desc_map = dict(db.query(SBIBankTransaction.id, SBIBankTransaction.description)
-                           .filter(SBIBankTransaction.id.in_(_bt_ids)).all())
-    data = [{**{k: getattr(r, k) for k in ('id','reference_number','ko_id','bank_amount','bank_type','report_amount','report_txn_type','match_status','reversal_type','success_status','notes','recon_date')},
-             'bank_description': _desc_map.get(r.bank_txn_id) or ''} for r in rows]
+        for _bid, _bdesc, _bdate in db.query(
+            SBIBankTransaction.id, SBIBankTransaction.description, SBIBankTransaction.txn_date
+        ).filter(SBIBankTransaction.id.in_(_bt_ids)).all():
+            _bank_map[_bid] = (_bdesc, _bdate)
+    _tr_ids = [r.txn_report_id for r in rows if r.txn_report_id]
+    _rep_map = {}
+    if _tr_ids:
+        for _rid, _rdate, _rjrnl, _rstat, _rref in db.query(
+            SBITxnReport.id, SBITxnReport.txn_date, SBITxnReport.journal_number,
+            SBITxnReport.status, SBITxnReport.reference_number
+        ).filter(SBITxnReport.id.in_(_tr_ids)).all():
+            _rep_map[_rid] = (_rdate, _rjrnl, _rstat, _rref)
+    data = []
+    for r in rows:
+        _b = _bank_map.get(r.bank_txn_id) or ('', '')
+        _rp = _rep_map.get(r.txn_report_id) or ('', '', '', '')
+        data.append({
+            **{k: getattr(r, k) for k in ('id','reference_number','ko_id','bank_amount','bank_type','report_amount','report_txn_type','match_status','reversal_type','success_status','notes','recon_date')},
+            'bank_description': _b[0] or '',
+            'bank_txn_date':   _b[1] or '',
+            'report_date':     _rp[0] or '',
+            'report_journal':  _rp[1] or '',
+            'report_status':   _rp[2] or '',
+            'report_ref':      _rp[3] or '',
+        })
     data = _apply_manual_matches(db, "p02", recon_date, data)
+    data = _apply_src_assignments(db, "p02", recon_date, data)
     _mmq = db.query(SBIManualMatch).filter(SBIManualMatch.process == "p02")
     if recon_date: _mmq = _mmq.filter(SBIManualMatch.recon_date == recon_date)
     return {"rows": data, "summary": summary, "manual_matched_count": _mmq.count(),
@@ -1043,6 +1131,7 @@ def get_p03_results(
     rows = q.order_by(SBIP03Result.csp_code).offset((page-1)*page_size).limit(page_size).all()
     data = [{k: getattr(r, k) for k in ('id','csp_code','mode','ref_number','txn_amount','txn_date','bank_credit_date','bank_amount','match_status','date_shift','match_priority','notes','recon_date')} for r in rows]
     data = _apply_manual_matches(db, "p03", recon_date, data)
+    data = _apply_src_assignments(db, "p03", recon_date, data)
     _mmq = db.query(SBIManualMatch).filter(SBIManualMatch.process == "p03")
     if recon_date: _mmq = _mmq.filter(SBIManualMatch.recon_date == recon_date)
     return {"rows": data, "summary": summary, "manual_matched_count": _mmq.count(),
@@ -1066,7 +1155,161 @@ def get_p04_results(
     for r in rows:
         summary[r.action_required] = summary.get(r.action_required, 0) + 1
     data = [{k: getattr(r, k) for k in ('id','csp_code','failed_amount','closing_balance','expected_balance','difference','action_required','action_amount','action_done','notes','recon_date')} for r in rows]
+    data = _apply_src_assignments(db, "p04", recon_date, data)
     return {"rows": data, "summary": summary, "count": len(data)}
+
+
+# ── Unified ledger — every bank & data entry + how each reconciled (P01/P02/P03) ──
+
+_P01_UNIFIED_STATUS = {"CREDITED": "Matched", "PENDING": "Pending",
+                       "PARTIAL": "Partial", "EXCESS": "Excess"}
+
+def _r(n) -> str:
+    try:
+        return f"₹{float(n or 0):,.0f}"
+    except (TypeError, ValueError):
+        return "₹0"
+
+
+@router.get("/unified")
+def get_unified(
+    recon_date: str,
+    upload_date: Optional[str] = None,
+    side: Optional[str] = None,        # bank | data
+    status: Optional[str] = None,      # Matched | Unmatched | Reversal | ...
+    process: Optional[str] = None,     # p01 | p02 | p03
+    search: Optional[str] = None,      # ref / KO / CSP
+    page: int = 1,
+    page_size: int = 100,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Unified SBI ledger: EVERY source entry — bank statement lines AND data lines
+    (transaction reports, KO withdrawals) — each tagged with its reconciliation
+    status, which process (P01/P02/P03) reconciled it, and its counterpart. Built
+    read-only from the P0x result tables; SRC + manual-match act on the mapped
+    result row via the existing endpoints (result_id + result_process on each row).
+    Scoped to one date (sources by upload_date≈recon_date; behaviour-contract #17).
+    P03 has no source FK, so P03 links are best-effort on CSP+amount.
+    """
+    ud = upload_date or recon_date
+
+    p01_by_ko = {x.ko_id: x for x in db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date).all()}
+    p02_by_bank, p02_by_report = {}, {}
+    for x in db.query(SBIP02Result).filter(SBIP02Result.recon_date == recon_date).all():
+        if x.bank_txn_id:   p02_by_bank[x.bank_txn_id] = x
+        if x.txn_report_id: p02_by_report[x.txn_report_id] = x
+    # P03 has no source FK — link best-effort by CSP + amount. p03_matched (Matched only)
+    # drives the "also in P03" overlay on bank credits; p03_by_txn (all statuses, money-out
+    # side, keyed incl. ref) maps transaction-report lines to their P03 row for SRC/actions.
+    p03_matched, p03_by_txn = {}, {}
+    for x in db.query(SBIP03Result).filter(SBIP03Result.recon_date == recon_date).all():
+        if not x.csp_code:
+            continue
+        if x.match_status == "Matched":
+            a = x.txn_amount if x.txn_amount is not None else x.bank_amount
+            if a is not None:
+                p03_matched[(x.csp_code, round(float(a), 2))] = x
+        if x.txn_amount is not None:
+            p03_by_txn[(x.csp_code, round(float(x.txn_amount), 2), x.ref_number or "")] = x
+
+    entries = []
+
+    def _new(sidev, src, row_id, ref, ko, amt, date, drcr, narration):
+        return {"side": sidev, "source": src, "id": row_id, "ref": ref or "", "ko_csp": ko or "",
+                "amount": amt, "date": date or "", "drcr": drcr, "narration": narration or "",
+                "status": "Not reconciled", "process": "", "counterpart": None, "also_p03": False,
+                "result_id": None, "result_process": None, "src_code": None, "src_note": None,
+                "_result": None}
+
+    # ---- bank side ----
+    for b in db.query(SBIBankTransaction).filter(SBIBankTransaction.upload_date == ud).all():
+        drcr = "DR" if (b.debit or 0) > 0 else ("CR" if (b.credit or 0) > 0 else "")
+        amt = (b.debit or 0) if (b.debit or 0) > 0 else (b.credit or 0)
+        if b.is_settlement:
+            e = _new("bank", "Bank Settlement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description)
+            r = p01_by_ko.get(b.ko_id)
+            if r:
+                e.update(status=_P01_UNIFIED_STATUS.get(r.status, r.status), process="P01",
+                         counterpart=f"Wallet out {_r(r.wallet_withdrawn)}", result_id=r.id,
+                         result_process="p01", _result=r)
+        else:
+            e = _new("bank", "Bank Statement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description)
+            r = p02_by_bank.get(b.id)
+            if r:
+                e.update(status=r.match_status, process="P02", result_id=r.id, result_process="p02", _result=r,
+                         counterpart=(f"Report {_r(r.report_amount)} · {r.report_txn_type}" if r.report_amount is not None else None))
+            if drcr == "CR" and (b.ko_id, round(float(amt), 2)) in p03_matched:
+                e["also_p03"] = True
+                if e["status"] in ("Unmatched", "Not reconciled"):
+                    pr = p03_matched[(b.ko_id, round(float(amt), 2))]
+                    e.update(status="Matched", process="P03", result_id=pr.id, result_process="p03", _result=pr,
+                             counterpart=f"Txn out {_r(pr.txn_amount)}")
+        entries.append(e)
+
+    # ---- data side: transaction reports ----
+    for t in db.query(SBITxnReport).filter(SBITxnReport.upload_date == ud).all():
+        amt = t.amount or 0
+        e = _new("data", "Txn Report", t.id, t.reference_number, t.ko_id, amt, t.txn_date, "", t.txn_type)
+        e["status"] = "Unmatched"
+        r = p02_by_report.get(t.id)
+        if r:
+            e.update(status=r.match_status, process="P02", result_id=r.id, result_process="p02", _result=r,
+                     counterpart=f"Bank {r.bank_type} {_r(r.bank_amount)}")
+        else:
+            pr = p03_by_txn.get((t.ko_id, round(float(amt), 2), t.reference_number or ""))
+            if pr:
+                st = {"Unmatched_TxnReport": "Unmatched", "Unmatched_Bank": "Unmatched"}.get(pr.match_status, pr.match_status)
+                e.update(status=st, process="P03", also_p03=(pr.match_status == "Matched"),
+                         result_id=pr.id, result_process="p03", _result=pr,
+                         counterpart=(f"Bank credit {_r(pr.bank_amount)}" if pr.bank_amount is not None else None))
+        entries.append(e)
+
+    # ---- data side: KO withdrawals ----
+    for w in db.query(SBIKOLimits).filter(SBIKOLimits.txn_type == "KO Withdrawal",
+                                          SBIKOLimits.upload_date == ud).all():
+        e = _new("data", "KO Withdrawal", w.id, "", w.ko_id, w.amount or 0, w.txn_date, "", "KO Withdrawal")
+        r = p01_by_ko.get(w.ko_id)
+        if r:
+            e.update(status=_P01_UNIFIED_STATUS.get(r.status, r.status), process="P01",
+                     counterpart=f"Bank settled {_r(r.bank_settled)}", result_id=r.id,
+                     result_process="p01", _result=r)
+        entries.append(e)
+
+    # ---- filters ----
+    if side:    entries = [e for e in entries if e["side"] == side]
+    if process: entries = [e for e in entries if (e["process"] or "").lower() == process.lower()]
+    if status:  entries = [e for e in entries if (e["status"] or "").lower() == status.lower()]
+    if search:
+        s = search.lower()
+        entries = [e for e in entries if s in (e["ref"] or "").lower() or s in (e["ko_csp"] or "").lower()]
+
+    from collections import Counter
+    status_counts = dict(Counter(e["status"] for e in entries))
+    side_counts   = dict(Counter(e["side"] for e in entries))
+    total = len(entries)
+
+    entries.sort(key=lambda e: (e["ko_csp"] or "", e["ref"] or "", e["side"]))
+    page_rows = entries[(page - 1) * page_size: page * page_size]
+
+    # SRC-tag overlay for the page rows, from the mapped result's stable key
+    sa = {(a.process, a.match_key): a for a in db.query(SBISrcAssignment).filter(
+          SBISrcAssignment.recon_date == recon_date).all()}
+    for e in page_rows:
+        r = e.pop("_result", None)
+        if r is not None and e["result_process"]:
+            rd = {c.name: getattr(r, c.name) for c in r.__table__.columns}
+            key = _src_key(e["result_process"], rd)
+            a = sa.get((e["result_process"], key)) if key else None
+            if a:
+                e["src_code"], e["src_note"] = a.src_code, a.src_note
+    for e in entries:                # drop the non-serialisable ref on any non-page rows
+        e.pop("_result", None)
+
+    return {"rows": page_rows, "total": total, "page": page, "page_size": page_size,
+            "status_counts": status_counts, "side_counts": side_counts,
+            "recon_date": recon_date, "upload_date": ud}
 
 
 # ── Export ─────────────────────────────────────────────────────────────────────
@@ -1146,12 +1389,34 @@ def export_sbi(
     which = list(_SBI_EXPORTS) if process == "all" else [process]
     if any(p not in _SBI_EXPORTS for p in which):
         raise HTTPException(status_code=400, detail="process must be one of p01, p02, p03, p04, all")
-    output = _build_sbi_export(db, which, recon_date, match_status)
-    fname = f"sbi_{process}_{recon_date or 'all'}.xlsx"
+    # Never hand back a silently-blank file: if a recon_date was requested but has no
+    # rows for any requested process (wrong date, or recon not run that day), fall back
+    # to the latest date that DOES have data. `used_date` is echoed in a header so the
+    # UI can tell the operator which date was actually exported (or that none exists).
+    used_date = recon_date
+    if recon_date:
+        has_here = any(
+            db.query(_SBI_EXPORTS[p][1].id).filter(_SBI_EXPORTS[p][1].recon_date == recon_date).first()
+            for p in which
+        )
+        if not has_here:
+            latest = None
+            for p in which:
+                m = _SBI_EXPORTS[p][1]
+                d = db.query(func.max(m.recon_date)).filter(m.recon_date.isnot(None)).scalar()
+                if d and (latest is None or d > latest):
+                    latest = d
+            used_date = latest  # None only when the process has no data on any date
+    output = _build_sbi_export(db, which, used_date, match_status)
+    fname = f"sbi_{process}_{used_date or 'all'}.xlsx"
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "X-Recon-Date": str(used_date or "none"),
+            "Access-Control-Expose-Headers": "X-Recon-Date",
+        },
     )
 
 
@@ -1192,6 +1457,42 @@ def _apply_manual_matches(db, process: str, recon_date, rows: list) -> list:
             r["manual_remark"] = m.remark
             r["manual_counterpart"] = m.counterpart_ref
             r["manual_match_id"] = m.id
+    return rows
+
+
+def _src_key(process: str, row: dict):
+    """Stable business key for an SRC tag (survives delete-and-recreate, per #17)."""
+    p = (process or "").lower()
+    if p == "p01":
+        return row.get("ko_id") or None
+    if p == "p02":
+        ref = row.get("reference_number")
+        return f"{ref}|{row.get('bank_type') or ''}" if ref else None
+    if p == "p03":
+        csp, ref = row.get("csp_code"), row.get("ref_number")
+        return f"{csp or ''}|{ref or ''}" if (csp or ref) else None
+    if p == "p04":
+        return row.get("csp_code") or None
+    return None
+
+
+def _apply_src_assignments(db, process: str, recon_date, rows: list) -> list:
+    """Overlay persisted SRC tags onto serialized result dicts (read-time).
+
+    Adds src_code/src_note to every row (None when untagged). Survives re-runs because
+    the tag lives in SBISrcAssignment keyed by the stable business key, not the row id."""
+    p = (process or "").lower()
+    sa = {}
+    if p in ("p01", "p02", "p03", "p04") and rows:
+        q = db.query(SBISrcAssignment).filter(SBISrcAssignment.process == p)
+        if recon_date:
+            q = q.filter(SBISrcAssignment.recon_date == recon_date)
+        sa = {(a.recon_date, a.match_key): a for a in q.all()}
+    for r in rows:
+        key = _src_key(p, r)
+        a = sa.get((r.get("recon_date"), key)) if key else None
+        r["src_code"] = a.src_code if a else None
+        r["src_note"] = a.src_note if a else None
     return rows
 
 
@@ -1287,6 +1588,85 @@ def list_manual_matches(
                       "match_key": m.match_key, "counterpart_ref": m.counterpart_ref,
                       "remark": m.remark, "by": m.created_by, "at": str(m.created_at)} for m in rows],
             "count": len(rows)}
+
+
+# ── SRC disposition (overlay; parity with core-ledger /recon/assign-src) ───────
+class SBISRCIn(BaseModel):
+    process: str       # p01 | p02 | p03 | p04
+    result_id: str
+    src_code: str
+    src_note: str = ""
+
+
+@router.post("/assign-src")
+def assign_src(
+    body: SBISRCIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("src_assign")),
+):
+    """Tag an SBI result row with an SRC code + note. Persists across re-runs (overlay)."""
+    from routes.recon import SRC_CODES
+    p = (body.process or "").lower()
+    model = {"p01": SBIP01Result, "p02": SBIP02Result, "p03": SBIP03Result, "p04": SBIP04Result}.get(p)
+    if not model:
+        raise HTTPException(status_code=400, detail="process must be one of p01..p04")
+    if body.src_code not in SRC_CODES:
+        raise HTTPException(status_code=400, detail=f"Invalid SRC code. Allowed: {SRC_CODES}")
+    row = db.query(model).filter(model.id == body.result_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Result row not found")
+    row_dict = {c.name: getattr(row, c.name) for c in model.__table__.columns}
+    key = _src_key(p, row_dict)
+    if not key:
+        raise HTTPException(status_code=400, detail="Row has no stable key to tag")
+    existing = db.query(SBISrcAssignment).filter(
+        SBISrcAssignment.recon_date == row.recon_date,
+        SBISrcAssignment.process == p,
+        SBISrcAssignment.match_key == key,
+    ).first()
+    if existing:
+        existing.src_code = body.src_code
+        existing.src_note = (body.src_note or "")[:500]
+        existing.created_by = current_user.username
+        sa = existing
+    else:
+        sa = SBISrcAssignment(recon_date=row.recon_date, process=p, match_key=key,
+                              src_code=body.src_code, src_note=(body.src_note or "")[:500],
+                              created_by=current_user.username)
+        db.add(sa)
+    try:
+        db.add(AuditLog(user_id=current_user.id, username=current_user.username,
+                        action="sbi_assign_src", action_type="human",
+                        entity_type="sbi", entity_id=sa.id,
+                        detail=json.dumps({"process": p, "recon_date": row.recon_date,
+                                           "match_key": key, "src_code": body.src_code,
+                                           "src_note": body.src_note})))
+    except Exception:
+        pass
+    db.commit()
+    return {"id": sa.id, "src_code": body.src_code, "match_key": key}
+
+
+@router.delete("/assign-src/{sa_id}")
+def delete_src_assignment(
+    sa_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("src_assign")),
+):
+    """Remove an SBI SRC tag (revert the row to untagged)."""
+    sa = db.query(SBISrcAssignment).filter(SBISrcAssignment.id == sa_id).first()
+    if not sa:
+        raise HTTPException(status_code=404, detail="SRC assignment not found")
+    db.delete(sa)
+    try:
+        db.add(AuditLog(user_id=current_user.id, username=current_user.username,
+                        action="sbi_unassign_src", action_type="human",
+                        entity_type="sbi", entity_id=sa_id,
+                        detail=json.dumps({"process": sa.process, "match_key": sa.match_key})))
+    except Exception:
+        pass
+    db.commit()
+    return {"deleted": sa_id}
 
 
 @router.get("/summary")

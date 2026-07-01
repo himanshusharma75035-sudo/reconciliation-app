@@ -784,15 +784,22 @@ def manual_match(bank_txn_id: str, internal_txn_id: str, db: Session) -> Dict:
     d = bank_txn.recon_date or ""
     seq = _next_seq(p, d, db)
     mid = _make_match_id(p, d, seq)
-    bank_txn.recon_status    = ReconStatus.manual_matched
+    # Amount guard — parity with the auto-matcher (run_reconciliation): within ±₹1 it's
+    # a clean match; beyond that the pair is still LINKED (shared match_id) but flagged
+    # `amount_mismatch` so a real ₹ gap can never hide behind a "Manual Matched" label.
+    amt_diff = abs(float(bank_txn.amount or 0) - float(internal_txn.amount or 0))
+    is_mismatch = amt_diff > 1.0
+    final_status = ReconStatus.amount_mismatch if is_mismatch else ReconStatus.manual_matched
+    bank_txn.recon_status    = final_status
     bank_txn.matched_with_id = internal_txn_id
     bank_txn.match_id        = mid
-    internal_txn.recon_status    = ReconStatus.manual_matched
+    internal_txn.recon_status    = final_status
     internal_txn.matched_with_id = bank_txn_id
     internal_txn.match_id        = mid
     _record_rule_suggestion(db, bank_txn, internal_txn)   # Tier 2 rule learning
     db.commit()
-    return {"status": "manual_matched", "bank_id": bank_txn_id, "internal_id": internal_txn_id, "match_id": mid}
+    return {"status": final_status.value, "bank_id": bank_txn_id, "internal_id": internal_txn_id,
+            "match_id": mid, "amount_diff": round(amt_diff, 2), "amount_mismatch": is_mismatch}
 
 
 def _record_rule_suggestion(db: Session, bank_txn, internal_txn):

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import {
   Wallet, Upload, Play, Download, RefreshCw, Building2, FileSpreadsheet,
   CheckCircle2, AlertTriangle, Banknote, Copy, FileWarning, GitMerge, Link2,
-  Undo2, Tag, X, Clock, Coins,
+  Undo2, Tag, X, Clock, Coins, Plus, Trash2, Search, ArrowRight,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
@@ -23,9 +23,12 @@ const STATUS_META = {
   written_off:      { label: 'Written Off',      cls: 'bg-gray-200 text-gray-600' },
   adhoc_settlement: { label: 'Adhoc',            cls: 'bg-purple-50 text-purple-700' },
   under_review:     { label: 'Under Review',     cls: 'bg-yellow-50 text-yellow-700' },
+  src_assigned:     { label: 'SRC Assigned',     cls: 'bg-yellow-50 text-yellow-700' },
   ignore:           { label: 'Ignored',          cls: 'bg-gray-100 text-gray-500' },
 }
 const OVERRIDE_STATUSES = ['written_off', 'twice_credit', 'wrong_amount', 'adhoc_settlement', 'under_review', 'ignore']
+const SRC_CODES = ['UNCLAIMED', 'ADVANCE_CREDIT', 'BANK_CHARGES', 'TWICE_CREDITED', 'INTERNAL_TXN', 'DELAYED_TXN', 'DUPLICATE', 'MISSING_TID', 'OTHER']
+const SRC_STATUSES = ['unmatched_bank', 'unmatched_load', 'twice_credit', 'wrong_amount', 'src_assigned']
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 const isMatched = s => ['matched_online', 'matched_cash', 'matched_manual', 'interbank_matched'].includes(s)
 
@@ -82,6 +85,7 @@ export default function Evalue() {
   const TABS = [
     { key: 'upload',   label: 'Upload', icon: Upload },
     { key: 'recon',    label: 'Reconciliation', icon: FileSpreadsheet },
+    { key: 'manual',   label: 'Manual Match', icon: GitMerge },
     { key: 'ageing',   label: 'Ageing', icon: Clock },
     { key: 'recovery', label: 'Recovery', icon: Coins },
     { key: 'reports',  label: 'Reports', icon: Download },
@@ -145,6 +149,7 @@ export default function Evalue() {
       )}
 
       {tab === 'recon'     && <ResultsView summary={summary} busy={busy} runOne={runOne} refresh={loadSummary} dates={dates} setDates={setDates} />}
+      {tab === 'manual'    && <ManualMatchView />}
       {tab === 'ageing'    && <AgeingView summary={summary} />}
       {tab === 'recovery'  && <RecoveryView />}
       {tab === 'reports'   && <ReportsView banks={banks} />}
@@ -202,6 +207,15 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
         { name: 'note', label: 'Reason / remark', required: true, minLength: 5, placeholder: 'Required — recorded in the audit trail' },
       ] },
     action: async (v) => { await api.post('/evalue/override-status', { id: row.id, side: row._side, status: v.status, note: v.note }); toast.success('Status updated') },
+  })
+  const assignSrc = (row) => setModal({
+    config: { title: 'Assign SRC', confirmLabel: 'Assign',
+      description: `${row.eko_trxn_id || row.utr || row.id} — current status: ${row.recon_status}${row.src_code ? ` · SRC: ${row.src_code}` : ''}`,
+      fields: [
+        { name: 'src_code', label: 'SRC code', type: 'select', options: SRC_CODES, required: true, default: row.src_code || 'UNCLAIMED' },
+        { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional — recorded with the SRC', default: row.src_note || '' },
+      ] },
+    action: async (v) => { const { data } = await api.post('/evalue/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); toast.success(`SRC assigned: ${data.src_code}`) },
   })
   const runModal = async (v) => {
     setModalBusy(true)
@@ -276,7 +290,7 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
                   <span className="text-[11px] text-gray-400">Bank statement &amp; wallet loads shown together · {rows.length} rows</span>
                 </div>
                 {loadingRows ? <p className="text-xs text-gray-400 py-4 text-center">Loading…</p>
-                  : <RowsTable rows={rows} onUnmatch={unmatch} onOverride={override} />}
+                  : <RowsTable rows={rows} onUnmatch={unmatch} onOverride={override} onAssignSrc={assignSrc} />}
               </div>
             )}
           </div>
@@ -339,13 +353,174 @@ function MiniPick({ title, rows, sel, setSel, render, idKey }) {
   )
 }
 
+// ─── Manual Match tab: cross-account pairing of unmatched bank credits + loads ──
+// The per-account quick-match (ManualMatchPanel, on each Reconciliation row) only
+// pairs WITHIN an account. This tab loads EVERY unmatched bank credit and load
+// across all accounts (via the universal open-items window), so a credit can be
+// paired with a load tagged to a DIFFERENT account (the account-mismatch case the
+// cross-account reference pass exists for — behavior-contract #13). Queue + submit.
+function ManualMatchView() {
+  const [filters, setFilters] = useState({ date_from: '', date_to: '', acct: '' })
+  const [bankItems, setBankItems] = useState([])
+  const [loadItems, setLoadItems] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [queue, setQueue] = useState([])
+  const [pendB, setPendB] = useState(null)
+  const [pendL, setPendL] = useState(null)
+
+  const loadItemsFn = async () => {
+    setLoading(true)
+    try {
+      const p = { partner: 'evalue', page_size: 500,
+        ...(filters.date_from ? { date_from: filters.date_from } : {}),
+        ...(filters.date_to ? { date_to: filters.date_to } : {}) }
+      const [b, l] = await Promise.all([
+        api.get('/recon/open-items', { params: { ...p, side: 'bank', recon_status: 'unmatched_bank' } }),
+        api.get('/recon/open-items', { params: { ...p, side: 'internal', recon_status: 'unmatched_load' } }),
+      ])
+      const acctF = (filters.acct || '').trim().toLowerCase()
+      const byAcct = r => !acctF || String(r.tracking_number || '').toLowerCase().includes(acctF)
+      setBankItems((b.data.items ?? []).filter(byAcct))
+      setLoadItems((l.data.items ?? []).filter(byAcct))
+      setPendB(null); setPendL(null); setQueue([])
+    } catch { toast.error('Load failed') } finally { setLoading(false) }
+  }
+
+  const qB = new Set(queue.map(p => p.bank.id))
+  const qL = new Set(queue.map(p => p.load.id))
+  const addPair = () => {
+    if (!pendB || !pendL) return toast.error('Select one bank credit and one load')
+    setQueue(q => [...q, { bank: pendB, load: pendL }]); setPendB(null); setPendL(null)
+  }
+  const submitAll = async () => {
+    if (!queue.length) return toast.error('Queue is empty')
+    setSubmitting(true)
+    try {
+      const res = await Promise.allSettled(queue.map(p =>
+        api.post('/evalue/manual-match', { bank_txn_id: p.bank.id, load_id: p.load.id })))
+      const okIdx = res.map(r => r.status === 'fulfilled')
+      const ok = okIdx.filter(Boolean).length
+      const okB = new Set(queue.filter((_, i) => okIdx[i]).map(p => p.bank.id))
+      const okL = new Set(queue.filter((_, i) => okIdx[i]).map(p => p.load.id))
+      setBankItems(prev => prev.filter(i => !okB.has(i.id)))
+      setLoadItems(prev => prev.filter(i => !okL.has(i.id)))
+      setQueue([])
+      toast.success(`Matched ${ok} pair(s)${res.length - ok ? `, ${res.length - ok} failed` : ''}`)
+    } catch { toast.error('Submit failed') } finally { setSubmitting(false) }
+  }
+
+  const xacct = pendB && pendL && pendB.tracking_number !== pendL.tracking_number
+  const Panel = ({ title, items, sel, setSel, queued, color, isLoad }) => (
+    <div className="card p-0 overflow-hidden">
+      <div className={`px-4 py-2.5 bg-${color}-50 border-b border-${color}-100 flex items-center justify-between`}>
+        <h3 className={`font-semibold text-${color}-800 text-sm`}>{title} ({items.length})</h3>
+        {sel && <span className={`text-xs text-${color}-600 font-medium`}>1 selected</span>}
+      </div>
+      <div className="overflow-auto max-h-96">
+        <table className="w-full text-xs">
+          <thead className="bg-gray-50 sticky top-0">
+            <tr className="text-gray-500 text-left">
+              <th className="px-2 py-2 w-5"></th><th className="px-2 py-2">Account</th>
+              <th className="px-2 py-2">Date</th><th className="px-2 py-2 text-right">Amount</th>
+              <th className="px-2 py-2">{isLoad ? 'Eko TID / UTR' : 'UTR / Ref'}</th>
+              <th className="px-2 py-2">{isLoad ? 'CSP' : 'Description'}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.length === 0
+              ? <tr><td colSpan={6} className="text-center py-8 text-gray-400">No items — Load first</td></tr>
+              : items.map(it => {
+                const isQ = queued.has(it.id), isS = sel?.id === it.id
+                return (
+                  <tr key={it.id} onClick={() => !isQ && setSel(isS ? null : it)}
+                    className={`border-b border-gray-50 ${isQ ? 'bg-gray-100 opacity-50 cursor-not-allowed' : 'cursor-pointer'} ${isS ? `bg-${color}-100 ring-1 ring-inset ring-${color}-300` : `hover:bg-${color}-50`}`}>
+                    <td className="px-2 py-2"><div className={`w-3.5 h-3.5 rounded-full border-2 ${isS ? `border-${color}-500 bg-${color}-500` : 'border-gray-300'}`} /></td>
+                    <td className="px-2 py-2 font-mono text-gray-700">{it.tracking_number || '—'}</td>
+                    <td className="px-2 py-2 text-gray-500">{it.transaction_date || '—'}</td>
+                    <td className="px-2 py-2 text-right tabular-nums font-medium">{inr(it.amount)}</td>
+                    <td className="px-2 py-2 font-mono text-gray-500">{it.eko_tid || it.utr_number || '—'}</td>
+                    <td className="px-2 py-2 text-gray-500 max-w-[12rem]"><span className="block truncate" title={isLoad ? (it.csp_code || '') : (it.bank_description || '')}>{isLoad ? (it.csp_code || '—') : (it.bank_description || '—')}</span></td>
+                  </tr>
+                )
+              })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+
+  return (
+    <div>
+      <div className="card mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div><label className="text-xs text-gray-400 block mb-1">From Date</label>
+            <input type="date" className="input" value={filters.date_from} onChange={e => setFilters({ ...filters, date_from: e.target.value })} /></div>
+          <div><label className="text-xs text-gray-400 block mb-1">To Date</label>
+            <input type="date" className="input" value={filters.date_to} onChange={e => setFilters({ ...filters, date_to: e.target.value })} /></div>
+          <div><label className="text-xs text-gray-400 block mb-1">Account (filter)</label>
+            <input className="input" placeholder="e.g. SBI-4393" value={filters.acct} onChange={e => setFilters({ ...filters, acct: e.target.value })} /></div>
+          <div className="flex items-end">
+            <button onClick={loadItemsFn} disabled={loading} className="btn-primary flex items-center gap-2"><Search size={14} /> {loading ? 'Loading…' : 'Load Unmatched'}</button>
+          </div>
+        </div>
+        <p className="text-[11px] text-gray-400 mt-2">Pairs ANY unmatched bank credit with ANY unmatched load — including across accounts (flagged for audit). For same-account pairs the engine missed, the quick ⤳ on each Reconciliation row also works.</p>
+      </div>
+
+      {(pendB || pendL) && (
+        <div className={`${xacct ? 'bg-amber-500' : 'bg-primary'} text-white rounded-xl px-4 py-3 mb-4 flex items-center justify-between`}>
+          <div className="flex items-center gap-3 text-sm flex-wrap">
+            <span>Bank: <b>{pendB ? `${pendB.tracking_number} · ${inr(pendB.amount)}` : '—'}</b></span>
+            <ArrowRight size={16} />
+            <span>Load: <b>{pendL ? `${pendL.tracking_number} · ${inr(pendL.amount)}` : '—'}</b></span>
+            {xacct && <span className="text-xs bg-white/20 px-2 py-0.5 rounded">⚠ cross-account</span>}
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => { setPendB(null); setPendL(null) }} className="text-white/70 hover:text-white text-xs flex items-center gap-1"><X size={14} /> Clear</button>
+            <button onClick={addPair} disabled={!pendB || !pendL} className="bg-white text-primary text-xs px-3 py-1 rounded-lg font-medium hover:bg-white/90 disabled:opacity-50 flex items-center gap-1"><Plus size={14} /> Add to Queue</button>
+          </div>
+        </div>
+      )}
+
+      {queue.length > 0 && (
+        <div className="card mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-gray-700 text-sm flex items-center gap-2"><GitMerge size={15} className="text-primary" /> Match Queue — {queue.length} pair(s)</h3>
+            <button onClick={submitAll} disabled={submitting} className="btn-primary flex items-center gap-2 text-sm"><CheckCircle2 size={14} /> {submitting ? 'Submitting…' : `Submit All ${queue.length}`}</button>
+          </div>
+          <div className="space-y-1.5">
+            {queue.map((p, i) => {
+              const cross = p.bank.tracking_number !== p.load.tracking_number
+              return (
+                <div key={i} className="flex items-center gap-3 bg-primary/5 rounded-lg px-3 py-2 text-xs">
+                  <span className="text-gray-500 w-4">{i + 1}.</span>
+                  <span className="font-mono text-blue-700 flex-1">{p.bank.tracking_number} · ₹{p.bank.amount?.toLocaleString('en-IN')}</span>
+                  <ArrowRight size={12} className="text-gray-400 shrink-0" />
+                  <span className="font-mono text-green-700 flex-1">{p.load.tracking_number} · ₹{p.load.amount?.toLocaleString('en-IN')}</span>
+                  {cross && <span className="text-[10px] text-amber-600 font-medium">cross-acct</span>}
+                  <button onClick={() => setQueue(q => q.filter((_, j) => j !== i))} className="text-gray-400 hover:text-red-500"><Trash2 size={12} /></button>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Panel title="Unmatched Bank Credits" items={bankItems} sel={pendB} setSel={setPendB} queued={qB} color="blue" isLoad={false} />
+        <Panel title="Unmatched Wallet Loads" items={loadItems} sel={pendL} setSel={setPendL} queued={qL} color="green" isLoad={true} />
+      </div>
+    </div>
+  )
+}
+
 function Pill({ n, s }) {
   if (!n) return null
   const m = STATUS_META[s] || { label: s, cls: 'bg-gray-100 text-gray-600' }
   return <span className={`px-2 py-0.5 rounded-full ${m.cls}`}>{m.label}: {n}</span>
 }
 
-function RowsTable({ rows, onUnmatch, onOverride }) {
+function RowsTable({ rows, onUnmatch, onOverride, onAssignSrc }) {
   const [colF, setColF] = useState({ side: '', detail: '', ref: '', match_id: '', recon: '' })
   const _kw = (v) => (v || '').split(/[\s,]+/).map(s => s.trim().toLowerCase()).filter(Boolean)
   const _hit = (cell, q) => { const ks = _kw(q); return !ks.length || ks.some(k => String(cell ?? '').toLowerCase().includes(k)) }
@@ -393,13 +568,20 @@ function RowsTable({ rows, onUnmatch, onOverride }) {
                 <td className="table-td text-left max-w-xs truncate" title={detail}>{detail}</td>
                 <td className="table-td font-mono">{ref}</td>
                 <td className="table-td text-right tabular-nums">{inr(r.amount)}</td>
-                <td className="table-td"><span className={`px-2 py-0.5 rounded-full ${m.cls}`}>{m.label}</span></td>
+                <td className="table-td">
+                  <div className="flex items-center justify-center gap-1 flex-wrap">
+                    <span className={`px-2 py-0.5 rounded-full ${m.cls}`}>{m.label}</span>
+                    {r.src_code && <span title={r.src_note || ''} className="px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 text-[10px]">{r.src_code}</span>}
+                  </div>
+                </td>
                 <td className="table-td font-mono text-primary">{r.match_id || '—'}</td>
                 <td className="table-td">
                   <div className="flex items-center gap-1">
                     {isMatched(r.recon_status) && r.match_id &&
                       <button title="Unmatch" onClick={() => onUnmatch(r.match_id)} className="p-1 rounded hover:bg-red-50 text-red-500"><Undo2 size={12} /></button>}
                     <button title="Override status" onClick={() => onOverride(r)} className="p-1 rounded hover:bg-amber-50 text-amber-600"><Tag size={12} /></button>
+                    {SRC_STATUSES.includes(r.recon_status) &&
+                      <button title="Assign SRC" onClick={() => onAssignSrc(r)} className="p-1 rounded hover:bg-yellow-50 text-yellow-600"><Coins size={12} /></button>}
                   </div>
                 </td>
               </tr>
