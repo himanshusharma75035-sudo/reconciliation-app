@@ -37,13 +37,21 @@ const PERM_GROUPS = [
       { key: 'audit_read',    label: 'Audit Log',                  desc: 'View and export the activity / audit log' },
     ]
   },
+  {
+    label: 'Developer Portal',
+    perms: [
+      { key: 'portal_access',  label: 'Developer Portal',          desc: 'Access the developer portal — codebase docs, DB schema, API surface, live health, and the read-only agent' },
+      { key: 'portal_approve', label: 'Approve Portal Requests',    desc: 'Approve / reject change, error, and feature requests raised in the developer portal queue' },
+      { key: 'portal_build',   label: 'Builder Agent (write access)', desc: 'DANGER: use the autonomous Builder Agent that writes code and applies vetted changes to the app. Strongest portal permission; also needs the server-side master switch.' },
+    ]
+  },
 ]
 
 // Flat list for backward compat
 const PERMS = PERM_GROUPS.flatMap(g => g.perms.map(p => p.key))
 const PERM_LABELS = Object.fromEntries(PERM_GROUPS.flatMap(g => g.perms.map(p => [p.key, p.label])))
 
-const DEFAULT_PERMS = { upload: true, run_recon: true, src_assign: true, reports: true, logic_builder: false, override: false, manual_match: true, clear_data: false, approver: false, audit_read: false }
+const DEFAULT_PERMS = { upload: true, run_recon: true, src_assign: true, reports: true, logic_builder: false, override: false, manual_match: true, clear_data: false, approver: false, audit_read: false, portal_access: false, portal_approve: false, portal_build: false }
 
 export default function Users() {
   const [users, setUsers] = useState([])

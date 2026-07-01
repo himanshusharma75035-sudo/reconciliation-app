@@ -1394,6 +1394,178 @@ class SessionLog(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
 
 
+# ─── Developer Portal AI agent (Phase 2 — additive, read-only feature) ──────────
+class AgentChatSession(Base):
+    """
+    One conversation thread with the read-only Developer Portal agent.
+    Additive feature, gated by the 'portal_access' permission. The agent never
+    writes to business data; these tables only store the chat transcript itself.
+    """
+    __tablename__ = "agent_chat_sessions"
+
+    id         = Column(String(36),  primary_key=True, default=generate_id)
+    username   = Column(String(100), index=True)            # who owns this thread
+    title      = Column(String(300), nullable=True)         # first user message, truncated
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class AgentChatMessage(Base):
+    """A single turn in an AgentChatSession (role = user | assistant)."""
+    __tablename__ = "agent_chat_messages"
+
+    id          = Column(String(36),  primary_key=True, default=generate_id)
+    session_id  = Column(String(36),  ForeignKey("agent_chat_sessions.id"), index=True)
+    role        = Column(String(20))                        # user | assistant
+    content     = Column(Text)                              # rendered text of the turn
+    # JSON: tool calls made this turn (name + args + brief result) for transparency
+    tool_trace  = Column(Text, nullable=True)
+    created_at  = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+
+    __table_args__ = (Index("ix_agent_msg_session_ts", "session_id", "created_at"),)
+
+
+class PortalRequest(Base):
+    """
+    A change/error/feature request raised through the Developer Portal — by an
+    engineer directly or drafted by the read-only agent. This is the human-approval
+    queue: filing a request changes NOTHING in the live system; a request only
+    becomes action after a human with approval rights moves it to 'approved'.
+    Isolated governance data — never touched by the matching engines.
+    """
+    __tablename__ = "portal_requests"
+
+    id            = Column(String(36),  primary_key=True, default=generate_id)
+    req_type      = Column(String(20),  index=True)   # bug | faulty_data | feature | change | other
+    title         = Column(String(300))
+    description   = Column(Text)
+    proposed_change = Column(Text, nullable=True)      # agent's drafted change / diff / plan
+    priority      = Column(String(10),  default="medium")   # low | medium | high
+    status        = Column(String(15),  default="open", index=True)  # open|triaged|approved|rejected|done
+    source        = Column(String(15),  default="manual")  # manual | agent
+    created_by    = Column(String(100), index=True)
+    agent_session_id = Column(String(36), nullable=True)   # link back to the chat, if agent-filed
+    created_at    = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    updated_at    = Column(DateTime, default=datetime.datetime.utcnow)
+    reviewed_by   = Column(String(100), nullable=True)
+    reviewed_at   = Column(DateTime, nullable=True)
+    review_note   = Column(String(1000), nullable=True)
+    # Lightweight workflow (additive): who's on it + a link out to the tracker.
+    assignee         = Column(String(100), nullable=True, index=True)
+    github_issue_url = Column(String(500), nullable=True)
+
+
+class PortalRequestComment(Base):
+    """A discussion comment on a PortalRequest. Pure governance/collaboration
+    data — never touches business records. Any portal user may comment; the
+    approval decision still lives on the request's status."""
+    __tablename__ = "portal_request_comments"
+
+    id         = Column(String(36),  primary_key=True, default=generate_id)
+    request_id = Column(String(36),  ForeignKey("portal_requests.id"), index=True)
+    author     = Column(String(100))
+    body       = Column(Text)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+
+    __table_args__ = (Index("ix_portal_comment_req_ts", "request_id", "created_at"),)
+
+
+class PortalAgentJob(Base):
+    """
+    A scheduled, autonomous run of the read-only portal agent (Phase 4). On its
+    cron cadence the agent runs `prompt` and may file requests into the approval
+    queue — it still cannot change live data; humans approve any resulting request.
+    Reuses the in-process APScheduler (Asia/Kolkata).
+    """
+    __tablename__ = "portal_agent_jobs"
+
+    id          = Column(String(36),  primary_key=True, default=generate_id)
+    name        = Column(String(200))
+    prompt      = Column(Text)                              # what to ask the agent each run
+    frequency   = Column(String(10),  default="daily")     # daily | weekly
+    hour        = Column(Integer, default=8)               # IST
+    minute      = Column(Integer, default=0)
+    day_of_week = Column(Integer, nullable=True)           # 0=Mon .. 6=Sun (weekly only)
+    is_enabled  = Column(Boolean, default=True)
+    created_by  = Column(String(100))
+    created_at  = Column(DateTime, default=datetime.datetime.utcnow)
+    last_run_at     = Column(DateTime, nullable=True)
+    last_status     = Column(String(15), nullable=True)    # ok | error
+    last_summary    = Column(Text, nullable=True)
+
+
+class PortalAgentRun(Base):
+    """One execution record of a PortalAgentJob (or a manual run-now)."""
+    __tablename__ = "portal_agent_runs"
+
+    id            = Column(String(36),  primary_key=True, default=generate_id)
+    job_id        = Column(String(36),  ForeignKey("portal_agent_jobs.id"), index=True)
+    trigger       = Column(String(12),  default="schedule")  # schedule | manual
+    started_at    = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    finished_at   = Column(DateTime, nullable=True)
+    status        = Column(String(15), default="running")    # running | ok | error
+    summary       = Column(Text, nullable=True)              # the agent's answer
+    tools_used    = Column(Text, nullable=True)              # JSON list of tool summaries
+    requests_filed = Column(Integer, default=0)
+    error         = Column(Text, nullable=True)
+
+
+class BuilderTask(Base):
+    """
+    Phase 5 — a WRITE-CAPABLE build task run by the autonomous Builder Agent.
+    Unlike PortalRequest (a proposal that changes nothing), a BuilderTask actually
+    edits code on an isolated git branch, runs the mandatory gates
+    (pytest / compileall / npm build / ruff / behavior-contract), and — only if
+    every gate passes and the master switch is on — applies the change as a git
+    commit and restarts the app. Every commit is revertible (one-click rollback).
+
+    HARD SAFETY (enforced in core/builder_agent.py, never relaxed here):
+      • secret files (.env / keys / seed_accounts.json / *.db) are un-writable;
+      • a change that fails ANY gate is never applied;
+      • the whole capability is behind the `portal_build` permission AND a master
+        kill-switch that ships OFF.
+    """
+    __tablename__ = "builder_tasks"
+
+    id          = Column(String(36),  primary_key=True, default=generate_id)
+    title       = Column(String(300))
+    instruction = Column(Text)                              # what the user asked for
+    # planning | awaiting_input | building | gating | ready | applied | failed | rejected | rolled_back
+    status      = Column(String(20),  default="planning", index=True)
+    branch      = Column(String(160), nullable=True)       # builder/<id> git branch
+    base_sha    = Column(String(40),  nullable=True)       # HEAD the branch forked from
+    commit_sha  = Column(String(40),  nullable=True)       # commit applied to live, if any
+    summary     = Column(Text, nullable=True)              # agent's own summary of the change
+    plan        = Column(Text, nullable=True)              # agent's plan before editing
+    diff_stat   = Column(Text, nullable=True)              # `git diff --stat` text
+    files_changed = Column(Text, nullable=True)            # JSON list of {path, action, +, -}
+    gate_results  = Column(Text, nullable=True)            # JSON {gate: {ok, detail}}
+    gates_ok    = Column(Boolean, default=False)
+    created_by  = Column(String(100), index=True)
+    created_at  = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+    updated_at  = Column(DateTime, default=datetime.datetime.utcnow)
+    applied_by  = Column(String(100), nullable=True)
+    applied_at  = Column(DateTime, nullable=True)
+    rolled_back_by = Column(String(100), nullable=True)
+    rolled_back_at = Column(DateTime, nullable=True)
+    error       = Column(Text, nullable=True)
+
+
+class BuilderMessage(Base):
+    """A turn in a BuilderTask's conversation (the agent is chat-driven and asks
+    clarifying questions before it acts). role = user | assistant | event."""
+    __tablename__ = "builder_messages"
+
+    id         = Column(String(36),  primary_key=True, default=generate_id)
+    task_id    = Column(String(36),  ForeignKey("builder_tasks.id"), index=True)
+    role       = Column(String(20))                        # user | assistant | event
+    content    = Column(Text)
+    tool_trace = Column(Text, nullable=True)               # JSON list of tool summaries
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
+
+    __table_args__ = (Index("ix_builder_msg_task_ts", "task_id", "created_at"),)
+
+
 # ─── Bootstrap ────────────────────────────────────────────────────────────────
 def _run_migrations():
     """
@@ -1444,6 +1616,10 @@ def _run_migrations():
         "users": [("allowed_products", "TEXT")],
         # roadmap 1.6: data-quality profile on the 1.4 ingestion ledger
         "ingestion_events": [("dq_profile", "TEXT")],
+        # Developer Portal request workflow (additive governance columns)
+        "portal_requests": [
+            ("assignee", "VARCHAR(100)"), ("github_issue_url", "VARCHAR(500)"),
+        ],
     }
 
     with engine.connect() as conn:

@@ -67,14 +67,14 @@ echo  ==========================================
 echo    Starting EKO Reconciliation App...
 echo  ==========================================
 echo.
-echo  Backend  → http://localhost:8000
+echo  Backend  → http://localhost:8001
 echo  Frontend → http://localhost:3000
 echo.
 echo  Login: admin / Admin@1234
 echo.
 echo  Starting backend server...
 cd /d "%BACKEND_DIR%"
-start "EKO Backend" cmd /k "python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload"
+start "EKO Backend" cmd /k "python -m uvicorn main:app --host 0.0.0.0 --port 8001 --reload"
 
 echo  Waiting for backend to start...
 timeout /t 5 /nobreak >nul

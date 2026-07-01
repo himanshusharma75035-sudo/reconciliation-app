@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Play, AlertTriangle, GitMerge,
-  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity
+  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2
 } from 'lucide-react'
 import { hasPermission, isAdmin } from '../utils/permissions'
 
@@ -23,6 +23,7 @@ const navItems = [
   // product cards in Upload Files — intentionally NOT in the sidebar to keep it clean.
   { to: '/workflow',     icon: Scale,           label: 'Workflow' },
   { to: '/insights',     icon: TrendingUp,      label: 'Insights' },
+  { to: '/developer-portal', icon: Code2,       label: 'Developer Portal', requiredPerm: 'portal_access' },
   { to: '/audit-log',    icon: Shield,          label: 'Audit Log',     requiredPerm: 'audit_read' },
   { to: '/users',        icon: Users,           label: 'Users',         adminOnly: true },
   { to: '/admin',        icon: Settings,        label: 'Configuration', adminOnly: true },

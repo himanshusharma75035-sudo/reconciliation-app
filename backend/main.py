@@ -57,6 +57,7 @@ from routes.bbps import router as bbps_router
 from routes.workflow import router as workflow_router
 from routes.ingestion import router as ingestion_router
 from routes.views import router as views_router
+from routes.portal import router as portal_router
 
 app = FastAPI(
     title="Eko Bharat Ventures — Reconciliation API",
@@ -109,6 +110,7 @@ app.include_router(bbps_router)
 app.include_router(workflow_router)
 app.include_router(ingestion_router)
 app.include_router(views_router)
+app.include_router(portal_router)
 
 
 def _apply_indexes():
@@ -447,6 +449,12 @@ def startup():
         # Re-register all active personal report subscriptions (self-service EOD/weekly/monthly)
         from core.report_scheduler import reload_all_report_subscriptions
         reload_all_report_subscriptions(db2)
+        # Re-register Developer Portal scheduled-agent jobs (Phase 4 — additive)
+        try:
+            from core.portal_scheduler import reload_all_portal_jobs
+            reload_all_portal_jobs(db2)
+        except Exception as _pe:
+            print(f"[startup] Portal scheduler warning: {_pe}")
         # Optional E-Value watch-folder auto-pickup (set EVALUE_WATCH_FOLDER in .env)
         _ev_folder = os.getenv("EVALUE_WATCH_FOLDER")
         if _ev_folder:
