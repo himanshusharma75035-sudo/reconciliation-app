@@ -598,13 +598,18 @@ function ProductTabs({ partnerConfigs, data }) {
 }
 
 // ── Funds Position (EOD) — director/CFO view ──────────────────────────────────
-// Latest statement balance per bank account ≤ the chosen date (T+1 aware: the
-// statement date is always shown next to the number). Fed by BankBalanceSnapshot,
-// written automatically on every bank upload. Reporting only.
+// Shows exactly the statements DATED the chosen day (pick another date to view that
+// day). Fed by BankBalanceSnapshot, written automatically on every bank upload.
+// For formats with no balance column (QR/AePS/Indo-Nepal) an opening balance can be
+// anchored once via the ⚓ form; closings then chain forward on every upload.
 function FundsPositionPanel() {
   const [asOf, setAsOf] = useState(() => new Date().toISOString().split('T')[0])
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [anchorOpen, setAnchorOpen] = useState(false)
+  const [accounts, setAccounts] = useState([])
+  const [anchor, setAnchor] = useState({ key: '', date: '', opening: '' })
+  const [anchorBusy, setAnchorBusy] = useState(false)
 
   const load = useCallback(async (d) => {
     setLoading(true)
@@ -614,6 +619,33 @@ function FundsPositionPanel() {
     } catch { /* silent */ } finally { setLoading(false) }
   }, [])
   useEffect(() => { load(asOf) }, [])
+
+  const openAnchor = async () => {
+    setAnchorOpen(o => !o)
+    if (!anchorOpen && accounts.length === 0) {
+      try {
+        const { data: res } = await api.get('/reports/funds-position/accounts')
+        setAccounts(res.accounts || [])
+      } catch { toast.error('Could not load accounts') }
+    }
+  }
+
+  const saveAnchor = async () => {
+    const acc = accounts[Number(anchor.key)]
+    if (!acc || !anchor.date || anchor.opening === '') { toast.error('Pick account, date and opening balance'); return }
+    setAnchorBusy(true)
+    try {
+      const { data: res } = await api.post('/reports/funds-position/anchor', {
+        product: acc.product, partner: acc.partner, bank_account: acc.bank_account,
+        date: anchor.date, opening_balance: anchor.opening,
+      })
+      toast.success(`Anchored — ${res.days_written} day(s) computed up to ${res.last_date}`)
+      setAnchorOpen(false); setAnchor({ key: '', date: '', opening: '' })
+      load(asOf)
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'Anchor failed')
+    } finally { setAnchorBusy(false) }
+  }
 
   const dl = async () => {
     try {
@@ -639,12 +671,43 @@ function FundsPositionPanel() {
         <div className="ml-auto flex items-center gap-2">
           <input type="date" className="input" value={asOf} onChange={e => setAsOf(e.target.value)} />
           <button onClick={() => load(asOf)} className="btn-ghost text-xs">{loading ? 'Loading…' : 'Apply'}</button>
+          <button onClick={openAnchor} className="btn-ghost text-xs" title="Set an opening balance for statements that carry no balance column (QR / AePS / Indo-Nepal)">⚓ Set opening</button>
           <button onClick={dl} className="btn-primary text-xs">⬇ Report</button>
         </div>
       </div>
+      {anchorOpen && (
+        <div className="flex items-end gap-2 px-5 py-3 border-b border-gray-100 bg-amber-50/40 flex-wrap">
+          <div>
+            <div className="text-[11px] text-gray-500 mb-0.5">Account</div>
+            <select className="input text-xs" value={anchor.key} onChange={e => setAnchor(a => ({ ...a, key: e.target.value }))}>
+              <option value="">— select account —</option>
+              {accounts.map((a, i) => (
+                <option key={i} value={i}>
+                  {a.product.toUpperCase()} · {a.partner} · {a.bank_account || '(no account no.)'}
+                  {a.last_statement_date ? ` — last stmt ${a.last_statement_date}` : ' — no balances yet'}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <div className="text-[11px] text-gray-500 mb-0.5">Opening balance of date</div>
+            <input type="date" className="input text-xs" value={anchor.date} onChange={e => setAnchor(a => ({ ...a, date: e.target.value }))} />
+          </div>
+          <div>
+            <div className="text-[11px] text-gray-500 mb-0.5">Opening balance (₹)</div>
+            <input type="number" step="0.01" className="input text-xs w-36" placeholder="0.00" value={anchor.opening}
+                   onChange={e => setAnchor(a => ({ ...a, opening: e.target.value }))} />
+          </div>
+          <button onClick={saveAnchor} disabled={anchorBusy} className="btn-primary text-xs">{anchorBusy ? 'Computing…' : 'Save & compute'}</button>
+          <div className="text-[11px] text-gray-400 basis-full">
+            For statements with no balance column: enter one day's opening balance — that day's closing and every later
+            day are computed from DR/CR and keep extending automatically on each upload. Bank-stated balances are never overwritten.
+          </div>
+        </div>
+      )}
       {rows.length === 0 ? (
         <div className="px-5 py-6 text-center text-xs text-gray-400 italic">
-          No balance snapshots yet — they are recorded automatically from the next bank statement upload onward.
+          No statements dated {asOf}. Pick the statement's date above — the panel shows exactly the day you ask for (T+1: yesterday usually has the latest data).
         </div>
       ) : (
         <div className="overflow-x-auto">
@@ -668,11 +731,7 @@ function FundsPositionPanel() {
                   <td className="py-2 px-4 font-semibold text-gray-700 uppercase">{r.product}</td>
                   <td className="py-2 px-3 text-gray-600 capitalize">{r.partner}</td>
                   <td className="py-2 px-3 font-mono text-gray-500">{r.bank_account || '—'}</td>
-                  <td className="py-2 px-3">
-                    <span className={r.stale ? 'text-amber-600 font-medium' : 'text-gray-600'}>
-                      {r.statement_date}{r.stale && ' ⚠'}
-                    </span>
-                  </td>
+                  <td className="py-2 px-3 text-gray-600">{r.statement_date}</td>
                   <td className="py-2 px-3 text-right text-gray-500 tabular-nums">{fmt(r.opening_balance)}</td>
                   <td className="py-2 px-3 text-right text-red-400 tabular-nums">{fmt(r.total_dr)}</td>
                   <td className="py-2 px-3 text-right text-green-500 tabular-nums">{fmt(r.total_cr)}</td>
@@ -685,7 +744,7 @@ function FundsPositionPanel() {
             </tbody>
           </table>
           <div className="px-5 py-2 text-[11px] text-gray-400 border-t border-gray-50">
-            ⚠ = statement older than the selected date (last known balance shown, as per T+1 data availability).
+            Showing statements dated {data?.as_of} only — Δ compares each account against its previous available statement.
           </div>
         </div>
       )}

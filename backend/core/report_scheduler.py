@@ -225,16 +225,18 @@ def _generate_report(report_type: str, filters: dict, date_range: str, db) -> tu
         import io as _io
         import datetime as _dt
         from core.funds import get_funds_position
-        d = str(_dt.date.today())
+        # T+1: the scheduled email reports the previous day's statements (today's
+        # statements are not uploaded yet when the morning schedule fires).
+        d = str(_dt.date.today() - _dt.timedelta(days=1))
         pos = get_funds_position(db, d)
-        cols = ["product", "partner", "bank_account", "statement_date", "stale",
+        cols = ["product", "partner", "bank_account", "statement_date",
                 "opening_balance", "total_dr", "total_cr", "closing_balance",
                 "delta", "prev_date", "txn_count", "source"]
         totals = [{"product": p, **t} for p, t in sorted(pos["totals_by_product"].items())]
         out = _io.BytesIO()
         with pd.ExcelWriter(out, engine="openpyxl") as w:
             pd.DataFrame(pos["rows"], columns=cols).to_excel(w, sheet_name="Funds Position", index=False)
-            pd.DataFrame(totals, columns=["product", "accounts", "closing_total", "stale"]
+            pd.DataFrame(totals, columns=["product", "accounts", "closing_total"]
                          ).to_excel(w, sheet_name="Totals by Product", index=False)
             for ws in w.sheets.values():
                 fill = PatternFill("solid", fgColor="094053")

@@ -1,6 +1,6 @@
 import logging
 import io, json
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -955,10 +955,10 @@ def funds_position_export(
     from routes.sbi_kiosk import _sheet as _xl_sheet
     d = as_of or str(_dt.date.today())
     pos = get_funds_position(db, d)
-    cols = ["product", "partner", "bank_account", "statement_date", "stale",
+    cols = ["product", "partner", "bank_account", "statement_date",
             "opening_balance", "total_dr", "total_cr", "closing_balance",
             "delta", "prev_date", "txn_count", "source"]
-    tot_cols = ["product", "accounts", "closing_total", "stale"]
+    tot_cols = ["product", "accounts", "closing_total"]
     totals = [{"product": p, **t} for p, t in sorted(pos["totals_by_product"].items())]
     out = _io.BytesIO()
     with _pd.ExcelWriter(out, engine="openpyxl") as w:
@@ -970,3 +970,41 @@ def funds_position_export(
                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                headers={"Content-Disposition": f'attachment; filename="funds_position_{d}.xlsx"',
                         "X-Recon-Date": d, "Access-Control-Expose-Headers": "X-Recon-Date"})
+
+
+@router.get("/funds-position/accounts")
+def funds_position_accounts(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Known bank accounts (for the opening-balance anchor form)."""
+    from core.funds import list_bank_accounts
+    return {"accounts": list_bank_accounts(db)}
+
+
+@router.post("/funds-position/anchor")
+def funds_position_anchor(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Set a user-entered opening balance for one account+day (for statement formats
+    with no balance column — QR / AePS / Indo-Nepal). Closing for that day and every
+    later day with data is computed as opening + CR − DR and keeps extending on
+    future uploads. Bank-stated figures are never overwritten."""
+    from core.funds import set_opening_anchor
+    product = (payload.get("product") or "").strip().lower()
+    partner = (payload.get("partner") or "").strip()
+    account = (payload.get("bank_account") or "").strip()
+    date = (payload.get("date") or "").strip()[:10]
+    opening = payload.get("opening_balance")
+    if not product or not partner or len(date) != 10 or opening is None:
+        raise HTTPException(status_code=422,
+                            detail="product, partner, date (YYYY-MM-DD) and opening_balance are required")
+    try:
+        opening = float(str(opening).replace(",", ""))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="opening_balance must be a number")
+    res = set_opening_anchor(db, product, partner, account, date, opening,
+                             uploaded_by=current_user.username)
+    return {"success": True, **res}
