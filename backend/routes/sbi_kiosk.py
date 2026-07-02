@@ -1337,9 +1337,11 @@ _SBI_EXPORTS = {
 }
 
 
-def _build_sbi_export(db, which, recon_date=None, match_status=None) -> io.BytesIO:
+def _build_sbi_export(db, which, recon_date=None, match_status=None,
+                      date_from=None, date_to=None) -> io.BytesIO:
     """Build a styled multi-sheet SBI recon workbook; one sheet per process in `which`.
-    Always writes a header row (a valid file even with zero data rows)."""
+    Always writes a header row (a valid file even with zero data rows).
+    recon_date = single date (unchanged behaviour); date_from/date_to = range."""
     from openpyxl.styles import PatternFill, Font as XFont
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -1348,6 +1350,9 @@ def _build_sbi_export(db, which, recon_date=None, match_status=None) -> io.Bytes
             q = db.query(model)
             if recon_date:
                 q = q.filter(model.recon_date == recon_date)
+            else:
+                if date_from: q = q.filter(model.recon_date >= date_from)
+                if date_to:   q = q.filter(model.recon_date <= date_to)
             # match_status only applies to the processes that have that column (p02/p03)
             if match_status and hasattr(model, "match_status"):
                 q = q.filter(model.match_status == match_status)
@@ -1373,6 +1378,8 @@ def export_sbi(
     process: str = Query("all", description="p01 | p02 | p03 | p04 | all"),
     recon_date: Optional[str] = None,
     match_status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -1407,17 +1414,421 @@ def export_sbi(
                 if d and (latest is None or d > latest):
                     latest = d
             used_date = latest  # None only when the process has no data on any date
-    output = _build_sbi_export(db, which, used_date, match_status)
-    fname = f"sbi_{process}_{used_date or 'all'}.xlsx"
+    output = _build_sbi_export(db, which, used_date, match_status, date_from, date_to)
+    _tag = used_date or (f"{date_from or 'start'}_to_{date_to or 'end'}"
+                         if (date_from or date_to) else "all")
+    fname = f"sbi_{process}_{_tag}.xlsx"
+    # Header semantics the UI relies on: the actual date exported, or the range/"all"
+    # tag when exporting a span WITH data, or "none" only when there is truly no data.
+    if used_date:
+        _hdr = used_date
+    else:
+        _has = any(_rng(db.query(_SBI_EXPORTS[p][1].id), _SBI_EXPORTS[p][1],
+                        None, date_from, date_to).first() for p in which)
+        _hdr = _tag if _has else "none"
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
             "Content-Disposition": f'attachment; filename="{fname}"',
-            "X-Recon-Date": str(used_date or "none"),
+            "X-Recon-Date": str(_hdr),
             "Access-Control-Expose-Headers": "X-Recon-Date",
         },
     )
+
+
+# ── Report library ─────────────────────────────────────────────────────────────
+# The full set of SBI report options beyond the raw per-process exports. All are
+# READ-ONLY over the result/source/overlay tables — no matching logic involved.
+# Range filters compare the zero-padded recon_date strings lexicographically
+# (app-wide convention). Single-date reports fall back to the latest date with
+# data and echo it in X-Recon-Date (same pattern as /export).
+
+def _style_report_ws(ws, ncols: int):
+    from openpyxl.styles import PatternFill, Font as XFont
+    fill = PatternFill("solid", fgColor="094053")
+    for cell in ws[1]:
+        cell.fill = fill
+        cell.font = XFont(color="FFFFFF", bold=True)
+    for i in range(1, ncols + 1):
+        c = ws.cell(row=1, column=i)
+        ws.column_dimensions[c.column_letter].width = max(12, min(46, len(str(c.value or "")) + 4))
+
+
+def _sheet(writer, name: str, rows: list, cols: list):
+    """Write one styled sheet; always valid (header row even with zero rows)."""
+    df = pd.DataFrame(rows, columns=cols)
+    df.to_excel(writer, sheet_name=name[:31], index=False)
+    _style_report_ws(writer.sheets[name[:31]], len(cols))
+
+
+def _rng(q, model, recon_date, date_from, date_to):
+    if recon_date:
+        return q.filter(model.recon_date == recon_date)
+    if date_from:
+        q = q.filter(model.recon_date >= date_from)
+    if date_to:
+        q = q.filter(model.recon_date <= date_to)
+    return q
+
+
+def _latest_sbi_date(db, models=None) -> Optional[str]:
+    latest = None
+    for m in (models or [SBIP01Result, SBIP02Result, SBIP03Result, SBIP04Result]):
+        d = db.query(func.max(m.recon_date)).scalar()
+        if d and (latest is None or d > latest):
+            latest = d
+    return latest
+
+
+def _bank_desc_map(db, ids: list) -> dict:
+    """id → (description, txn_date) for bank rows, chunked (IN-list safe on MySQL)."""
+    out = {}
+    ids = [i for i in ids if i]
+    for i in range(0, len(ids), 900):
+        for _id, _d, _dt in db.query(SBIBankTransaction.id, SBIBankTransaction.description,
+                                     SBIBankTransaction.txn_date
+                                     ).filter(SBIBankTransaction.id.in_(ids[i:i + 900])).all():
+            out[_id] = (_d or '', _dt or '')
+    return out
+
+
+def _load_process_recs(db, p: str, recon_date, date_from=None, date_to=None,
+                       with_bank_desc: bool = False) -> list:
+    """Load one process's result rows as dicts (export columns) with the manual-match
+    and SRC overlays applied — the same read-time view the results endpoints serve."""
+    sheet, model, order_col, cols = _SBI_EXPORTS[p]
+    q = _rng(db.query(model), model, recon_date, date_from, date_to)
+    rows = q.order_by(getattr(model, order_col)).all()
+    recs = [{c: getattr(r, c) for c in cols} for r in rows]
+    if p == "p02" and with_bank_desc and rows:
+        bm = _bank_desc_map(db, [r.bank_txn_id for r in rows])
+        for rec, r in zip(recs, rows):
+            d = bm.get(r.bank_txn_id) or ('', '')
+            rec["bank_description"], rec["bank_txn_date"] = d[0], d[1]
+    if p in ("p02", "p03"):
+        recs = _apply_manual_matches(db, p, recon_date, recs)
+    recs = _apply_src_assignments(db, p, recon_date, recs)
+    return recs
+
+
+def _proc_overview(p: str, recs: list) -> dict:
+    """Per-process roll-up row for the Overview sheet."""
+    total = len(recs)
+    if p == "p01":
+        matched = sum(1 for r in recs if r.get("status") == "CREDITED")
+        amt_all = sum(r.get("wallet_withdrawn") or 0 for r in recs)
+        amt_ok = sum(r.get("wallet_withdrawn") or 0 for r in recs if r.get("status") == "CREDITED")
+        note = "matched = CREDITED; amounts = wallet withdrawals"
+    elif p == "p04":
+        matched = sum(1 for r in recs if r.get("action_required") == "NONE")
+        amt_all = sum(abs(r.get("action_amount") or 0) for r in recs)
+        amt_ok = 0.0
+        note = "matched = no action needed; amount = pending corrections"
+    else:
+        matched = sum(1 for r in recs if r.get("match_status") in ("Matched", "Manual_Matched"))
+        amt_field = "bank_amount" if p == "p02" else "txn_amount"
+        amt_all = sum((r.get(amt_field) or r.get("bank_amount") or 0) for r in recs)
+        amt_ok = sum((r.get(amt_field) or r.get("bank_amount") or 0) for r in recs
+                     if r.get("match_status") in ("Matched", "Manual_Matched"))
+        note = "matched incl. manual matches"
+    return {"process": p.upper(), "sheet": _SBI_EXPORTS[p][0], "total": total,
+            "matched": matched, "open": total - matched,
+            "match_rate_pct": round(matched / total * 100, 1) if total else None,
+            "amount_total": round(amt_all, 2), "amount_matched": round(amt_ok, 2),
+            "amount_open": round(amt_all - amt_ok, 2), "notes": note}
+
+
+_P02_XCOLS = ['recon_date', 'reference_number', 'ko_id', 'bank_amount', 'bank_type',
+              'report_amount', 'report_txn_type', 'match_status', 'reversal_type',
+              'success_status', 'bank_txn_date', 'bank_description', 'src_code', 'src_note', 'notes']
+_P03_XCOLS = ['recon_date', 'csp_code', 'mode', 'ref_number', 'txn_amount', 'txn_date',
+              'bank_credit_date', 'bank_amount', 'match_status', 'date_shift',
+              'match_priority', 'src_code', 'src_note', 'notes']
+_P01_XCOLS = ['recon_date', 'ko_id', 'wallet_withdrawn', 'bank_settled', 'difference',
+              'status', 'deduct_date', 'bank_txn_date', 'src_code', 'src_note', 'notes']
+_P04_XCOLS = ['recon_date', 'csp_code', 'failed_amount', 'closing_balance', 'expected_balance',
+              'difference', 'action_required', 'action_amount', 'action_done',
+              'src_code', 'src_note', 'notes']
+
+_SBI_REPORTS = [
+    {"id": "daily_pack",  "label": "Daily Recon Pack",          "scope": "date",
+     "desc": "One workbook for the day: overview, all four processes, exceptions, reversals, SRC & manual logs."},
+    {"id": "exceptions",  "label": "Exceptions / Work List",    "scope": "range",
+     "desc": "Only what needs action: P01 not credited, P02/P03 unmatched or partial, P04 pending wallet actions."},
+    {"id": "summary",     "label": "MIS Summary (trend)",       "scope": "range",
+     "desc": "Per date × process: totals, matched, open, match rate and amounts — management trend view."},
+    {"id": "ko_wise",     "label": "KO / CSP-wise Summary",     "scope": "range",
+     "desc": "Per agent roll-up across P01–P03: volumes, matched vs open counts and amounts."},
+    {"id": "unified",     "label": "All Entries (unified ledger)", "scope": "date",
+     "desc": "Every bank and data entry with its status, which process reconciled it, and its counterpart."},
+    {"id": "p01_lines",   "label": "P01 Settlement Lines",      "scope": "date",
+     "desc": "Line-level P01: each KO withdrawal and each bank settlement line behind every KO total."},
+    {"id": "reversals",   "label": "Reversals Report",          "scope": "range",
+     "desc": "All P02 reversal legs (same reference DR + CR) with success/fail state."},
+    {"id": "p04_actions", "label": "Wallet Action Tracker (P04)", "scope": "range",
+     "desc": "Deposit/withdrawal corrections with done vs pending status."},
+    {"id": "src_log",     "label": "SRC Disposition Log",       "scope": "range",
+     "desc": "Every SRC tag on SBI rows: code, note, who and when."},
+    {"id": "manual_log",  "label": "Manual Match Log",          "scope": "range",
+     "desc": "Every SBI manual match: key, counterpart, remark, who and when."},
+]
+
+
+@router.get("/report-options")
+def sbi_report_options(current_user=Depends(get_current_user)):
+    """The report library (drives the Reports UI — additions are backend-only)."""
+    return {"reports": _SBI_REPORTS}
+
+
+@router.get("/report")
+def sbi_report(
+    type: str = Query(..., description="one of the /sbi/report-options ids"),
+    recon_date: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Build one report from the SBI report library as a styled Excel workbook."""
+    t = (type or "").lower()
+    if t not in {r["id"] for r in _SBI_REPORTS}:
+        raise HTTPException(status_code=400, detail="Unknown report type — see /sbi/report-options")
+
+    # Single-date reports: fall back to the latest date with data (echoed in header).
+    used_date = recon_date
+    scope = next(r["scope"] for r in _SBI_REPORTS if r["id"] == t)
+    if scope == "date":
+        if used_date:
+            has = any(db.query(m.id).filter(m.recon_date == used_date).first()
+                      for m in (SBIP01Result, SBIP02Result, SBIP03Result, SBIP04Result))
+            if not has:
+                used_date = _latest_sbi_date(db)
+        else:
+            used_date = _latest_sbi_date(db)
+        rd, df_, dt_ = used_date, None, None
+        tag = used_date or "none"
+    else:
+        rd, df_, dt_ = recon_date, date_from, date_to
+        tag = rd or (f"{df_ or 'start'}_to_{dt_ or 'end'}" if (df_ or dt_) else "all")
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as w:
+
+        if t == "daily_pack":
+            recs = {p: _load_process_recs(db, p, rd, with_bank_desc=(p == "p02")) for p in _SBI_EXPORTS}
+            _sheet(w, "Overview", [_proc_overview(p, recs[p]) for p in _SBI_EXPORTS],
+                   ["process", "sheet", "total", "matched", "open", "match_rate_pct",
+                    "amount_total", "amount_matched", "amount_open", "notes"])
+            _sheet(w, "P01 Settlement", recs["p01"], _P01_XCOLS)
+            _sheet(w, "P02 Bank vs Txn", recs["p02"], _P02_XCOLS)
+            _sheet(w, "P03 CSP-Txn-Bank", recs["p03"], _P03_XCOLS)
+            _sheet(w, "P04 Wallet", recs["p04"], _P04_XCOLS)
+            _sheet(w, "Exceptions P01",
+                   [r for r in recs["p01"] if r.get("status") != "CREDITED"], _P01_XCOLS)
+            _sheet(w, "Exceptions P02",
+                   [r for r in recs["p02"] if r.get("match_status") not in ("Matched", "Manual_Matched")], _P02_XCOLS)
+            _sheet(w, "Exceptions P03",
+                   [r for r in recs["p03"] if r.get("match_status") not in ("Matched", "Manual_Matched")], _P03_XCOLS)
+            _sheet(w, "P04 Pending",
+                   [r for r in recs["p04"] if r.get("action_required") != "NONE" and not r.get("action_done")], _P04_XCOLS)
+            _sheet(w, "Reversals",
+                   [r for r in recs["p02"] if r.get("match_status") == "Reversal"], _P02_XCOLS)
+            srcs = db.query(SBISrcAssignment).filter(SBISrcAssignment.recon_date == rd).all() if rd else []
+            _sheet(w, "SRC Log",
+                   [{"recon_date": s.recon_date, "process": s.process, "match_key": s.match_key,
+                     "src_code": s.src_code, "src_note": s.src_note, "by": s.created_by,
+                     "at": str(s.created_at or "")} for s in srcs],
+                   ["recon_date", "process", "match_key", "src_code", "src_note", "by", "at"])
+            mms = db.query(SBIManualMatch).filter(SBIManualMatch.recon_date == rd).all() if rd else []
+            _sheet(w, "Manual Log",
+                   [{"recon_date": m.recon_date, "process": m.process, "match_key": m.match_key,
+                     "counterpart_ref": m.counterpart_ref, "remark": m.remark, "by": m.created_by,
+                     "at": str(m.created_at or "")} for m in mms],
+                   ["recon_date", "process", "match_key", "counterpart_ref", "remark", "by", "at"])
+
+        elif t == "exceptions":
+            p01 = [r for r in _load_process_recs(db, "p01", rd, df_, dt_) if r.get("status") != "CREDITED"]
+            p02 = [r for r in _load_process_recs(db, "p02", rd, df_, dt_, with_bank_desc=True)
+                   if r.get("match_status") not in ("Matched", "Manual_Matched")]
+            p03 = [r for r in _load_process_recs(db, "p03", rd, df_, dt_)
+                   if r.get("match_status") not in ("Matched", "Manual_Matched")]
+            p04 = [r for r in _load_process_recs(db, "p04", rd, df_, dt_)
+                   if r.get("action_required") != "NONE" and not r.get("action_done")]
+            _sheet(w, "P01 Not Credited", p01, _P01_XCOLS)
+            _sheet(w, "P02 Open", p02, _P02_XCOLS)
+            _sheet(w, "P03 Open", p03, _P03_XCOLS)
+            _sheet(w, "P04 Pending Actions", p04, _P04_XCOLS)
+
+        elif t == "summary":
+            grid, totals = [], {}
+            for p in _SBI_EXPORTS:
+                recs = _load_process_recs(db, p, rd, df_, dt_)
+                by_date = {}
+                for r in recs:
+                    by_date.setdefault(r.get("recon_date") or "", []).append(r)
+                for d in sorted(by_date):
+                    row = _proc_overview(p, by_date[d]); row["date"] = d
+                    grid.append(row)
+                totals[p] = _proc_overview(p, recs)
+            _sheet(w, "By Date x Process", grid,
+                   ["date", "process", "total", "matched", "open", "match_rate_pct",
+                    "amount_total", "amount_matched", "amount_open"])
+            _sheet(w, "Totals by Process", [totals[p] for p in _SBI_EXPORTS],
+                   ["process", "sheet", "total", "matched", "open", "match_rate_pct",
+                    "amount_total", "amount_matched", "amount_open", "notes"])
+
+        elif t == "ko_wise":
+            def _agg(recs, key, amt_field, ok_states):
+                out = {}
+                for r in recs:
+                    k = r.get(key) or "(blank)"
+                    a = out.setdefault(k, {"ko_csp": k, "total": 0, "matched": 0, "open": 0,
+                                           "amount_total": 0.0, "amount_open": 0.0})
+                    a["total"] += 1
+                    ok = (r.get("match_status") or r.get("status")) in ok_states
+                    a["matched"] += 1 if ok else 0
+                    a["open"] += 0 if ok else 1
+                    amt = r.get(amt_field) or r.get("bank_amount") or 0
+                    a["amount_total"] = round(a["amount_total"] + amt, 2)
+                    if not ok:
+                        a["amount_open"] = round(a["amount_open"] + amt, 2)
+                return out
+            p01r = _load_process_recs(db, "p01", rd, df_, dt_)
+            p02a = _agg(_load_process_recs(db, "p02", rd, df_, dt_), "ko_id", "bank_amount",
+                        ("Matched", "Manual_Matched"))
+            p03a = _agg(_load_process_recs(db, "p03", rd, df_, dt_), "csp_code", "txn_amount",
+                        ("Matched", "Manual_Matched"))
+            p01a = {}
+            for r in p01r:
+                k = r.get("ko_id") or "(blank)"
+                a = p01a.setdefault(k, {"ko_csp": k, "wallet_withdrawn": 0.0, "bank_settled": 0.0,
+                                        "difference": 0.0, "days": 0, "days_credited": 0})
+                a["wallet_withdrawn"] = round(a["wallet_withdrawn"] + (r.get("wallet_withdrawn") or 0), 2)
+                a["bank_settled"] = round(a["bank_settled"] + (r.get("bank_settled") or 0), 2)
+                a["difference"] = round(a["difference"] + (r.get("difference") or 0), 2)
+                a["days"] += 1
+                a["days_credited"] += 1 if r.get("status") == "CREDITED" else 0
+            all_kos = sorted(set(p01a) | set(p02a) | set(p03a))
+            overview = []
+            for k in all_kos:
+                o1, o2, o3 = p01a.get(k, {}), p02a.get(k, {}), p03a.get(k, {})
+                overview.append({
+                    "ko_csp": k,
+                    "p01_wallet": o1.get("wallet_withdrawn", 0), "p01_settled": o1.get("bank_settled", 0),
+                    "p01_diff": o1.get("difference", 0),
+                    "p02_total": o2.get("total", 0), "p02_open": o2.get("open", 0),
+                    "p02_open_amt": o2.get("amount_open", 0),
+                    "p03_total": o3.get("total", 0), "p03_open": o3.get("open", 0),
+                    "p03_open_amt": o3.get("amount_open", 0),
+                    "total_open_amt": round((o2.get("amount_open", 0) or 0) + (o3.get("amount_open", 0) or 0), 2),
+                })
+            overview.sort(key=lambda r: -r["total_open_amt"])
+            _sheet(w, "KO Overview", overview,
+                   ["ko_csp", "p01_wallet", "p01_settled", "p01_diff", "p02_total", "p02_open",
+                    "p02_open_amt", "p03_total", "p03_open", "p03_open_amt", "total_open_amt"])
+            _sheet(w, "P01 by KO", sorted(p01a.values(), key=lambda r: r["ko_csp"]),
+                   ["ko_csp", "wallet_withdrawn", "bank_settled", "difference", "days", "days_credited"])
+            _sheet(w, "P02 by KO", sorted(p02a.values(), key=lambda r: -r["amount_open"]),
+                   ["ko_csp", "total", "matched", "open", "amount_total", "amount_open"])
+            _sheet(w, "P03 by CSP", sorted(p03a.values(), key=lambda r: -r["amount_open"]),
+                   ["ko_csp", "total", "matched", "open", "amount_total", "amount_open"])
+
+        elif t == "unified":
+            res = get_unified(recon_date=rd, upload_date=None, side=None, status=None,
+                              process=None, search=None, page=1, page_size=10 ** 9,
+                              db=db, current_user=current_user) if rd else {"rows": []}
+            cols = ["side", "source", "ref", "ko_csp", "amount", "date", "drcr", "status",
+                    "process", "counterpart", "also_p03", "src_code", "src_note", "narration"]
+            _sheet(w, "All Entries", res["rows"], cols)
+            sc = res.get("status_counts") or {}
+            _sheet(w, "Status Counts",
+                   [{"status": k, "entries": v} for k, v in sorted(sc.items(), key=lambda x: -x[1])],
+                   ["status", "entries"])
+
+        elif t == "p01_lines":
+            res = get_p01_lines(recon_date=rd, upload_date=None, ko_id=None, status=None,
+                                db=db, current_user=current_user) if rd else {"kos": []}
+            kos, wlines, slines = [], [], []
+            for g in res["kos"]:
+                kos.append({k: g.get(k) for k in ("ko_id", "status", "wallet_withdrawn", "bank_settled",
+                                                  "difference", "deduct_date", "bank_txn_date",
+                                                  "src_code", "src_note")})
+                for x in g.get("withdrawals") or []:
+                    wlines.append({"ko_id": g["ko_id"], **x})
+                for x in g.get("settlements") or []:
+                    slines.append({"ko_id": g["ko_id"], **x})
+            _sheet(w, "KO Summary", kos, ["ko_id", "status", "wallet_withdrawn", "bank_settled",
+                                          "difference", "deduct_date", "bank_txn_date", "src_code", "src_note"])
+            _sheet(w, "Withdrawal Lines", wlines, ["ko_id", "amount", "txn_date", "datetime", "configured_by"])
+            _sheet(w, "Settlement Lines", slines, ["ko_id", "amount", "txn_date", "deduct_date", "ref", "description"])
+
+        elif t == "reversals":
+            recs = [r for r in _load_process_recs(db, "p02", rd, df_, dt_, with_bank_desc=True)
+                    if r.get("match_status") == "Reversal"]
+            recs.sort(key=lambda r: (r.get("reference_number") or "", r.get("bank_type") or ""))
+            _sheet(w, "Reversals", recs, _P02_XCOLS)
+
+        elif t == "p04_actions":
+            recs = _load_process_recs(db, "p04", rd, df_, dt_)
+            _sheet(w, "All Actions", recs, _P04_XCOLS)
+            _sheet(w, "Pending", [r for r in recs if r.get("action_required") != "NONE"
+                                  and not r.get("action_done")], _P04_XCOLS)
+            _sheet(w, "Done", [r for r in recs if r.get("action_done")], _P04_XCOLS)
+
+        elif t == "src_log":
+            q = _rng(db.query(SBISrcAssignment), SBISrcAssignment, rd, df_, dt_)
+            rows = [{"recon_date": s.recon_date, "process": s.process, "match_key": s.match_key,
+                     "src_code": s.src_code, "src_note": s.src_note, "by": s.created_by,
+                     "at": str(s.created_at or "")} for s in q.order_by(SBISrcAssignment.created_at.desc()).all()]
+            _sheet(w, "SRC Log", rows, ["recon_date", "process", "match_key", "src_code", "src_note", "by", "at"])
+
+        elif t == "manual_log":
+            q = _rng(db.query(SBIManualMatch), SBIManualMatch, rd, df_, dt_)
+            rows = [{"recon_date": m.recon_date, "process": m.process, "match_key": m.match_key,
+                     "counterpart_ref": m.counterpart_ref, "remark": m.remark, "by": m.created_by,
+                     "at": str(m.created_at or "")} for m in q.order_by(SBIManualMatch.created_at.desc()).all()]
+            _sheet(w, "Manual Matches", rows,
+                   ["recon_date", "process", "match_key", "counterpart_ref", "remark", "by", "at"])
+
+    output.seek(0)
+    fname = f"sbi_{t}_{tag}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "X-Recon-Date": str(tag),
+            "Access-Control-Expose-Headers": "X-Recon-Date",
+        },
+    )
+
+
+# ── Run all four processes in sequence (QoL orchestration — same code paths) ──
+
+@router.post("/run/all")
+def run_all(
+    recon_date: str,
+    upload_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("run_recon")),
+):
+    """Run P01 → P02 → P03 → P04 for one recon_date, exactly as the four individual
+    buttons would (identical code paths — each keeps its own audit row). A failure in
+    one process is reported but does not block the others."""
+    results = {}
+    for name, fn in (("p01", run_p01), ("p02", run_p02), ("p03", run_p03), ("p04", run_p04)):
+        try:
+            results[name] = fn(recon_date=recon_date, upload_date=upload_date,
+                               db=db, current_user=current_user)
+        except Exception as e:
+            db.rollback()
+            results[name] = {"error": str(e)[:300]}
+    _audit(db, current_user, "sbi_run_all", {
+        "recon_date": recon_date,
+        "ok": [k for k, v in results.items() if "error" not in v],
+        "failed": [k for k, v in results.items() if "error" in v]})
+    return {"recon_date": recon_date, "results": results}
 
 
 # ── Manual match (persistent overlay across re-runs) ──────────────────────────

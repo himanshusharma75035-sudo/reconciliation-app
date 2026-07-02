@@ -42,6 +42,7 @@ from routes.auth import router as auth_router
 from routes.upload import router as upload_router
 from routes.recon import router as recon_router
 from routes.reports import router as reports_router
+from routes.report_library import router as report_library_router
 from routes.audit import router as audit_router
 from routes.auto_upload import router as auto_upload_router
 from routes.admin import router as admin_router
@@ -95,6 +96,7 @@ app.include_router(auth_router)
 app.include_router(upload_router)
 app.include_router(recon_router)
 app.include_router(reports_router)
+app.include_router(report_library_router)
 app.include_router(audit_router)
 app.include_router(auto_upload_router)
 app.include_router(admin_router)

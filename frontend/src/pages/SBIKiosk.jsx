@@ -1083,6 +1083,52 @@ const PROCESSES = [
   { key: 'p04', label: '⚖️ P04 · Wallet Balance' },
 ]
 
+// Header quick actions: run all four processes for one date, and pull the
+// Daily Recon Pack (overview + all processes + exceptions + logs) in one click.
+function HeaderActions() {
+  const [date, setDate] = useState(today())
+  const [running, setRunning] = useState(false)
+  const runAll = async () => {
+    setRunning(true)
+    try {
+      const { data } = await api.post('/sbi/run/all', null, { params: { recon_date: date } })
+      const ok  = Object.entries(data.results || {}).filter(([, v]) => !v.error).map(([k]) => k.toUpperCase())
+      const bad = Object.entries(data.results || {}).filter(([, v]) => v.error)
+      if (ok.length) toast.success(`Ran ${ok.join(' · ')} for ${date}`)
+      bad.forEach(([k, v]) => toast.error(`${k.toUpperCase()}: ${v.error}`))
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Run failed') }
+    finally { setRunning(false) }
+  }
+  const dailyPack = async () => {
+    try {
+      const r = await api.get('/sbi/report', { params: { type: 'daily_pack', recon_date: date }, responseType: 'blob' })
+      const used = r.headers['x-recon-date']
+      if (used === 'none') { toast('No SBI recon results yet — run P01–P04 first', { icon: 'ℹ️' }); return }
+      const url = URL.createObjectURL(r.data)
+      const a = document.createElement('a'); a.href = url; a.download = `sbi_daily_pack_${used}.xlsx`; a.click()
+      URL.revokeObjectURL(url)
+      if (used !== date) toast(`No data for ${date} — exported latest (${used})`, { icon: 'ℹ️' })
+    } catch { toast.error('Report failed') }
+  }
+  return (
+    <div className="flex items-end gap-2">
+      <div>
+        <label className="text-xs text-gray-400 block mb-1">Recon date</label>
+        <input type="date" className="input" value={date} onChange={e => setDate(e.target.value)} />
+      </div>
+      <button onClick={runAll} disabled={running}
+        className="btn-primary flex items-center gap-1.5 text-sm whitespace-nowrap">
+        <Play size={14} className={running ? 'animate-pulse' : ''} />
+        {running ? 'Running…' : 'Run all (P01→P04)'}
+      </button>
+      <button onClick={dailyPack} title="Overview + all four processes + exceptions + logs, one workbook"
+        className="btn-ghost flex items-center gap-1.5 text-sm whitespace-nowrap">
+        ⬇ Daily Pack
+      </button>
+    </div>
+  )
+}
+
 export default function SBIKiosk() {
   const [tab, setTab] = useState('upload')
   const [uploadKey, setUploadKey] = useState(0)
@@ -1090,13 +1136,14 @@ export default function SBIKiosk() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex items-center justify-between mb-5 flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-bold text-gray-800">SBI Kiosk Banking Recon</h1>
           <p className="text-sm text-gray-400">
             Upload the four process files in the <span className="font-medium">Upload</span> tab, then run P01–P04. Each result reads <span className="font-medium">left source ↔ right source</span>.
           </p>
         </div>
+        <HeaderActions />
       </div>
 
       <UploadStatus key={uploadKey} />

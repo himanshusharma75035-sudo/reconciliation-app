@@ -6,6 +6,20 @@ import api from '../utils/api'
 import ScheduledReports from './ScheduledReports'
 
 // Fallback partner list — used if API is unavailable
+// Mirrors backend _SBI_REPORTS (GET /sbi/report-options) — used until it loads.
+const SBI_REPORT_FALLBACK = [
+  { id: 'daily_pack',  label: 'Daily Recon Pack',             scope: 'date',  desc: 'One workbook for the day: overview, all four processes, exceptions, reversals, SRC & manual logs.' },
+  { id: 'exceptions',  label: 'Exceptions / Work List',       scope: 'range', desc: 'Only what needs action: P01 not credited, P02/P03 unmatched or partial, P04 pending wallet actions.' },
+  { id: 'summary',     label: 'MIS Summary (trend)',          scope: 'range', desc: 'Per date × process: totals, matched, open, match rate and amounts — management trend view.' },
+  { id: 'ko_wise',     label: 'KO / CSP-wise Summary',        scope: 'range', desc: 'Per agent roll-up across P01–P03: volumes, matched vs open counts and amounts.' },
+  { id: 'unified',     label: 'All Entries (unified ledger)', scope: 'date',  desc: 'Every bank and data entry with its status, which process reconciled it, and its counterpart.' },
+  { id: 'p01_lines',   label: 'P01 Settlement Lines',         scope: 'date',  desc: 'Line-level P01: each KO withdrawal and each bank settlement line behind every KO total.' },
+  { id: 'reversals',   label: 'Reversals Report',             scope: 'range', desc: 'All P02 reversal legs (same reference DR + CR) with success/fail state.' },
+  { id: 'p04_actions', label: 'Wallet Action Tracker (P04)',  scope: 'range', desc: 'Deposit/withdrawal corrections with done vs pending status.' },
+  { id: 'src_log',     label: 'SRC Disposition Log',          scope: 'range', desc: 'Every SRC tag on SBI rows: code, note, who and when.' },
+  { id: 'manual_log',  label: 'Manual Match Log',             scope: 'range', desc: 'Every SBI manual match: key, counterpart, remark, who and when.' },
+]
+
 const FALLBACK_PARTNERS = [
   { slug: 'fino',      display_name: 'Fino'              },
   { slug: 'airtel',    display_name: 'Airtel'            },
@@ -46,6 +60,66 @@ export default function Reports() {
       .then(({ data }) => setPartnerList(data?.length ? data : FALLBACK_PARTNERS))
       .catch(() => setPartnerList(FALLBACK_PARTNERS))
   }, [])
+
+  // SBI Kiosk report library — served by the backend so new reports appear here
+  // without a frontend change; static fallback keeps the tab useful offline.
+  const [sbiReports, setSbiReports] = useState(SBI_REPORT_FALLBACK)
+  useEffect(() => {
+    api.get('/sbi/report-options')
+      .then(({ data }) => { if (data?.reports?.length) setSbiReports(data.reports) })
+      .catch(() => {})
+  }, [])
+
+  // Universal Report Library — every product (current AND future) gets its pack
+  // from GET /api/reports/library; new products/reports appear with zero UI change.
+  const [libProducts, setLibProducts] = useState([])
+  const [libProduct, setLibProduct] = useState('')
+  useEffect(() => {
+    api.get('/reports/library')
+      .then(({ data }) => {
+        setLibProducts(data?.products || [])
+        if (data?.products?.length && !libProduct) setLibProduct(data.products[0].id)
+      })
+      .catch(() => {})
+  }, [])
+
+  const downloadLibReport = async (prodId, rep) => {
+    const params = new URLSearchParams({ product: prodId, type: rep.id })
+    if (rep.scope === 'date') {
+      if (filters.to_date) params.append('recon_date', filters.to_date)
+    } else if (rep.scope === 'range') {
+      if (filters.from_date) params.append('date_from', filters.from_date)
+      if (filters.to_date)   params.append('date_to', filters.to_date)
+    }
+    try {
+      const r = await api.get(`/reports/library/run?${params}`, { responseType: 'blob' })
+      const used = r.headers['x-recon-date']
+      if (used === 'none') { toast(`No data yet for "${rep.label}"`, { icon: 'ℹ️' }); return }
+      _download(r.data, `${prodId}_${rep.id}_${used || 'export'}.xlsx`)
+      if (rep.scope === 'date' && filters.to_date && used && used !== filters.to_date)
+        toast(`No data for ${filters.to_date} — exported latest (${used})`, { icon: 'ℹ️' })
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Report failed')
+    }
+  }
+
+  const downloadSbiReport = async (rep) => {
+    const params = new URLSearchParams({ type: rep.id })
+    if (rep.scope === 'date') {
+      if (filters.to_date) params.append('recon_date', filters.to_date)
+    } else {
+      if (filters.from_date) params.append('date_from', filters.from_date)
+      if (filters.to_date)   params.append('date_to', filters.to_date)
+    }
+    try {
+      const r = await api.get(`/sbi/report?${params}`, { responseType: 'blob' })
+      const used = r.headers['x-recon-date']
+      if (used === 'none') { toast(`No data yet for "${rep.label}"`, { icon: 'ℹ️' }); return }
+      _download(r.data, `sbi_${rep.id}_${used || 'export'}.xlsx`)
+      if (rep.scope === 'date' && filters.to_date && used && used !== filters.to_date)
+        toast(`No data for ${filters.to_date} — exported latest (${used})`, { icon: 'ℹ️' })
+    } catch { toast.error('Report failed') }
+  }
 
   // Resolved list — always non-empty.
   // E-Value, BBPS and SBI Kiosk reconcile in their OWN tables, so the core
@@ -294,6 +368,7 @@ export default function Reports() {
   }
 
   const TABS = [
+    { key: 'library',        label: 'Report Library',  icon: Layers     },
     { key: 'summary',        label: 'Summary',         icon: BarChart2  },
     { key: 'statement',      label: 'Recon Statement', icon: FileText   },
     { key: 'ageing',         label: 'Ageing',          icon: BarChart2  },
@@ -594,6 +669,78 @@ export default function Reports() {
         </div>
       )}
 
+      {/* ── Report Library (all products, backend-driven) ── */}
+      {tab === 'library' && (() => {
+        const prod = libProducts.find(p => p.id === libProduct) || libProducts[0]
+        return (
+          <div className="space-y-5 max-w-3xl">
+            <div className="card bg-blue-50 border border-blue-100">
+              <p className="text-xs font-semibold text-blue-700 mb-3">Filters — Report Library</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">From Date</label>
+                  <input type="date" className="input" value={filters.from_date} onChange={e => upd({ from_date: e.target.value })} />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">To Date</label>
+                  <input type="date" className="input" value={filters.to_date} onChange={e => upd({ to_date: e.target.value })} />
+                </div>
+              </div>
+              <p className="text-[11px] text-gray-400 mt-2">
+                <strong>date</strong> reports use To&nbsp;Date (falling back to the latest date with data) ·{' '}
+                <strong>range</strong> reports use From/To (blank = all dates)
+              </p>
+            </div>
+
+            {/* Product chips — served by the backend, so future products appear automatically */}
+            <div className="flex gap-2 flex-wrap">
+              {libProducts.map(p => (
+                <button key={p.id} onClick={() => setLibProduct(p.id)}
+                  className={`px-3.5 py-1.5 rounded-full text-sm font-medium transition-colors border
+                    ${(prod?.id === p.id)
+                      ? 'bg-primary text-white border-primary'
+                      : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+                  {p.label}
+                  {p.kind === 'module' && <span className="ml-1.5 text-[10px] opacity-70">module</span>}
+                </button>
+              ))}
+              {libProducts.length === 0 && (
+                <span className="text-sm text-gray-400">Loading report library…</span>
+              )}
+            </div>
+
+            {prod && (
+              <div className="card">
+                <h2 className="font-semibold text-gray-700 mb-1">{prod.label} — Reports</h2>
+                <p className="text-xs text-gray-400 mb-3">
+                  {prod.kind === 'core'
+                    ? 'Built from the core reconciliation ledger for this product’s partners.'
+                    : 'Built from this product’s own reconciliation tables.'}
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {prod.reports.map(rep => (
+                    <button key={rep.id} onClick={() => downloadLibReport(prod.id, rep)}
+                      className="border border-gray-100 rounded-lg p-3 text-left hover:border-primary/40 hover:shadow-sm transition-all group">
+                      <div className="flex items-center gap-2">
+                        <Download size={13} className="text-gray-300 group-hover:text-primary shrink-0" />
+                        <span className="text-sm font-medium text-gray-700">{rep.label}</span>
+                        <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-semibold shrink-0
+                          ${rep.scope === 'date' ? 'bg-blue-50 text-blue-600'
+                            : rep.scope === 'range' ? 'bg-purple-50 text-purple-600'
+                            : 'bg-gray-100 text-gray-500'}`}>
+                          {rep.scope === 'all' ? 'snapshot' : rep.scope}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-gray-400 mt-1 leading-snug">{rep.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })()}
+
       {/* ── SRC Reports ── */}
       {/* ── Kiosk Recon ── */}
       {tab === 'kiosk' && (
@@ -668,6 +815,33 @@ export default function Reports() {
             }} className="btn-primary flex items-center gap-2 mt-3">
               <Download size={14} /> Download All Processes (multi-sheet)
             </button>
+          </div>
+
+          {/* Report library — served by GET /sbi/report-options; each tile is one
+              ready-made workbook from GET /sbi/report?type=… */}
+          <div className="card">
+            <h2 className="font-semibold text-gray-700 mb-1">Report Library</h2>
+            <p className="text-xs text-gray-400 mb-3">
+              Ready-made SBI Kiosk reports. <strong>date</strong> reports use To&nbsp;Date
+              (falling back to the latest date with data); <strong>range</strong> reports use
+              From/To — leave blank for all dates.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {sbiReports.map(rep => (
+                <button key={rep.id} onClick={() => downloadSbiReport(rep)}
+                  className="border border-gray-100 rounded-lg p-3 text-left hover:border-primary/40 hover:shadow-sm transition-all group">
+                  <div className="flex items-center gap-2">
+                    <Download size={13} className="text-gray-300 group-hover:text-primary shrink-0" />
+                    <span className="text-sm font-medium text-gray-700">{rep.label}</span>
+                    <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-semibold shrink-0
+                      ${rep.scope === 'date' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600'}`}>
+                      {rep.scope}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-gray-400 mt-1 leading-snug">{rep.desc}</div>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}
