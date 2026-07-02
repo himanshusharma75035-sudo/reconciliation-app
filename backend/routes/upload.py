@@ -1370,6 +1370,18 @@ def confirm_mapping(
         session.original_filename, os.path.join(UPLOAD_DIR, session.stored_filename)
     ) if is_bank_side else None
 
+    # ── Funds-position capture (bank side; reporting only, never matched on) ──
+    # Detect the statement's running-balance column once: name contains 'balance'
+    # but isn't an opening/closing header column.
+    _balance_col = None
+    if is_bank_side:
+        for _c in df_columns:
+            _cl = _c.strip().lower()
+            if "balance" in _cl and "opening" not in _cl and "closing" not in _cl:
+                _balance_col = _c
+                break
+    _funds_lines = {}   # (partner, bank_acct) → [line dicts in file order]
+
     for _, row in df.iterrows():
         row_dict = dict(row)
 
@@ -1533,6 +1545,39 @@ def confirm_mapping(
         # ── CSP (retailer) identity — internal dump only (read-only, additive) ─
         _csp_code, _csp_name = _extract_csp(row_dict) if is_internal_side else ("", "")
 
+        # ── Funds-position: running balance + notification-row classification ──
+        # (bank side only; reporting-only — matching logic untouched)
+        _row_balance = None
+        if is_bank_side:
+            if _balance_col:
+                _row_balance = _safe_float(str(row_dict.get(_balance_col, '')).replace(',', ''))
+            _desc_u = (desc_val or "").strip().upper()
+            # Notification lines (OPENING/CLOSING BALANCE, statement footers/legends)
+            # carry NO money movement and NO identifiers. They are kept in the ledger
+            # (director decision: retain the whole statement) but classified out of
+            # reconciliation as auto-closed 'notification' rows. Deliberately narrow:
+            # a real ₹0 txn with a DR/CR marker or any identifier still ingests as txn.
+            if (row_type == "txn" and not dr_cr and (amount is None or amount == 0)
+                    and not (eko_tid or tracking_num or utr_num)):
+                row_type = "notification"
+                auto_recon_status = "fund_transfer"   # existing auto-closed status
+            # Collect the funds line (file order) for the EOD balance snapshot.
+            _dr = _cr = 0.0
+            if amount:
+                if dr_cr == "DR":
+                    _dr = amount
+                elif dr_cr == "CR":
+                    _cr = amount
+                elif row_type in ("settlement_credit", "fund_transfer", "reversal"):
+                    _cr = amount
+                elif row_type != "notification":
+                    _dr = amount            # DMT payouts/fees default to debit
+            _funds_lines.setdefault((row_partner, _bank_acct or ""), []).append({
+                "date": row_recon_date, "balance": _row_balance, "dr": _dr, "cr": _cr,
+                "stated_opening": _row_balance if _desc_u == "OPENING BALANCE" else None,
+                "stated_closing": _row_balance if _desc_u == "CLOSING BALANCE" else None,
+            })
+
         txn = Transaction(
             id=generate_id(),
             upload_session_id=session.id,
@@ -1562,6 +1607,8 @@ def confirm_mapping(
             # pre-existing rows. Read-only — never used in matching.
             csp_code=(_csp_code if is_internal_side else None),
             csp_name=(_csp_name if is_internal_side else None),
+            # Running statement balance (bank side; display/funds-position only)
+            balance=(_row_balance if is_bank_side else None),
         )
         txns.append(txn)
 
@@ -1574,6 +1621,19 @@ def confirm_mapping(
     # Auto-register a newly seen bank account so it appears in the registry.
     if _bank_acct and is_bank_side and session.partner not in (None, "", "mixed"):
         _register_bank_account(session.partner, _bank_acct, db)
+
+    # ── Funds-position: upsert per-date EOD balance snapshots (never blocks) ──
+    if is_bank_side and _funds_lines:
+        try:
+            from core.funds import record_snapshots
+            from models.database import PartnerConfig as _PC
+            for (_fp, _facct), _flines in _funds_lines.items():
+                _pc = db.query(_PC).filter(_PC.slug == _fp).first()
+                _prod = (_pc.product if _pc and _pc.product else "dmt")
+                record_snapshots(db, _prod, _fp, _facct, _flines,
+                                 uploaded_by=current_user.username)
+        except Exception as _e:
+            logger.warning(f"funds snapshot skipped: {_e}")
 
     # ── Reversal matching: run first, before auto-recon ─────────────────────────
     # Pairs bank reversal rows (row_type reversal/fee_reversal) with their originals

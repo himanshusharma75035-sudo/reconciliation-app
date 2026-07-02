@@ -164,6 +164,7 @@ async def upload_bank_statement(
     inserted = 0
     errors = []
     today = str(datetime.date.today())
+    _fund_rows = []   # funds-position lines (file order; reporting only)
 
     for line in lines[header_idx + 1:]:
         parts = line.strip().split('\t')
@@ -206,10 +207,21 @@ async def upload_bank_statement(
                 txn_type      = _clip(_extract_txn_type_from_bank(desc), 30),
             ))
             inserted += 1
+            # Funds-position line (file order; reporting only)
+            _fund_rows.append({"date": _nd(txn_date), "balance": balance,
+                               "dr": debit or 0.0, "cr": credit or 0.0})
         except Exception as e:
             errors.append(f"Line error: {e}")
 
     db.commit()
+
+    # ── Funds-position: EOD balance snapshots for the SBI settlement account ──
+    try:
+        from core.funds import record_snapshots
+        record_snapshots(db, "kiosk", "sbi", "SBI settlement a/c", _fund_rows,
+                         uploaded_by=current_user.username)
+    except Exception as _e:
+        logger.warning(f"routes/sbi_kiosk.py: funds snapshot skipped: {_e}")
 
     # M10: validate that we parsed a meaningful number of rows
     # SBI bank statements for a full day typically have hundreds of rows.

@@ -194,6 +194,19 @@ async def upload_bank(
                     detail=json.dumps({"bank": bank_name, "account": reco_acc_no,
                                        "file": file.filename, "rows": len(rows)})))
     db.commit()
+
+    # ── Funds-position: EOD balance snapshots for this account (never blocks) ──
+    try:
+        from core.funds import record_snapshots
+        record_snapshots(db, "evalue", bank_name.strip().lower(), reco_acc_no,
+                         [{"date": (r.get("txn_date") or ""), "balance": r.get("balance"),
+                           "dr": (r["amount"] or 0) if r["dr_cr"] == "DR" else 0.0,
+                           "cr": (r["amount"] or 0) if r["dr_cr"] == "CR" else 0.0}
+                          for r in rows],
+                         uploaded_by=getattr(user, "username", None))
+    except Exception:
+        pass
+
     cr = sum(1 for r in rows if r["dr_cr"] == "CR")
     return {"message": "Bank statement ingested", "bank": bank_name, "account": reco_acc_no,
             "rows": len(rows), "credits": cr, "debits": len(rows) - cr}

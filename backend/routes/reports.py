@@ -923,3 +923,50 @@ def get_active_src_codes(
     rows = q.all()
     return {"src_codes": sorted([r[0] for r in rows if r[0]])}
 
+
+
+# ── Funds Position (EOD) — director/CFO view ───────────────────────────────────
+# "What are the funds, product-wise, as per the data given" — latest statement per
+# bank account ≤ the chosen date (T+1 aware: the statement date is always shown).
+# Data comes from BankBalanceSnapshot, written at ingest by every bank upload path.
+# Reporting only — reconciliation never reads this.
+
+@router.get("/funds-position")
+def funds_position(
+    as_of: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    import datetime as _dt
+    from core.funds import get_funds_position
+    return get_funds_position(db, as_of or str(_dt.date.today()))
+
+
+@router.get("/funds-position/export")
+def funds_position_export(
+    as_of: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    import io as _io
+    import datetime as _dt
+    import pandas as _pd
+    from core.funds import get_funds_position
+    from routes.sbi_kiosk import _sheet as _xl_sheet
+    d = as_of or str(_dt.date.today())
+    pos = get_funds_position(db, d)
+    cols = ["product", "partner", "bank_account", "statement_date", "stale",
+            "opening_balance", "total_dr", "total_cr", "closing_balance",
+            "delta", "prev_date", "txn_count", "source"]
+    tot_cols = ["product", "accounts", "closing_total", "stale"]
+    totals = [{"product": p, **t} for p, t in sorted(pos["totals_by_product"].items())]
+    out = _io.BytesIO()
+    with _pd.ExcelWriter(out, engine="openpyxl") as w:
+        _xl_sheet(w, "Funds Position", pos["rows"], cols)
+        _xl_sheet(w, "Totals by Product", totals, tot_cols)
+    out.seek(0)
+    from fastapi.responses import StreamingResponse as _SR
+    return _SR(out,
+               media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+               headers={"Content-Disposition": f'attachment; filename="funds_position_{d}.xlsx"',
+                        "X-Recon-Date": d, "Access-Control-Expose-Headers": "X-Recon-Date"})

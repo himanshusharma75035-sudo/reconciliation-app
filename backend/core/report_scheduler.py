@@ -220,6 +220,30 @@ def _generate_report(report_type: str, filters: dict, date_range: str, db) -> tu
     if report_type.startswith("bbps_"):
         return _generate_bbps_report(report_type, filters, from_date, to_date, db)
 
+    # ── Funds Position (EOD) — director/CFO daily balance email ───────────────
+    if report_type == "funds_position":
+        import io as _io
+        import datetime as _dt
+        from core.funds import get_funds_position
+        d = str(_dt.date.today())
+        pos = get_funds_position(db, d)
+        cols = ["product", "partner", "bank_account", "statement_date", "stale",
+                "opening_balance", "total_dr", "total_cr", "closing_balance",
+                "delta", "prev_date", "txn_count", "source"]
+        totals = [{"product": p, **t} for p, t in sorted(pos["totals_by_product"].items())]
+        out = _io.BytesIO()
+        with pd.ExcelWriter(out, engine="openpyxl") as w:
+            pd.DataFrame(pos["rows"], columns=cols).to_excel(w, sheet_name="Funds Position", index=False)
+            pd.DataFrame(totals, columns=["product", "accounts", "closing_total", "stale"]
+                         ).to_excel(w, sheet_name="Totals by Product", index=False)
+            for ws in w.sheets.values():
+                fill = PatternFill("solid", fgColor="094053")
+                for cell in ws[1]:
+                    cell.fill = fill
+                    cell.font = XFont(color="FFFFFF", bold=True)
+        out.seek(0)
+        return out.read(), f"funds_position_{d}.xlsx"
+
     partner   = filters.get("partner") or None
     side      = filters.get("side")    or None
     src_code  = filters.get("src_code")or None

@@ -1571,6 +1571,8 @@ def _txn_to_dict(t: Transaction) -> dict:
         "bank_account": getattr(t, "bank_account", None),
         # Read-only bank-statement narration (bank side only; NULL for internal).
         "bank_description": (getattr(t, "bank_description", None) if t.side == "bank" else None),
+        # Running statement balance (bank side; display/funds-position only).
+        "balance": (getattr(t, "balance", None) if t.side == "bank" else None),
         # Read-only CSP (retailer) identity (internal side only; NULL for bank).
         "csp_code": (getattr(t, "csp_code", None) if t.side == "internal" else None),
         "csp_name": (getattr(t, "csp_name", None) if t.side == "internal" else None),

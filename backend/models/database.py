@@ -311,6 +311,10 @@ class Transaction(Base):
     # can be filtered/reported per account.
     bank_account     = Column(String(40),   nullable=True, index=True)
 
+    # Running balance from the bank statement (bank side only; NULL when the format
+    # has no balance column). Display/reporting ONLY — never used in matching.
+    balance          = Column(MONEY,        nullable=True)
+
     upload_session   = relationship("UploadSession", back_populates="transactions")
 
     # ── Indexes ───────────────────────────────────────────────────────────────
@@ -378,6 +382,39 @@ class ColumnMappingTemplate(Base):
     mapping    = Column(Text)                                 # JSON
     created_by = Column(String(36),  ForeignKey("users.id"))
     created_at = Column(DateTime,    default=datetime.datetime.utcnow)
+
+
+class BankBalanceSnapshot(Base):
+    """
+    Funds-position feature: ONE row per (product, account, statement_date) —
+    the day's opening/closing balance + DR/CR movement as stated by the uploaded
+    bank data. Written at ingest time (statement row order is only known then;
+    row IDs are UUIDs and not sortable). Re-uploads UPDATE the same key, never
+    duplicate. Read by the EOD Funds Position dashboard/report. Reporting only —
+    reconciliation never touches this table.
+    """
+    __tablename__ = "bank_balance_snapshots"
+
+    id              = Column(String(36),  primary_key=True, default=generate_id)
+    product         = Column(String(30),  nullable=False)   # dmt | aeps | pg | ... | evalue | kiosk
+    partner         = Column(String(50),  nullable=False)   # partner slug / module label
+    bank_account    = Column(String(60),  nullable=True)    # account no/label ('' = partner-level)
+    statement_date  = Column(String(10),  nullable=False)   # YYYY-MM-DD (as per the data — T+1 aware)
+    opening_balance = Column(MONEY,       nullable=True)    # explicit line, or derived closing-(cr-dr)
+    closing_balance = Column(MONEY,       nullable=True)
+    total_dr        = Column(MONEY,       default=0.0)
+    total_cr        = Column(MONEY,       default=0.0)
+    txn_count       = Column(Integer,     default=0)
+    source          = Column(String(20),  default="running")  # running | stated | derived
+    uploaded_by     = Column(String(100), nullable=True)
+    created_at      = Column(DateTime,    default=datetime.datetime.utcnow)
+    updated_at      = Column(DateTime,    default=datetime.datetime.utcnow,
+                             onupdate=datetime.datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_bbs_key", "product", "partner", "bank_account", "statement_date", unique=True),
+        Index("ix_bbs_date", "statement_date"),
+    )
 
 
 class AuditLog(Base):
@@ -1589,6 +1626,8 @@ def _run_migrations():
             ("bank_description", "TEXT"),
             # CSP (retailer) identity from the internal dump (internal side only)
             ("csp_code", "VARCHAR(40)"), ("csp_name", "VARCHAR(255)"),
+            # Running statement balance (funds-position feature; display-only)
+            ("balance", "FLOAT"),
         ],
         "audit_logs": [("action_type", "VARCHAR(10)"), ("previous_state", "TEXT")],
         "evalue_bank_txns": [

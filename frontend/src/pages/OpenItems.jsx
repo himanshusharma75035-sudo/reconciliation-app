@@ -56,7 +56,7 @@ const SRC_ELIGIBLE = new Set([
   'unmatched_internal', 'failed_pending_refund', 'refunded_but_success', // BBPS
 ])
 
-const COLS = 17  // checkbox + 15 data cols (incl. Description, CSP) + actions
+const COLS = 18  // checkbox + 16 data cols (incl. Description, CSP, Balance) + actions
 
 export default function OpenItems() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -504,6 +504,7 @@ export default function OpenItems() {
                 <th className="table-th">Tracking No</th>
                 <th className="table-th">UTR No</th>
                 <th className="table-th text-right">Amount</th>
+                <th className="table-th text-right">Balance</th>
                 <th className="table-th">DR/CR</th>
                 <th className="table-th">Recon Status</th>
                 <th className="table-th">Recon ID</th>
@@ -544,6 +545,11 @@ export default function OpenItems() {
                         ? <span className={item.dr_cr === 'CR' ? 'text-green-600' : item.dr_cr === 'DR' ? 'text-gray-800' : 'text-gray-600'}>
                             {item.amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
+                        : '—'}
+                    </td>
+                    <td className="table-td text-right tabular-nums text-xs text-gray-500">
+                      {item.balance != null
+                        ? item.balance.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
                         : '—'}
                     </td>
                     <td className="table-td">

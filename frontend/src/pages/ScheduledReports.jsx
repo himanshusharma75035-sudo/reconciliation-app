@@ -16,6 +16,7 @@ const REPORT_TYPES = [
   { value: 'bbps_summary',      label: 'BBPS Summary'       },
   { value: 'bbps_exceptions',   label: 'BBPS Exceptions'    },
   { value: 'bbps_unmatched',    label: 'BBPS Unmatched'     },
+  { value: 'funds_position',    label: 'Funds Position (EOD balances)' },
 ]
 
 const FREQUENCIES = [

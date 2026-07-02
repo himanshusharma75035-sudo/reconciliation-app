@@ -597,6 +597,102 @@ function ProductTabs({ partnerConfigs, data }) {
   )
 }
 
+// ── Funds Position (EOD) — director/CFO view ──────────────────────────────────
+// Latest statement balance per bank account ≤ the chosen date (T+1 aware: the
+// statement date is always shown next to the number). Fed by BankBalanceSnapshot,
+// written automatically on every bank upload. Reporting only.
+function FundsPositionPanel() {
+  const [asOf, setAsOf] = useState(() => new Date().toISOString().split('T')[0])
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(false)
+
+  const load = useCallback(async (d) => {
+    setLoading(true)
+    try {
+      const { data: res } = await api.get('/reports/funds-position', { params: { as_of: d } })
+      setData(res)
+    } catch { /* silent */ } finally { setLoading(false) }
+  }, [])
+  useEffect(() => { load(asOf) }, [])
+
+  const dl = async () => {
+    try {
+      const r = await api.get('/reports/funds-position/export', { params: { as_of: asOf }, responseType: 'blob' })
+      const url = URL.createObjectURL(r.data)
+      const a = document.createElement('a'); a.href = url; a.download = `funds_position_${asOf}.xlsx`; a.click()
+      URL.revokeObjectURL(url)
+    } catch { toast.error('Export failed') }
+  }
+
+  const fmt = n => n == null ? '—' : `₹${Number(n).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+  const rows = data?.rows || []
+  const grand = rows.reduce((s, r) => s + (r.closing_balance || 0), 0)
+
+  return (
+    <div className="card overflow-hidden p-0 mb-5">
+      <div className="flex items-center gap-2.5 px-5 py-4 border-b border-gray-100 bg-gray-50/50 flex-wrap">
+        <Landmark size={17} className="text-emerald-600" />
+        <h2 className="font-bold text-gray-800 text-sm">Funds Position (EOD)</h2>
+        {rows.length > 0 && (
+          <span className="text-xs text-gray-500">Total closing: <strong className="text-emerald-700">{fmt(grand)}</strong></span>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          <input type="date" className="input" value={asOf} onChange={e => setAsOf(e.target.value)} />
+          <button onClick={() => load(asOf)} className="btn-ghost text-xs">{loading ? 'Loading…' : 'Apply'}</button>
+          <button onClick={dl} className="btn-primary text-xs">⬇ Report</button>
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <div className="px-5 py-6 text-center text-xs text-gray-400 italic">
+          No balance snapshots yet — they are recorded automatically from the next bank statement upload onward.
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-gray-100 text-gray-400 font-medium bg-gray-50/50">
+                <th className="text-left py-2 px-4">Product</th>
+                <th className="text-left py-2 px-3">Bank / Partner</th>
+                <th className="text-left py-2 px-3">Account</th>
+                <th className="text-left py-2 px-3">Statement date</th>
+                <th className="text-right py-2 px-3">Opening</th>
+                <th className="text-right py-2 px-3">Total DR</th>
+                <th className="text-right py-2 px-3">Total CR</th>
+                <th className="text-right py-2 px-3 font-semibold">Closing</th>
+                <th className="text-right py-2 px-4">Δ vs prev</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={i} className="border-b border-gray-50 hover:bg-emerald-50/40">
+                  <td className="py-2 px-4 font-semibold text-gray-700 uppercase">{r.product}</td>
+                  <td className="py-2 px-3 text-gray-600 capitalize">{r.partner}</td>
+                  <td className="py-2 px-3 font-mono text-gray-500">{r.bank_account || '—'}</td>
+                  <td className="py-2 px-3">
+                    <span className={r.stale ? 'text-amber-600 font-medium' : 'text-gray-600'}>
+                      {r.statement_date}{r.stale && ' ⚠'}
+                    </span>
+                  </td>
+                  <td className="py-2 px-3 text-right text-gray-500 tabular-nums">{fmt(r.opening_balance)}</td>
+                  <td className="py-2 px-3 text-right text-red-400 tabular-nums">{fmt(r.total_dr)}</td>
+                  <td className="py-2 px-3 text-right text-green-500 tabular-nums">{fmt(r.total_cr)}</td>
+                  <td className="py-2 px-3 text-right font-bold text-emerald-700 tabular-nums">{fmt(r.closing_balance)}</td>
+                  <td className={`py-2 px-4 text-right tabular-nums ${r.delta > 0 ? 'text-green-600' : r.delta < 0 ? 'text-red-500' : 'text-gray-400'}`}>
+                    {r.delta == null ? '—' : (r.delta > 0 ? '+' : '') + fmt(r.delta).replace('₹', '₹')}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="px-5 py-2 text-[11px] text-gray-400 border-t border-gray-50">
+            ⚠ = statement older than the selected date (last known balance shown, as per T+1 data availability).
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Zone 4 — PG Settlement Panel ──────────────────────────────────────────────
 
 function PGSettlementPanel({ dateRange }) {
@@ -997,6 +1093,9 @@ export default function Dashboard() {
 
       {/* ── Zone 1: KPI strip ────────────────────────────── */}
       <KpiStrip data={data} allPartners={allPartners} />
+
+      {/* ── Funds Position (EOD) — director/CFO view ─────── */}
+      <FundsPositionPanel />
 
       {/* ── Zone 2: Product tabs ─────────────────────────── */}
       <ProductTabs partnerConfigs={partnerConfigs} data={data} />

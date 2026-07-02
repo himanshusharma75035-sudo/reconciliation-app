@@ -18,7 +18,8 @@ router = APIRouter(prefix="/api/report-subscriptions", tags=["report-subscriptio
 
 VALID_REPORT_TYPES = ["open_items", "summary", "eod", "matched_pairs", "ageing", "src",
                       "evalue_summary", "evalue_exceptions", "evalue_unmatched",
-                      "bbps_summary", "bbps_exceptions", "bbps_unmatched"]
+                      "bbps_summary", "bbps_exceptions", "bbps_unmatched",
+                      "funds_position"]
 VALID_FREQUENCIES  = ["daily", "weekly", "monthly"]
 VALID_DATE_RANGES  = ["today", "yesterday", "last_7_days", "this_week", "this_month", "last_month"]
 

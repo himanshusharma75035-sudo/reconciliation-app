@@ -293,6 +293,16 @@ def _ingest_dataframe_inner(
         getattr(session, "original_filename", "") or "", _raw_path
     ) if is_bank_side else None
 
+    # ── Funds-position capture (mirror of routes/upload.py — contract #10) ──
+    _balance_col = None
+    if is_bank_side:
+        for _c in df_columns:
+            _cl = _c.strip().lower()
+            if "balance" in _cl and "opening" not in _cl and "closing" not in _cl:
+                _balance_col = _c
+                break
+    _funds_lines = {}   # (partner, bank_acct) → [line dicts in file order]
+
     for _, row in df.iterrows():
         row_dict = dict(row)
 
@@ -435,6 +445,33 @@ def _ingest_dataframe_inner(
         # CSP (retailer) identity — internal dump only (read-only, additive).
         _csp_code, _csp_name = _extract_csp(row_dict) if is_internal_side else ("", "")
 
+        # ── Funds-position: running balance + notification rows (mirror of
+        #    routes/upload.py — contract #10; reporting only) ──
+        _row_balance = None
+        if is_bank_side:
+            if _balance_col:
+                _row_balance = _safe_float(str(row_dict.get(_balance_col, '')).replace(',', ''))
+            _desc_u = (desc_val or "").strip().upper()
+            if (row_type == "txn" and not dr_cr and (amount is None or amount == 0)
+                    and not (eko_tid or tracking_num or utr_num)):
+                row_type = "notification"
+                auto_recon_status = "fund_transfer"
+            _dr = _cr = 0.0
+            if amount:
+                if dr_cr == "DR":
+                    _dr = amount
+                elif dr_cr == "CR":
+                    _cr = amount
+                elif row_type in ("settlement_credit", "fund_transfer", "reversal"):
+                    _cr = amount
+                elif row_type != "notification":
+                    _dr = amount
+            _funds_lines.setdefault((row_partner, _bank_acct or ""), []).append({
+                "date": row_recon_date, "balance": _row_balance, "dr": _dr, "cr": _cr,
+                "stated_opening": _row_balance if _desc_u == "OPENING BALANCE" else None,
+                "stated_closing": _row_balance if _desc_u == "CLOSING BALANCE" else None,
+            })
+
         txns.append(Transaction(
             id=generate_id(),
             upload_session_id=session.id,
@@ -461,6 +498,8 @@ def _ingest_dataframe_inner(
             # startup backfill only touches pre-existing rows. Read-only.
             csp_code=(_csp_code if is_internal_side else None),
             csp_name=(_csp_name if is_internal_side else None),
+            # Running statement balance (bank side; display/funds-position only)
+            balance=(_row_balance if is_bank_side else None),
         ))
 
     db.bulk_save_objects(txns)
@@ -470,6 +509,18 @@ def _ingest_dataframe_inner(
 
     if _bank_acct and is_bank_side and session.partner not in (None, "", "mixed"):
         _register_bank_account(session.partner, _bank_acct, db)
+
+    # ── Funds-position: upsert per-date EOD balance snapshots (never blocks) ──
+    if is_bank_side and _funds_lines:
+        try:
+            from core.funds import record_snapshots
+            from models.database import PartnerConfig as _PC
+            for (_fp, _facct), _flines in _funds_lines.items():
+                _pc = db.query(_PC).filter(_PC.slug == _fp).first()
+                _prod = (_pc.product if _pc and _pc.product else "dmt")
+                record_snapshots(db, _prod, _fp, _facct, _flines, uploaded_by="auto-upload")
+        except Exception:
+            pass   # snapshots must never block the watch-folder ingest
 
     # ── Reversal matching ─────────────────────────────────────────────────────
     reversal_results = {}
