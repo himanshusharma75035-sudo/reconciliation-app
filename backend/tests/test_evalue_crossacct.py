@@ -84,6 +84,36 @@ def test_cross_account_match_rejects_amount_gap(db):
     assert db.query(EvalueWalletLoad).filter_by(id="nl").first().recon_status == "unmatched_load"
 
 
+def test_manual_match_amount_guard(db):
+    from routes.evalue import manual_match, ManualMatchIn
+    from models.database import User
+    user = User(id="u1", username="tester", role="admin", permissions="{}")
+    db.add(EvalueBankTxn(id="b1", reco_acc_no="IDFC-4408", txn_date=RD, amount=200000.0,
+                         dr_cr="CR", recon_status="unmatched_bank"))
+    db.add(EvalueWalletLoad(id="l1", reco_acc_no="IDFC-1701", transaction_date=RD,
+                            amount=1000000.0, recon_status="unmatched_load"))
+    # and an equal-amount pair that must still match cleanly
+    db.add(EvalueBankTxn(id="b2", reco_acc_no="A", txn_date=RD, amount=500.0,
+                         dr_cr="CR", recon_status="unmatched_bank"))
+    db.add(EvalueWalletLoad(id="l2", reco_acc_no="A", transaction_date=RD,
+                            amount=500.0, recon_status="unmatched_load"))
+    db.commit()
+
+    # Rs 2L vs Rs 10L → linked but flagged, NEVER matched_manual
+    res = manual_match(ManualMatchIn(bank_txn_id="b1", load_id="l1"), db=db, user=user)
+    assert res["status"] == "wrong_amount"
+    b = db.query(EvalueBankTxn).filter_by(id="b1").first()
+    l = db.query(EvalueWalletLoad).filter_by(id="l1").first()
+    assert b.recon_status == l.recon_status == "wrong_amount"
+    assert b.match_id == l.match_id and b.match_id.startswith("EVMAN-")
+    assert "200000" in b.match_note and "1000000" in b.match_note
+
+    # equal amounts still produce a clean manual match
+    res = manual_match(ManualMatchIn(bank_txn_id="b2", load_id="l2"), db=db, user=user)
+    assert res["status"] == "matched_manual"
+    assert db.query(EvalueBankTxn).filter_by(id="b2").first().recon_status == "matched_manual"
+
+
 def test_rerun_preserves_cross_account_pairs(db):
     from routes.evalue import _run_one
     # A cross-account matched pair: load lives in ACC1, its bank side in OTHER.

@@ -544,21 +544,30 @@ class ManualMatchIn(BaseModel):
 
 @router.post("/manual-match")
 def manual_match(body: ManualMatchIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Manually pair a bank credit with a wallet load (same or cross account)."""
+    """Manually pair a bank credit with a wallet load (same or cross account).
+    Amount guard (parity with core manual_match): a pair whose amounts differ by
+    more than ₹1 is linked but flagged 'wrong_amount' — never a clean manual match."""
     b = db.query(EvalueBankTxn).filter(EvalueBankTxn.id == body.bank_txn_id).first()
     l = db.query(EvalueWalletLoad).filter(EvalueWalletLoad.id == body.load_id).first()
     if not b or not l:
         raise HTTPException(404, "Bank transaction or wallet load not found")
     cross = (b.reco_acc_no != l.reco_acc_no)
+    diff = round(abs(float(b.amount or 0) - float(l.amount or 0)), 2)
+    status = "matched_manual" if diff <= 1.0 else "wrong_amount"
     mid = _ev_mid("EVMAN", b.reco_acc_no)
     note = "manual match" + (f" — cross-account (bank {b.reco_acc_no} / load {l.reco_acc_no})" if cross else "")
+    if status == "wrong_amount":
+        note = f"manual match; bank {b.amount} vs load {l.amount} (Δ {diff})" + \
+               (f" — cross-account (bank {b.reco_acc_no} / load {l.reco_acc_no})" if cross else "")
     for row in (b, l):
-        row.recon_status = "matched_manual"; row.match_id = mid; row.match_note = note
+        row.recon_status = status; row.match_id = mid; row.match_note = note[:300]
     _ev_audit(db, user, "evalue_manual_match",
               {"bank": b.id, "load": l.id, "match_id": mid, "cross_account": cross,
-               "amount": b.amount})
+               "amount": b.amount, "status": status, "amount_diff": diff})
     db.commit()
-    return {"message": "Matched", "match_id": mid, "cross_account": cross}
+    return {"message": ("Matched" if status == "matched_manual"
+                        else f"Linked but flagged wrong_amount — amounts differ by ₹{diff}"),
+            "match_id": mid, "cross_account": cross, "status": status}
 
 
 @router.post("/unmatch")
@@ -746,13 +755,23 @@ class IbtManualIn(BaseModel):
 
 @router.post("/interbank/manual-match")
 def interbank_manual(body: IbtManualIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Amount guard (parity with the auto interbank scan, which requires UTR+amount):
+    a manual interbank pair with amounts differing by more than ₹1 is linked but
+    flagged wrong_amount / amount_mismatch instead of interbank_matched."""
     b = db.query(EvalueBankTxn).filter(EvalueBankTxn.id == body.bank_txn_id).first()
     t = db.query(Transaction).filter(Transaction.id == body.transaction_id).first()
     if not b or not t:
         raise HTTPException(404, "Bank txn or ledger transaction not found")
+    diff = round(abs(float(b.amount or 0) - float(t.amount or 0)), 2)
     mid = _do_interbank_link(db, b, t, user, "manual")
+    if diff > 1.0:
+        note = f"interbank manual; evalue {b.amount} vs {t.partner} {t.amount} (Δ {diff})"
+        b.recon_status = "wrong_amount"; b.match_note = note[:300]
+        t.recon_status = "amount_mismatch"    # core-ledger vocabulary for the same flag
     db.commit()
-    return {"message": "Interbank matched", "match_id": mid}
+    return {"message": ("Interbank matched" if diff <= 1.0
+                        else f"Linked but flagged — amounts differ by ₹{diff}"),
+            "match_id": mid, "amount_diff": diff}
 
 
 @router.post("/interbank/scan")

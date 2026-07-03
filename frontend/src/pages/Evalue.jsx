@@ -315,9 +315,14 @@ function ManualMatchPanel({ acct, onDone }) {
   useEffect(load, [acct])
   const doMatch = async () => {
     if (!selB || !selL) { toast.error('Select one bank credit and one load'); return }
+    const bAmt = bank.find(x => x.id === selB)?.amount, lAmt = loads.find(x => x.id === selL)?.amount
+    if (bAmt != null && lAmt != null && Math.abs(bAmt - lAmt) > 1 &&
+        !window.confirm(`⚠ Amounts differ: bank ${inr(bAmt)} vs load ${inr(lAmt)}.\nThe pair will be linked but flagged "wrong_amount" — it will NOT count as matched. Continue?`)) return
     setBusy(true)
     try { const { data } = await api.post('/evalue/manual-match', { bank_txn_id: selB, load_id: selL })
-      toast.success(data.cross_account ? 'Matched (cross-account)' : 'Matched'); setSelB(null); setSelL(null); load(); onDone?.()
+      if (data.status === 'wrong_amount') toast(data.message, { icon: '⚠️' })
+      else toast.success(data.cross_account ? 'Matched (cross-account)' : 'Matched')
+      setSelB(null); setSelL(null); load(); onDone?.()
     } catch (e) { toast.error(e.response?.data?.detail || 'Failed') } finally { setBusy(false) }
   }
   return (
@@ -391,6 +396,8 @@ function ManualMatchView() {
   const qL = new Set(queue.map(p => p.load.id))
   const addPair = () => {
     if (!pendB || !pendL) return toast.error('Select one bank credit and one load')
+    if (Math.abs((pendB.amount ?? 0) - (pendL.amount ?? 0)) > 1 &&
+        !window.confirm(`⚠ Amounts differ: bank ${inr(pendB.amount)} vs load ${inr(pendL.amount)}.\nThis pair will be linked but flagged "wrong_amount" — it will NOT count as matched. Queue it anyway?`)) return
     setQueue(q => [...q, { bank: pendB, load: pendL }]); setPendB(null); setPendL(null)
   }
   const submitAll = async () => {
@@ -401,12 +408,13 @@ function ManualMatchView() {
         api.post('/evalue/manual-match', { bank_txn_id: p.bank.id, load_id: p.load.id })))
       const okIdx = res.map(r => r.status === 'fulfilled')
       const ok = okIdx.filter(Boolean).length
+      const flagged = res.filter(r => r.status === 'fulfilled' && r.value?.data?.status === 'wrong_amount').length
       const okB = new Set(queue.filter((_, i) => okIdx[i]).map(p => p.bank.id))
       const okL = new Set(queue.filter((_, i) => okIdx[i]).map(p => p.load.id))
       setBankItems(prev => prev.filter(i => !okB.has(i.id)))
       setLoadItems(prev => prev.filter(i => !okL.has(i.id)))
       setQueue([])
-      toast.success(`Matched ${ok} pair(s)${res.length - ok ? `, ${res.length - ok} failed` : ''}`)
+      toast.success(`Matched ${ok} pair(s)${flagged ? ` (${flagged} flagged wrong_amount)` : ''}${res.length - ok ? `, ${res.length - ok} failed` : ''}`)
     } catch { toast.error('Submit failed') } finally { setSubmitting(false) }
   }
 
@@ -703,8 +711,10 @@ function InterbankView({ summary, refresh }) {
     catch (e) { toast.error(e.response?.data?.detail || 'Failed') }
   }
   const link = async (txnId) => {
-    try { await api.post('/evalue/interbank/manual-match', { bank_txn_id: cands.bank_txn.id, transaction_id: txnId })
-      toast.success('Interbank matched'); setCands(null); loadMatches(); loadUnmatched(acct); refresh()
+    try { const { data } = await api.post('/evalue/interbank/manual-match', { bank_txn_id: cands.bank_txn.id, transaction_id: txnId })
+      if (data.amount_diff > 1) toast(data.message, { icon: '⚠️' })
+      else toast.success('Interbank matched')
+      setCands(null); loadMatches(); loadUnmatched(acct); refresh()
     } catch (e) { toast.error(e.response?.data?.detail || 'Failed') }
   }
 
