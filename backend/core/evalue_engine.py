@@ -526,10 +526,60 @@ def parse_idfc(raw: bytes, filename: str) -> list:
     return _finalise_rows(recs)
 
 
+def parse_icici(raw: bytes, filename: str) -> list:
+    """
+    ICICI corporate 'Detailed Statement' (.xlsx, openpyxl). ~16-row header block
+    (name/address/period/advanced-search), then:
+      S.N. | Tran. Id | Value Date | Transaction Date | Transaction Posted Date |
+      Cheque. No./Ref. No. | Transaction Remarks | Withdrawal Amt (INR) |
+      Deposit Amt (INR) | Balance (INR)
+    Rows are chronological; a footer legend follows the data (no dates → skipped).
+    Dates like '01/Jul/2026'; amounts with Indian comma grouping.
+    """
+    df0 = pd.read_excel(io.BytesIO(raw), header=None, engine="openpyxl")
+    hi = _find_header_row(df0, ["tran. id", "withdrawal"])
+    if hi is None:
+        hi = _find_header_row(df0, ["transaction date", "deposit amt"])
+    if hi is None:
+        return []
+    header = [_clean(x) for x in df0.iloc[hi].tolist()]
+    data = df0.iloc[hi + 1:].reset_index(drop=True)
+    data.columns = range(data.shape[1])
+
+    def ci(sub):
+        for j, h in enumerate(header):
+            if sub in h.lower():
+                return j
+        return None
+
+    cD, cV = ci("transaction date"), ci("value date")   # 'transaction date' hits before 'transaction posted date'
+    cP, cRef, cTid = ci("remarks"), ci("cheque"), ci("tran. id")
+    cDeb, cCr, cBal = ci("withdrawal"), ci("deposit"), ci("balance")
+    recs = []
+    for _, row in data.iterrows():
+        d = _norm_date(row[cD]) if cD is not None else ""
+        if not d:
+            continue
+        cr = _sf(row[cCr]) if cCr is not None else 0
+        dr = _sf(row[cDeb]) if cDeb is not None else 0
+        recs.append({
+            "txn_date": d, "value_date": _norm_date(row[cV]) if cV is not None else "",
+            "description": _clean(row[cP]) if cP is not None else "",
+            "dr_cr": "CR" if cr > 0 else ("DR" if dr > 0 else ""),
+            "amount": cr if cr > 0 else dr,
+            "balance": _sf(row[cBal]) if cBal is not None else None,
+            "ref_no": (_clean(row[cRef]) if cRef is not None else "")
+                      or (_clean(row[cTid]) if cTid is not None else ""),
+            "branch": "",
+        })
+    return _finalise_rows(recs)
+
+
 # Bank name (normalised) → parser
 BANK_PARSERS = {
     "AXIS BANK":            parse_axis,
     "BANK OF INDIA":        parse_boi,
+    "ICICI BANK":           parse_icici,
     "IDBI BANK":            parse_idbi,
     "IDFC BANK":            parse_idfc,
     "PUNJAB NATIONAL BANK": parse_pnb,
