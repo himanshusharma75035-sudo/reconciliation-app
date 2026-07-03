@@ -220,10 +220,14 @@ def _run_one(db: Session, reco_acc_no: str) -> dict:
     # SRC-disposed rows are excluded from re-matching and left untouched — parity with
     # core run_reconciliation (which only feeds unmatched rows). This preserves a manual
     # SRC tag (src_code/src_note + status) across a recon re-run instead of clobbering it.
-    bank_objs = [b for b in all_bank if b.recon_status != "src_assigned"]
+    # EVX- rows are cross-account matches: their counterpart lives in ANOTHER account,
+    # so a per-account re-run must not dissolve one side of the pair.
+    def _keep(r):
+        return r.recon_status != "src_assigned" and not (r.match_id or "").startswith("EVX-")
+    bank_objs = [b for b in all_bank if _keep(b)]
     load_objs = [l for l in db.query(EvalueWalletLoad).filter(
                     EvalueWalletLoad.reco_acc_no == reco_acc_no).all()
-                 if l.recon_status != "src_assigned"]
+                 if _keep(l)]
 
     # Build dicts carrying a backref to the DB object
     bank_rows = []
@@ -283,6 +287,25 @@ def run_recon(
     return summary
 
 
+def _next_evx_number(db: Session) -> int:
+    """Next free EVX sequence number = MAX over every EVX id already worn by EITHER
+    side + 1. Never COUNT: E-Value uploads delete-and-replace rows, so a count
+    shrinks below the highest issued number and recycles live match IDs (the
+    EVX-00039..43 collision of 2026-07-02). Match IDs are audit references — they
+    must never be reused."""
+    import re as _re
+    mx = 0
+    ids = [r[0] for r in db.query(EvalueBankTxn.match_id)
+           .filter(EvalueBankTxn.match_id.like("EVX-%")).distinct().all()]
+    ids += [r[0] for r in db.query(EvalueWalletLoad.match_id)
+            .filter(EvalueWalletLoad.match_id.like("EVX-%")).distinct().all()]
+    for mid in ids:
+        m = _re.fullmatch(r"EVX-(\d+)", mid or "")
+        if m:
+            mx = max(mx, int(m.group(1)))
+    return mx + 1
+
+
 def _cross_account_reference_match(db: Session) -> dict:
     """Global reference-based match across accounts (run after per-account recon).
 
@@ -311,7 +334,7 @@ def _cross_account_reference_match(db: Session) -> dict:
 
     used = set()
     n = 0; flagged = 0
-    base = db.query(EvalueBankTxn).filter(EvalueBankTxn.match_id.like("EVX-%")).count()
+    base = _next_evx_number(db) - 1
     for b in credits:
         runs = EV._ref_digits(b.utr, b.description, b.ref_no)
         cand = None
