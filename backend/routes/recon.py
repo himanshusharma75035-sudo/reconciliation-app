@@ -83,6 +83,13 @@ def run_recon(req: RunReconRequest, db: Session = Depends(get_db),
               current_user: User = Depends(require_permission("run_recon"))):
     check_product_access(db, current_user, req.partner)
     result = run_reconciliation(req.partner, req.recon_date, db, current_user.id)
+    # Cross-date RRN pass (QR T+1): pairs split across recon dates — scoped partners only.
+    try:
+        from core.matching_engine import run_cross_date_rrn_match, CROSS_DATE_RRN_PARTNERS
+        if req.partner in CROSS_DATE_RRN_PARTNERS:
+            result.update(run_cross_date_rrn_match(req.partner, db, current_user.id))
+    except Exception:
+        pass
     _log(db, current_user, "run_recon", "recon_run", detail={
         "partner": req.partner, "recon_date": req.recon_date,
         "matched": result.get("matched"), "unmatched_bank": result.get("unmatched_bank"),

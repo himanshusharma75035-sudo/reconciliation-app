@@ -469,6 +469,83 @@ def run_neft_d1_match(partner: str, recon_date: str, db: Session, user_id: str) 
     return {"neft_d1_matched": matched_count, "prev_date": prev_date}
 
 
+def run_cross_date_rrn_match(partner: str, db: Session, user_id: str) -> Dict:
+    """
+    Cross-date RRN matching (QR T+1): the bank credit lands on day D but the
+    internal record carries D+1 (or further), so per-(partner, recon_date)
+    matching never sees the pair. This pass matches STILL-UNMATCHED bank ↔
+    internal txn rows on tracking_number (UPI RRN — the true transaction
+    identity) + amount within the core ₹1 tolerance, ACROSS recon dates.
+
+    Deliberately narrow: identifier-based only (an RRN is unique per UPI txn),
+    both sides must already be unmatched, first-match-wins in date order, and
+    match IDs use the BANK row's recon_date via the normal MAX+1 sequencing —
+    same discipline as run_neft_d1_match (seq allocated once per date and
+    incremented in memory; autoflush=False would otherwise reissue duplicates).
+    """
+    bank_txns = db.query(Transaction).filter(
+        Transaction.partner == partner,
+        Transaction.side == "bank",
+        Transaction.row_type == "txn",
+        Transaction.recon_status == ReconStatus.unmatched,
+        Transaction.tracking_number != None,          # noqa: E711
+        Transaction.recon_date.like("20%"),           # 'auto' sentinel rows excluded
+    ).order_by(Transaction.recon_date.asc()).all()
+    internal_txns = db.query(Transaction).filter(
+        Transaction.partner == partner,
+        Transaction.side == "internal",
+        Transaction.row_type == "txn",
+        Transaction.recon_status == ReconStatus.unmatched,
+        Transaction.tracking_number != None,          # noqa: E711
+        Transaction.recon_date.like("20%"),
+    ).order_by(Transaction.recon_date.asc()).all()
+
+    by_track: Dict[str, list] = {}
+    for i in internal_txns:
+        k = _normalize(i.tracking_number)
+        if k:
+            by_track.setdefault(k, []).append(i)
+
+    matched_count, used = 0, set()
+    seqs: Dict[str, int] = {}                          # bank recon_date → next seq
+    for b in bank_txns:
+        k = _normalize(b.tracking_number)
+        if not k:
+            continue
+        cand = None
+        for i in by_track.get(k, []):
+            if i.id in used:
+                continue
+            if abs(float(b.amount or 0) - float(i.amount or 0)) <= 1.0:
+                cand = i
+                break
+        if cand is None:
+            continue
+        d = b.recon_date
+        if d not in seqs:
+            seqs[d] = _next_seq(partner, d, db)
+        mid = _make_match_id(partner, d, seqs[d])
+        seqs[d] += 1
+        b.recon_status    = ReconStatus.matched
+        b.matched_with_id = cand.id
+        b.match_id        = mid
+        cand.recon_status    = ReconStatus.matched
+        cand.matched_with_id = b.id
+        cand.match_id        = mid
+        used.add(cand.id)
+        matched_count += 1
+
+    db.commit()
+    return {"cross_date_rrn_matched": matched_count}
+
+
+# Partners whose bank credit and internal record legitimately sit on different
+# recon dates (T+1 settlement recording) — the only ones the cross-date pass
+# runs for. Extend deliberately, never wholesale: other products match same-day
+# and a date-free pass would change their behavior.
+CROSS_DATE_RRN_PARTNERS = ("qr",)
+
+
 def flag_same_side_duplicates(partner: str, side: str, db: Session) -> Dict:
     """
     Flag re-ingested duplicate rows as 'duplicate' so they drop out of Open Items

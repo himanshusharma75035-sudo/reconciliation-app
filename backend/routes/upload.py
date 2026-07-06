@@ -1702,6 +1702,20 @@ def confirm_mapping(
                 except Exception as _e:
                     logger.warning(f"routes/upload.py: {_e}")  # NEFT D+1 errors don't block the upload response
 
+    # ── Cross-date RRN pass (QR T+1) — bank credit on D, internal record on D+1 ──
+    # Per-(partner, recon_date) matching never sees those pairs; this identifier-only
+    # pass (RRN + amount ≤ ₹1, across dates) closes them. Bidirectional (either side
+    # may arrive last) and scoped to CROSS_DATE_RRN_PARTNERS only.
+    cross_date_results = {}
+    try:
+        from core.matching_engine import run_cross_date_rrn_match, CROSS_DATE_RRN_PARTNERS
+        for p in set(p for (p, _d) in _recon_pairs if p in CROSS_DATE_RRN_PARTNERS):
+            xr = run_cross_date_rrn_match(p, db, current_user.id)
+            if xr.get("cross_date_rrn_matched", 0) > 0:
+                cross_date_results[p] = xr
+    except Exception as _e:
+        logger.warning(f"routes/upload.py: {_e}")  # cross-date errors don't block the upload response
+
     # ── Internal self-match after internal dump upload ───────────────────────────
     # Nets off DR/CR contra pairs (and Success+Refund) WITHIN the internal dump so
     # reversed/cancelled entries don't linger as failed/unmatched open items.
@@ -1867,6 +1881,7 @@ def confirm_mapping(
         "session_id": session.id,
         "auto_recon": auto_recon_results if is_internal_side else {},
         "neft_d1_auto": neft_d1_results if is_internal_side else {},
+        "cross_date_auto": cross_date_results,
         "reversal_auto": reversal_results if is_bank_side else {},
         # Re-ingested rows flagged as 'duplicate' (per partner/side), if any
         "duplicate_flagged": duplicate_results,

@@ -131,3 +131,52 @@ def test_rerun_preserves_cross_account_pairs(db):
     assert xl.recon_status == "matched_online"        # NOT reset by the re-run
     assert xl.match_id == "EVX-00009"
     assert xl.match_note == "cross-account reference"
+
+
+def test_rerun_preserves_manual_and_interbank_matches(db):
+    from routes.evalue import _run_one
+    # Manual (EVMAN-) and interbank (EVIBT-) dispositions must survive a re-run —
+    # their counterparts live outside this account's re-match universe.
+    db.add(EvalueBankTxn(id="bm", reco_acc_no="ACC1", bank_name="SBI", txn_date=RD,
+                         amount=500.0, dr_cr="CR", recon_status="matched_manual",
+                         match_id="EVMAN-ACC1-ABC123", match_note="manual match"))
+    db.add(EvalueBankTxn(id="bi", reco_acc_no="ACC1", bank_name="SBI", txn_date=RD,
+                         amount=900.0, dr_cr="CR", recon_status="interbank_matched",
+                         match_id="EVIBT-ACC1-DEF456"))
+    db.add(EvalueBankTxn(id="b1", reco_acc_no="ACC1", bank_name="SBI", txn_date=RD,
+                         utr="U9", amount=100.0, dr_cr="CR", recon_status="unmatched_bank"))
+    db.commit()
+
+    _run_one(db, "ACC1")
+
+    bm = db.query(EvalueBankTxn).filter_by(id="bm").first()
+    bi = db.query(EvalueBankTxn).filter_by(id="bi").first()
+    assert bm.recon_status == "matched_manual" and bm.match_id == "EVMAN-ACC1-ABC123"
+    assert bi.recon_status == "interbank_matched" and bi.match_id == "EVIBT-ACC1-DEF456"
+
+
+def test_auto_recon_after_upload_never_raises(db, monkeypatch):
+    import routes.evalue as EVR
+
+    def _boom(db_, acct):
+        raise RuntimeError("engine exploded")
+
+    monkeypatch.setattr(EVR, "_run_one", _boom)
+    monkeypatch.setattr(EVR, "_cross_account_reference_match",
+                        lambda db_: (_ for _ in ()).throw(RuntimeError("x")))
+    out = EVR._auto_recon_after_upload(db, ["ACC1", "ACC2"])   # must not raise
+    assert out["ACC1"].startswith("skipped:") and out["ACC2"].startswith("skipped:")
+    assert str(out["cross_account"]).startswith("skipped:")
+
+
+def test_auto_recon_after_upload_runs_accounts(db):
+    from routes.evalue import _auto_recon_after_upload
+    db.add(EvalueBankTxn(id="b1", reco_acc_no="ACC1", bank_name="SBI", txn_date=RD,
+                         utr="U1", amount=250.0, dr_cr="CR", recon_status="unmatched_bank"))
+    db.add(EvalueWalletLoad(id="l1", reco_acc_no="ACC1", transaction_date=RD, amount=250.0,
+                            recon_status="unmatched_load", utr_number="U1"))
+    db.commit()
+    out = _auto_recon_after_upload(db, ["ACC1", "NO_SUCH_ACCT"])
+    assert out["ACC1"] == "ok"
+    assert "no bank statement" in out["NO_SUCH_ACCT"]          # reported, not raised
+    assert out["cross_account"] == 0 or isinstance(out["cross_account"], int)

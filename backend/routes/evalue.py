@@ -150,8 +150,11 @@ async def upload_internal(
     db.commit()
     from collections import Counter
     by_acct = Counter(l["reco_acc_no"] for l in loads)
+    # Auto-recon every account this dump touched (never blocks the upload).
+    auto_recon = _auto_recon_after_upload(db, sorted(by_acct))
     return {"message": "Internal dump ingested", "rows": inserted, "replaced": replaced,
-            "accounts": len(by_acct), "top_accounts": by_acct.most_common(10)}
+            "accounts": len(by_acct), "top_accounts": by_acct.most_common(10),
+            "auto_recon": auto_recon}
 
 
 # ─── Upload bank statement ────────────────────────────────────────────────────
@@ -208,11 +211,44 @@ async def upload_bank(
         pass
 
     cr = sum(1 for r in rows if r["dr_cr"] == "CR")
+    # Auto-recon this account (never blocks the upload).
+    auto_recon = _auto_recon_after_upload(db, [reco_acc_no])
     return {"message": "Bank statement ingested", "bank": bank_name, "account": reco_acc_no,
-            "rows": len(rows), "credits": cr, "debits": len(rows) - cr}
+            "rows": len(rows), "credits": cr, "debits": len(rows) - cr,
+            "auto_recon": auto_recon}
 
 
 # ─── Run reconciliation ───────────────────────────────────────────────────────
+def _auto_recon_after_upload(db: Session, accounts) -> dict:
+    """Auto-recon after an E-Value upload — parity with the core products' post-upload
+    chain and the kiosk auto-run: per-account recon for every touched account, then
+    the global cross-account reference pass, with EVERY failure swallowed so an
+    upload is never blocked (an account missing its counterpart file is normal).
+    Manual (EVMAN-), interbank (EVIBT-), cross-account (EVX-) and SRC dispositions
+    are preserved by _run_one's exclusion filter."""
+    out = {}
+    for a in accounts:
+        try:
+            r = _run_one(db, a)
+            out[a] = r.get("error") or "ok"
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            out[a] = f"skipped: {str(e)[:120]}"
+    try:
+        x = _cross_account_reference_match(db)
+        out["cross_account"] = x.get("cross_account_matched", 0)
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        out["cross_account"] = f"skipped: {str(e)[:120]}"
+    return out
+
+
 def _run_one(db: Session, reco_acc_no: str) -> dict:
     all_bank = db.query(EvalueBankTxn).filter(EvalueBankTxn.reco_acc_no == reco_acc_no).all()
     if not all_bank:
@@ -220,10 +256,14 @@ def _run_one(db: Session, reco_acc_no: str) -> dict:
     # SRC-disposed rows are excluded from re-matching and left untouched — parity with
     # core run_reconciliation (which only feeds unmatched rows). This preserves a manual
     # SRC tag (src_code/src_note + status) across a recon re-run instead of clobbering it.
-    # EVX- rows are cross-account matches: their counterpart lives in ANOTHER account,
-    # so a per-account re-run must not dissolve one side of the pair.
+    # EVX- rows are cross-account matches (counterpart in ANOTHER account), EVIBT- are
+    # interbank links (counterpart in the CORE ledger), EVMAN- are human decisions —
+    # a per-account re-run must not dissolve any of them (one-sided orphans otherwise;
+    # core parity: run_reconciliation never re-feeds already-matched rows).
+    _PRESERVED = ("EVX-", "EVIBT-", "EVMAN-")
+
     def _keep(r):
-        return r.recon_status != "src_assigned" and not (r.match_id or "").startswith("EVX-")
+        return r.recon_status != "src_assigned" and not (r.match_id or "").startswith(_PRESERVED)
     bank_objs = [b for b in all_bank if _keep(b)]
     load_objs = [l for l in db.query(EvalueWalletLoad).filter(
                     EvalueWalletLoad.reco_acc_no == reco_acc_no).all()

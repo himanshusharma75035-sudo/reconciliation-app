@@ -569,6 +569,15 @@ def _ingest_dataframe_inner(
                         run_internal_match(p, d, db, user_id)
                     except Exception:
                         pass
+        # Cross-date RRN pass (QR T+1) — mirrors routes/upload.py (contract #10):
+        # bank credit on D vs internal record on D+1 never meet in per-date recon;
+        # identifier-only (RRN + amount ≤ ₹1) across dates, scoped partners only.
+        try:
+            from core.matching_engine import run_cross_date_rrn_match, CROSS_DATE_RRN_PARTNERS
+            for p in set(p for (p, _d) in pairs if p in CROSS_DATE_RRN_PARTNERS):
+                run_cross_date_rrn_match(p, db, user_id)
+        except Exception:
+            pass
 
     # ── Same-side duplicate flagging (re-ingested rows) ───────────────────────
     # Mirrors routes/upload.py (contract #10): flag txn rows that duplicate an
