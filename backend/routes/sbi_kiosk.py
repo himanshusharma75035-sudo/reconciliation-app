@@ -241,12 +241,14 @@ async def upload_bank_statement(
         SBIBankTransaction.upload_date == today,
         SBIBankTransaction.is_settlement == True
     ).count()
+    auto_recon = _auto_run_after_upload(db, current_user)
     return {
         "inserted": inserted,
         "settlement_rows": settlement_count,
         "errors": errors[:10],
         "filename": file.filename,
         "validation_warning": validation_warning,
+        "auto_recon": auto_recon,
     }
 
 
@@ -299,7 +301,8 @@ async def upload_ko_limits(
         except Exception as _e:
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
     _audit(db, current_user, "sbi_upload_ko_limits", {"filename": file.filename, "inserted": inserted})
-    return {"inserted": inserted, "filename": file.filename}
+    return {"inserted": inserted, "filename": file.filename,
+            "auto_recon": _auto_run_after_upload(db, current_user)}
 
 
 # ── P02: Transaction Report Upload ────────────────────────────────────────────
@@ -371,7 +374,8 @@ async def upload_txn_report(
         except Exception as _e:
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
     _audit(db, current_user, "sbi_upload_txn_report", {"filename": source, "inserted": inserted})
-    return {"inserted": inserted, "filename": source}
+    return {"inserted": inserted, "filename": source,
+            "auto_recon": _auto_run_after_upload(db, current_user)}
 
 
 # ── P03: CSP Master Sheet Upload ──────────────────────────────────────────────
@@ -414,7 +418,8 @@ async def upload_csp_master(
 
     db.commit()
     _audit(db, current_user, "sbi_upload_csp_master", {"filename": file.filename, "inserted": inserted})
-    return {"inserted": inserted, "filename": file.filename}
+    return {"inserted": inserted, "filename": file.filename,
+            "auto_recon": _auto_run_after_upload(db, current_user)}
 
 
 # ── P04: KO Cash Holding Upload ───────────────────────────────────────────────
@@ -460,7 +465,8 @@ async def upload_ko_cash_holding(
 
     db.commit()
     _audit(db, current_user, "sbi_upload_ko_cash_holding", {"filename": file.filename, "inserted": inserted})
-    return {"inserted": inserted, "filename": file.filename}
+    return {"inserted": inserted, "filename": file.filename,
+            "auto_recon": _auto_run_after_upload(db, current_user)}
 
 
 @router.post("/upload/limit-failures")
@@ -504,7 +510,8 @@ async def upload_limit_failures(
         except Exception as _e:
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
     _audit(db, current_user, "sbi_upload_limit_failures", {"filename": file.filename, "inserted": inserted})
-    return {"inserted": inserted, "filename": file.filename}
+    return {"inserted": inserted, "filename": file.filename,
+            "auto_recon": _auto_run_after_upload(db, current_user)}
 
 
 # ── P01: Run Settlement Reconciliation ────────────────────────────────────────
@@ -1841,6 +1848,28 @@ def run_all(
         "ok": [k for k, v in results.items() if "error" not in v],
         "failed": [k for k, v in results.items() if "error" in v]})
     return {"recon_date": recon_date, "results": results}
+
+
+def _auto_run_after_upload(db, current_user):
+    """Auto-recon after every SBI upload — parity with the core products' post-upload
+    chain: P01→P04 run for today's recon_date and EVERY failure is swallowed, so an
+    upload is never blocked (a process missing its counterpart file mid-day is
+    normal; the next upload's auto-run completes it). Results land under today's
+    recon_date per the upload_date≈recon_date convention (behaviour-contract #17),
+    exactly as the Run All button would."""
+    d = str(datetime.date.today())
+    out = {}
+    for name, fn in (("p01", run_p01), ("p02", run_p02), ("p03", run_p03), ("p04", run_p04)):
+        try:
+            fn(recon_date=d, upload_date=None, db=db, current_user=current_user)
+            out[name] = "ok"
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            out[name] = f"skipped: {str(e)[:120]}"
+    return {"recon_date": d, **out}
 
 
 # ── Manual match (persistent overlay across re-runs) ──────────────────────────
