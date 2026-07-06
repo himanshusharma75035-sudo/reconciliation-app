@@ -1496,6 +1496,13 @@ def confirm_mapping(
         }
         if is_internal_side and row_type == "txn" and status and status.lower() in FAILED_STATUSES:
             auto_recon_status = "failed"
+        # QR bank exports (Paypoint) carry a per-order Status; a Failed order moved
+        # no money, so it must never sit as unmatched (or match a retried Success
+        # row sharing the same order id). QR ONLY — other products' bank statements
+        # don't carry a per-row status this way (DEFAULT_RULES qr note).
+        if (is_bank_side and row_type == "txn" and row_partner == "qr"
+                and status and status.lower() in FAILED_STATUSES):
+            auto_recon_status = "failed"
 
         # ── Auto-date mode: derive recon_date from this row's transaction date ─
         if is_auto_date:

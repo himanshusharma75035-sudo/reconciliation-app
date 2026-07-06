@@ -90,6 +90,34 @@ def test_first_match_wins_and_ids_unique(db):
     assert len(set(mids)) == 3                       # MAX+1 in-memory: no duplicate IDs
 
 
+def test_failed_source_status_rows_never_pair(db):
+    # A bank row whose SOURCE status is failed moved no money — even if it sits
+    # recon_status=unmatched (pre-flagging data), the pass must skip it and pair
+    # the retried Success copy instead.
+    db.add(_t(id="bf", side="bank", recon_date="2026-06-12", tracking_number="777",
+              amount=20000.0, status="Failed"))
+    db.add(_t(id="bs", side="bank", recon_date="2026-06-12", tracking_number="777",
+              amount=20000.0, status="Success"))
+    db.add(_t(id="i1", side="internal", recon_date="2026-06-16", tracking_number="777",
+              amount=20000.0, status="Success"))
+    db.commit()
+    r = run_cross_date_rrn_match("qr", db, "u1")
+    assert r["cross_date_rrn_matched"] == 1
+    assert db.query(Transaction).filter_by(id="bf").first().recon_status == ReconStatus.unmatched
+    bs = db.query(Transaction).filter_by(id="bs").first()
+    assert bs.recon_status == ReconStatus.matched and bs.matched_with_id == "i1"
+
+
+def test_failed_internal_rows_never_pair(db):
+    db.add(_t(id="b1", side="bank", recon_date="2026-07-01", tracking_number="888",
+              status="Success"))
+    db.add(_t(id="i1", side="internal", recon_date="2026-07-02", tracking_number="888",
+              status="Refunded"))
+    db.commit()
+    r = run_cross_date_rrn_match("qr", db, "u1")
+    assert r["cross_date_rrn_matched"] == 0
+
+
 def test_other_partner_rows_untouched(db):
     db.add(_t(id="b1", side="bank", recon_date="2026-07-01", tracking_number="999",
               partner="fino"))

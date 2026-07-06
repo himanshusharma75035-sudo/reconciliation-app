@@ -401,6 +401,11 @@ def _ingest_dataframe_inner(
         # ── Failed status detection (internal only) ───────────────────────────
         if is_internal_side and row_type == "txn" and status and status.lower() in FAILED_STATUSES:
             auto_recon_status = "failed"
+        # QR bank exports carry a per-order Status — a Failed order moved no money.
+        # Mirrors routes/upload.py (contract #10); QR ONLY.
+        if (is_bank_side and row_type == "txn" and row_partner == "qr"
+                and status and status.lower() in FAILED_STATUSES):
+            auto_recon_status = "failed"
 
         # ── Auto-date ─────────────────────────────────────────────────────────
         if is_auto_date:

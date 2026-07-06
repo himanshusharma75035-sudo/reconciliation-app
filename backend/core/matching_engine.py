@@ -500,17 +500,29 @@ def run_cross_date_rrn_match(partner: str, db: Session, user_id: str) -> Dict:
         Transaction.recon_date.like("20%"),
     ).order_by(Transaction.recon_date.asc()).all()
 
+    # A row whose SOURCE status is failed moved no money — never pair it, even if
+    # it slipped through ingest still marked unmatched (pre-flagging data). Same
+    # literal set as the ingest pipelines (status sets are duplicated by convention).
+    _failed_src = {
+        'failed', 'failure', 'fail', 'f', '0',
+        'rejected', 'reversed', 'cancelled', 'canceled',
+        'error', 'expired', 'declined', 'refunded', 'timeout',
+    }
+
+    def _src_failed(t):
+        return (t.status or "").strip().lower() in _failed_src
+
     by_track: Dict[str, list] = {}
     for i in internal_txns:
         k = _normalize(i.tracking_number)
-        if k:
+        if k and not _src_failed(i):
             by_track.setdefault(k, []).append(i)
 
     matched_count, used = 0, set()
     seqs: Dict[str, int] = {}                          # bank recon_date → next seq
     for b in bank_txns:
         k = _normalize(b.tracking_number)
-        if not k:
+        if not k or _src_failed(b):
             continue
         cand = None
         for i in by_track.get(k, []):
