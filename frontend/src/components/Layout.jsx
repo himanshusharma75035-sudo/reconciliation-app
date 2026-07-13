@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Play, AlertTriangle, GitMerge,
-  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2
+  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2, PieChart
 } from 'lucide-react'
 import { hasPermission, isAdmin } from '../utils/permissions'
 
@@ -10,6 +10,7 @@ import { hasPermission, isAdmin } from '../utils/permissions'
 // adminOnly:    nav item is hidden for non-admins
 const navItems = [
   { to: '/dashboard',    icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/analytics',    icon: PieChart,        label: 'Analytics' },
   { to: '/upload',       icon: Upload,          label: 'Upload Files',  requiredPerm: 'upload' },
   { to: '/auto-upload',  icon: Zap,             label: 'Auto Upload',   requiredPerm: 'upload' },
   { to: '/ingestion-monitor', icon: Activity,   label: 'Ingestion Monitor', requiredPerm: 'upload' },

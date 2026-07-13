@@ -19,6 +19,7 @@ import QRSettlement   from './pages/QRSettlement'
 import SBIKiosk       from './pages/SBIKiosk'
 import Evalue         from './pages/Evalue'
 import Insights       from './pages/Insights'
+import Analytics      from './pages/Analytics'
 import Bbps           from './pages/Bbps'
 import ProductReconPage from './pages/ProductReconPage'
 import Workflow from './pages/Workflow'
@@ -57,6 +58,7 @@ export default function App() {
         <Route path="evalue"          element={<Evalue         />} />
         <Route path="bbps"            element={<Bbps           />} />
         <Route path="insights"        element={<Insights       />} />
+        <Route path="analytics"       element={<Analytics      />} />
         <Route path="product/:slug"   element={<ProductReconPage />} />
         <Route path="workflow"        element={<Workflow />} />
         <Route path="ingestion-monitor" element={<IngestionMonitor />} />

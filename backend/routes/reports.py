@@ -972,6 +972,22 @@ def funds_position_export(
                         "X-Recon-Date": d, "Access-Control-Expose-Headers": "X-Recon-Date"})
 
 
+@router.get("/analytics")
+def reconciliation_analytics(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    product: Optional[str] = None,
+    side: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Executive reconciliation analytics across all products (KPI cards + charts).
+    Read-only aggregation of existing result rows; date-filterable. See core/analytics."""
+    from core.analytics import build_analytics
+    return build_analytics(db, date_from=date_from, date_to=date_to,
+                           product=product or None, side=side or None)
+
+
 @router.get("/funds-position/accounts")
 def funds_position_accounts(
     db: Session = Depends(get_db),
