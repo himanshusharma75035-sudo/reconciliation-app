@@ -61,7 +61,7 @@ export function BarChart({ categories, series, height = 280, horizontal = false,
               stacked && (stackAcc += val)
               return <rect key={si} x={x} y={y} width={Math.max(0, len)} height={stacked ? inner : groupW - 2}
                 rx="2" fill={se.colors ? se.colors[i] : se.color} className="bar-h"
-                style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{cat} · {se.name}: {valueFmt(val)}</title></rect>
+                style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{`${cat} · ${se.name}: ${valueFmt(val)}`}</title></rect>
             }
             const len = (plotH / maxVal) * val
             const x = base + (stacked ? 0 : groupW * si)
@@ -69,7 +69,7 @@ export function BarChart({ categories, series, height = 280, horizontal = false,
             stacked && (stackAcc += val)
             return <rect key={si} x={x} y={y} width={stacked ? inner : groupW - 2} height={Math.max(0, len)}
               rx="2" fill={se.colors ? se.colors[i] : se.color} className="bar-v"
-              style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{cat} · {se.name}: {valueFmt(val)}</title></rect>
+              style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{`${cat} · ${se.name}: ${valueFmt(val)}`}</title></rect>
           })}
           {horizontal
             ? <text x={padL - 6} y={base + inner / 2 + 3} fontSize="10" fill="#475569" textAnchor="end">{cat}</text>
@@ -107,7 +107,7 @@ export function LineChart({ categories, series, height = 280, valueFmt = fmtN })
           {se.values.map((v, i) => (
             <circle key={i} cx={x(i)} cy={y(v)} r="3" fill={se.color} className="dot-anim"
               style={{ animationDelay: `${0.2 + Math.min(i, 24) * 0.02}s` }}>
-              <title>{categories[i]} · {se.name}: {valueFmt(v)}</title></circle>
+              <title>{`${categories[i]} · ${se.name}: ${valueFmt(v)}`}</title></circle>
           ))}
         </g>
       ))}
@@ -143,17 +143,22 @@ export function PieChart({ slices, donut = false, height = 280, valueFmt = fmtN 
         a0 = a1
         return <path key={i} d={d} fill={s.color} stroke="#fff" strokeWidth="1.5" className="slice-anim"
           style={{ animationDelay: `${Math.min(i, 12) * 0.05}s` }}>
-          <title>{s.label}: {valueFmt(s.value)} ({(frac * 100).toFixed(1)}%)</title></path>
+          <title>{`${s.label}: ${valueFmt(s.value)} (${(frac * 100).toFixed(1)}%)`}</title></path>
       })}
-      {/* legend */}
-      {slices.map((s, i) => (
-        <g key={i} transform={`translate(${cx + r + 40}, ${cy - (slices.length * 22) / 2 + i * 22 + 6})`}>
-          <rect width="12" height="12" rx="2" fill={s.color} />
-          <text x="18" y="10" fontSize="12" fill="#334155">{s.label}</text>
-          <text x="150" y="10" fontSize="12" fill="#64748b" textAnchor="end">
-            {valueFmt(s.value)} · {(((s.value || 0) / total) * 100).toFixed(1)}%</text>
-        </g>
-      ))}
+      {/* legend — label and value on SEPARATE lines so long labels can never
+          collide with their number (row height fixed, so rows never overlap). */}
+      {slices.map((s, i) => {
+        const rowH = 34
+        const top = cy - (slices.length * rowH) / 2 + i * rowH
+        return (
+          <g key={i} transform={`translate(${cx + r + 34}, ${top})`}>
+            <rect y="3" width="11" height="11" rx="2" fill={s.color} />
+            <text x="18" y="8" fontSize="12" fill="#334155" fontWeight="600">{s.label}</text>
+            <text x="18" y="24" fontSize="11" fill="#64748b">
+              {valueFmt(s.value)} · {(((s.value || 0) / total) * 100).toFixed(1)}%</text>
+          </g>
+        )
+      })}
     </svg>
   )
 }
