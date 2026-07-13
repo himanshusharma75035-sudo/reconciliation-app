@@ -2,12 +2,20 @@
 // across every product. Date-filterable; charts switch type on demand (bar / line
 // / pie / donut). Read-only; data from GET /reports/analytics (core/analytics.py).
 import React, { useState, useEffect, useCallback } from 'react'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
-import { BarChart3, CheckCircle2, XCircle, Percent, Wallet, RefreshCw } from 'lucide-react'
+import { BarChart3, CheckCircle2, XCircle, Percent, Wallet, RefreshCw, Link2, Maximize2, Scale, LogOut } from 'lucide-react'
 import { BarChart, LineChart, PieChart, ChartCard, PALETTE } from '../components/Charts'
 
 const C = { matched: '#10b981', unmatched: '#ef4444', mismatch: '#f59e0b', other: '#94a3b8' }
+// Bank vs Internal share the matched/open meaning (green/red) but differ by SHADE
+// so two same-meaning slices in one pie are never the same colour: Bank = full
+// strength, Internal = lighter tint of the same hue.
+const SIDE_C = {
+  bank: { matched: '#059669', unmatched: '#dc2626' },      // emerald-600 / red-600
+  internal: { matched: '#6ee7b7', unmatched: '#fca5a5' },  // emerald-300 / red-300
+}
 const inr = n => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
 const cr = n => {
   n = Number(n || 0)
@@ -17,12 +25,20 @@ const cr = n => {
 }
 const monthStart = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01` }
 const today = () => new Date().toISOString().split('T')[0]
+// Build an app URL under the deploy base path (/recon/ in prod, / in dev).
+const withBase = p => (import.meta.env.BASE_URL + p).replace(/\/{2,}/g, '/')
 
-export default function Analytics() {
-  const [from, setFrom] = useState(monthStart())
-  const [to, setTo] = useState(today())
-  const [product, setProduct] = useState('')
-  const [side, setSide] = useState('')
+// `standalone` renders a chrome-free, full-screen view (the /exec route) — same
+// data, no app sidebar — for sharing with management or putting on a display.
+export default function Analytics({ standalone = false }) {
+  // Filters live in the URL query string so any view is shareable / bookmarkable
+  // exactly as filtered (from / to / product / side).
+  const [searchParams, setSearchParams] = useSearchParams()
+  const navigate = useNavigate()
+  const [from, setFrom] = useState(searchParams.has('from') ? searchParams.get('from') : monthStart())
+  const [to, setTo] = useState(searchParams.has('to') ? searchParams.get('to') : today())
+  const [product, setProduct] = useState(searchParams.get('product') || '')
+  const [side, setSide] = useState(searchParams.get('side') || '')
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
 
@@ -36,6 +52,22 @@ export default function Analytics() {
     } catch { toast.error('Could not load analytics') } finally { setLoading(false) }
   }, [from, to, product, side])
   useEffect(() => { load() }, [load])
+
+  // Mirror the filters into the URL (replace, so we don't flood history). from/to
+  // are always written (even empty = "All dates") so a shared link reproduces the
+  // exact view; product/side only when set to keep the URL tidy.
+  useEffect(() => {
+    const next = { from, to }
+    if (product) next.product = product
+    if (side) next.side = side
+    setSearchParams(next, { replace: true })
+  }, [from, to, product, side, setSearchParams])
+
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(window.location.href); toast.success('Dashboard link copied') }
+    catch { toast.error('Copy failed — copy the URL from the address bar') }
+  }
+  const logout = () => { localStorage.removeItem('token'); localStorage.removeItem('user'); navigate('/login') }
 
   const preset = (f, t) => { setFrom(f); setTo(t) }
   const t = data?.totals || {}
@@ -78,12 +110,33 @@ export default function Analytics() {
 
   return (
     <div className="space-y-5">
+      {standalone && (
+        <div className="flex items-center gap-2.5 pb-3 border-b border-gray-100">
+          <div className="w-8 h-8 rounded-lg bg-emerald-600/10 ring-1 ring-emerald-600/20 grid place-items-center flex-shrink-0">
+            <Scale size={16} className="text-emerald-600" />
+          </div>
+          <div className="leading-tight">
+            <div className="font-bold text-gray-800 text-sm">Eko Bharat Ventures</div>
+            <div className="text-[10px] uppercase tracking-widest text-gray-400">Executive Dashboard</div>
+          </div>
+          <div className="ml-auto flex items-center gap-1.5">
+            <a href={withBase('analytics') + window.location.search} className="btn-ghost text-xs">Open full app ↗</a>
+            <button onClick={logout} className="btn-ghost text-xs flex items-center gap-1"><LogOut size={13} /> Logout</button>
+          </div>
+        </div>
+      )}
       <div className="flex items-center gap-3 flex-wrap">
         <div>
           <h1 className="text-xl font-bold text-gray-800 flex items-center gap-2"><BarChart3 size={20} className="text-emerald-600" /> Reconciliation Analytics</h1>
           <p className="text-sm text-gray-500">Daily reconciliation activity across all products {data && <>· {data.date_from || '…'} → {data.date_to || '…'}</>}</p>
         </div>
-        <button onClick={load} className="btn-ghost text-xs ml-auto flex items-center gap-1"><RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh</button>
+        <div className="ml-auto flex items-center gap-1.5">
+          <button onClick={copyLink} className="btn-ghost text-xs flex items-center gap-1" title="Copy a link to this exact filtered view"><Link2 size={13} /> Copy link</button>
+          {!standalone && (
+            <a href={withBase('exec') + window.location.search} target="_blank" rel="noreferrer" className="btn-ghost text-xs flex items-center gap-1" title="Open a full-screen, sidebar-free view (for the CEO / a display)"><Maximize2 size={13} /> Full screen</a>
+          )}
+          <button onClick={load} className="btn-ghost text-xs flex items-center gap-1"><RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh</button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -155,14 +208,20 @@ export default function Analytics() {
                     height={Math.max(200, prodCats.length * 40 + 40)} />}
             </ChartCard>
 
-            <ChartCard title="Both sides — bank vs internal" subtitle="How many records matched on each side (ledger products)"
+            <ChartCard title="Both sides — bank vs internal" subtitle="How many records matched on each side · darker = Bank, lighter = Internal"
               types={['bar', 'pie']} defaultType="bar"
-              legend={[{ name: 'Matched', color: C.matched }, { name: 'Unmatched', color: C.unmatched }]}>
+              legend={[
+                { name: 'Bank matched', color: SIDE_C.bank.matched }, { name: 'Bank open', color: SIDE_C.bank.unmatched },
+                { name: 'Internal matched', color: SIDE_C.internal.matched }, { name: 'Internal open', color: SIDE_C.internal.unmatched }]}>
               {type => bySide.length === 0 ? <Empty />
                 : type === 'pie'
-                  ? <PieChart slices={bySide.flatMap(s => [
-                      { label: `${s.side} matched`, value: s.matched, color: C.matched },
-                      { label: `${s.side} open`, value: s.unmatched, color: C.unmatched }])} donut />
+                  ? <PieChart slices={bySide.flatMap(s => {
+                      const c = SIDE_C[s.side] || SIDE_C.bank
+                      const name = s.side === 'bank' ? 'Bank' : 'Internal'
+                      return [
+                        { label: `${name} · matched`, value: s.matched, color: c.matched },
+                        { label: `${name} · open`, value: s.unmatched, color: c.unmatched }]
+                    })} donut />
                   : <BarChart categories={sideCats} series={sideSeries} />}
             </ChartCard>
           </div>

@@ -33,6 +33,19 @@ function RequireAuth({ children }) {
   return children
 }
 
+// Chrome-free, full-screen Analytics for sharing with management / a display.
+// Same data, still login-gated (RequireAuth), but no app sidebar. Lives at /exec
+// (i.e. /recon/exec in prod). Reuses the Layout's page container/padding.
+function StandaloneAnalytics() {
+  return (
+    <main className="min-h-screen overflow-y-auto bg-surface">
+      <div className="p-6 max-w-7xl mx-auto animate-fade-in">
+        <Analytics standalone />
+      </div>
+    </main>
+  )
+}
+
 export default function App() {
   return (
     <ErrorBoundary>
@@ -64,6 +77,8 @@ export default function App() {
         <Route path="ingestion-monitor" element={<IngestionMonitor />} />
         <Route path="developer-portal" element={<DeveloperPortal />} />
       </Route>
+      {/* Standalone full-screen executive dashboard (no sidebar), login-gated. */}
+      <Route path="/exec" element={<RequireAuth><StandaloneAnalytics /></RequireAuth>} />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
     </ErrorBoundary>
