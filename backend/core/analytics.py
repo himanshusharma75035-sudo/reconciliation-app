@@ -13,6 +13,9 @@ executive dashboard renders as KPI cards + charts:
 Every product's own status vocabulary is folded into four buckets so the CEO sees
 one consistent picture across core ledger, E-Value, SBI Kiosk and BBPS.
 """
+import logging
+
+logger = logging.getLogger("eko_recon.analytics")
 
 # ── Status → bucket mapping (lower-cased match) ───────────────────────────────
 _MATCHED = {
@@ -22,9 +25,11 @@ _MATCHED = {
 }
 _UNMATCHED = {
     "unmatched", "unmatched_bank", "unmatched_load",
-    "unmatched_txnreport",
+    "unmatched_txnreport", "unmatched_internal",               # bbps internal leg
 }
-_MISMATCH = {"amount_mismatch", "wrong_amount"}
+# 'partial' = SBI P02 amount-differs-beyond-tolerance (the kiosk equivalent of the
+# core-ledger 'amount_mismatch') — must count as a mismatch, not fall through to other.
+_MISMATCH = {"amount_mismatch", "wrong_amount", "partial"}
 # everything else (src_assigned, duplicate, failed, bank_debit, transaction_fee,
 # fund_transfer, fee_matched, reversal, …) → "other"
 
@@ -43,6 +48,17 @@ def _bucket(status: str) -> str:
 def _blank():
     return {"matched": 0, "unmatched": 0, "mismatch": 0, "other": 0,
             "matched_volume": 0.0, "open_volume": 0.0}
+
+
+# Product-group display names (the PartnerConfig.product value → friendly label).
+# The DMT product spans several banks (Axis / Fino / Levin / Airtel); every other
+# product is a single stream. This lets the dashboard show "Axis Bank" under "DMT"
+# instead of a bare "axis" that reads like its own product.
+_GROUP_LABEL = {
+    "dmt": "DMT", "aeps": "AePS Cashout", "qr": "QR Collection",
+    "pg": "Accept Payment (PG)", "digikhata": "Digikhata (PPI)",
+    "indonepal": "Indo-Nepal", "kiosk": "SBI Kiosk", "evalue": "E-Value", "bbps": "BBPS",
+}
 
 
 def _pretty(product: str) -> str:
@@ -117,35 +133,66 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         # P02 result rows pair bank↔report; treat as the kiosk product (no side split).
         recs.append(("sbi_kiosk", "bank", d[:10], status, cnt or 0, float(amt or 0)))
 
-    # ── 4. BBPS (if populated) ────────────────────────────────────────────────
+    # ── 4. BBPS (if populated) — column is transaction_date, not txn_date ──────
     if BbpsBankTxn is not None:
         for model, sd in ((BbpsBankTxn, "bank"), (BbpsInternal, "internal")):
             try:
-                bq = db.query(model.txn_date, model.recon_status, F.count(model.id), F.sum(model.amount))
+                dc = model.transaction_date
+                bq = db.query(dc, model.recon_status, F.count(model.id), F.sum(model.amount))
                 if date_from:
-                    bq = bq.filter(model.txn_date >= date_from)
+                    bq = bq.filter(dc >= date_from)
                 if date_to:
-                    bq = bq.filter(model.txn_date <= date_to)
-                for d, status, cnt, amt in bq.group_by(model.txn_date, model.recon_status).all():
+                    bq = bq.filter(dc <= date_to)
+                for d, status, cnt, amt in bq.group_by(dc, model.recon_status).all():
                     if not _in_range((d or "")[:10]):
                         continue
                     recs.append(("bbps", sd, d[:10], _statv(status), cnt or 0, float(amt or 0)))
             except Exception:
-                pass
+                logger.warning("analytics: BBPS aggregation skipped", exc_info=True)
+
+    # ── Partner → product-group map (so a DMT bank reads as "DMT · Axis Bank") ──
+    # Defined BEFORE filtering because the product filter matches by GROUP.
+    from models.database import PartnerConfig
+    pcfg = {p.slug: ((p.product or "dmt"), (p.display_name or p.slug))
+            for p in db.query(PartnerConfig).all()}
+
+    def _group_of(prod):
+        """(group_slug, group_label, bank_label) for a rec key."""
+        if prod == "sbi_kiosk":
+            return "kiosk", "SBI Kiosk", "SBI Kiosk"
+        if prod in ("evalue", "bbps"):
+            return prod, _GROUP_LABEL.get(prod, _pretty(prod)), _pretty(prod)
+        g, disp = pcfg.get(prod, ("dmt" if prod in ("axis", "fino", "levin", "airtel") else prod, _pretty(prod)))
+        return g, _GROUP_LABEL.get(g, _pretty(g)), disp
+
+    # Full product-group universe for the dropdown — captured BEFORE filtering, so
+    # picking one product never collapses the list of choices to just that one.
+    group_options = {}
+    for r in recs:
+        g, glabel, _ = _group_of(r[0])
+        group_options[g] = glabel
 
     # ── Optional filters ──────────────────────────────────────────────────────
+    # product filter matches the GROUP, so selecting "DMT" aggregates Axis/Fino/
+    # Levin/Airtel (what the user thinks of as the product), not a single bank.
     if product:
-        recs = [r for r in recs if r[0] == product]
+        recs = [r for r in recs if _group_of(r[0])[0] == product]
     if side in ("bank", "internal"):
         recs = [r for r in recs if r[1] == side]
 
     # ── Roll up ───────────────────────────────────────────────────────────────
-    by_product, by_side_map, daily_map, products = {}, {"bank": _blank(), "internal": _blank()}, {}, set()
+    by_product, by_group, by_side_map, daily_map, products = {}, {}, {"bank": _blank(), "internal": _blank()}, {}, set()
+    group_meta = {}      # group_slug → label
+    prod_meta = {}       # prod key → (group_slug, group_label, bank_label)
     totals = _blank()
     for prod, sd, d, status, cnt, amt in recs:
         products.add(prod)
+        if prod not in prod_meta:
+            prod_meta[prod] = _group_of(prod)
+        g, glabel, _ = prod_meta[prod]
+        group_meta[g] = glabel
         b = _bucket(status)
-        for bag in (totals, by_product.setdefault(prod, _blank()),
+        for bag in (totals, by_product.setdefault(prod, _blank()), by_group.setdefault(g, _blank()),
                     by_side_map.setdefault(sd, _blank()), daily_map.setdefault(d, _blank())):
             bag[b] += cnt
             if b == "matched":
@@ -164,8 +211,16 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     totals["match_rate"] = _rate(totals)
 
     by_product_list = sorted(
-        ({"product": p, "label": _pretty(p), **v, "transactions": _total(v), "match_rate": _rate(v)}
+        ({"product": p, "label": prod_meta[p][2],
+          "group": prod_meta[p][0], "group_label": prod_meta[p][1],
+          **v, "transactions": _total(v), "match_rate": _rate(v)}
          for p, v in by_product.items()),
+        key=lambda x: (x["group_label"], -x["transactions"]))
+
+    by_group_list = sorted(
+        ({"group": g, "label": group_meta[g], **v,
+          "transactions": _total(v), "match_rate": _rate(v)}
+         for g, v in by_group.items()),
         key=lambda x: -x["transactions"])
 
     by_side_list = [{"side": s, **by_side_map[s], "transactions": _total(by_side_map[s]),
@@ -179,15 +234,22 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
                    "match_rate": _rate(daily_map[d])}
                   for d in sorted(daily_map)]
 
+    # products dropdown: one option per product GROUP (DMT, QR, SBI Kiosk, …) — the
+    # value is the group slug the filter matches, so selecting "DMT" shows all its
+    # banks. Built from the pre-filter universe so the choices never collapse.
+    prod_options = [{"product": g, "label": glabel}
+                    for g, glabel in sorted(group_options.items(), key=lambda x: x[1])]
+
     return {
         "date_from": date_from, "date_to": date_to,
         "product": product, "side": side,
         "totals": totals,
         "by_product": by_product_list,
+        "by_group": by_group_list,
         "by_status": by_status_list,
         "by_side": by_side_list,
         "daily": daily_list,
-        "products": [{"product": p, "label": _pretty(p)} for p in sorted(products, key=_pretty)],
+        "products": prod_options,
     }
 
 

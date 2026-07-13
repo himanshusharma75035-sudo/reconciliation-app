@@ -81,13 +81,45 @@ def test_date_filter_excludes_out_of_range(db):
     assert len(a2["daily"]) == 2
 
 
-def test_product_filter(db):
+def test_product_filter_by_group(db):
+    # DMT banks (axis, fino) + qr. Filter matches the GROUP, and the dropdown lists
+    # groups, and the dropdown never collapses when a filter is active.
     _core(db, "qr", "bank", "2026-07-01", ReconStatus.matched, 10.0)
-    _core(db, "fino", "bank", "2026-07-01", ReconStatus.matched, 20.0)
+    _core(db, "axis", "bank", "2026-07-01", ReconStatus.matched, 20.0)
+    _core(db, "fino", "bank", "2026-07-01", ReconStatus.matched, 30.0)
     db.commit()
-    a = build_analytics(db, product="qr")
-    assert [p["product"] for p in a["by_product"]] == ["qr"]
-    assert a["totals"]["matched"] == 1
+
+    # selecting the DMT product aggregates axis + fino (not just one bank)
+    a = build_analytics(db, product="dmt")
+    assert a["totals"]["matched"] == 2
+    assert {p["product"] for p in a["by_product"]} == {"axis", "fino"}
+    # dropdown still lists ALL groups even though a filter is active (no collapse)
+    opts = {o["product"] for o in a["products"]}
+    assert opts == {"dmt", "qr"}
+
+    # selecting qr aggregates only qr
+    b = build_analytics(db, product="qr")
+    assert b["totals"]["matched"] == 1
+    assert {p["product"] for p in b["by_product"]} == {"qr"}
+
+
+def test_dmt_banks_roll_up_to_product_group(db):
+    # Axis + Fino are DMT banks; QR is its own product. by_group must roll DMT up.
+    _core(db, "axis", "bank", "2026-07-01", ReconStatus.matched, 100.0)
+    _core(db, "fino", "bank", "2026-07-01", ReconStatus.matched, 50.0)
+    _core(db, "fino", "bank", "2026-07-01", ReconStatus.unmatched, 10.0)
+    _core(db, "qr", "bank", "2026-07-01", ReconStatus.matched, 25.0)
+    db.commit()
+    a = build_analytics(db)
+    groups = {g["group"]: g for g in a["by_group"]}
+    assert groups["dmt"]["matched"] == 2 and groups["dmt"]["unmatched"] == 1   # axis + fino
+    assert groups["dmt"]["label"] == "DMT"
+    assert groups["qr"]["matched"] == 1
+    # by_product keeps the bank rows tagged with their group
+    prods = {p["product"]: p for p in a["by_product"]}
+    assert prods["axis"]["group"] == "dmt" and prods["axis"]["group_label"] == "DMT"
+    assert prods["fino"]["group"] == "dmt"
+    assert prods["qr"]["group"] == "qr"
 
 
 def test_auto_sentinel_dates_excluded(db):

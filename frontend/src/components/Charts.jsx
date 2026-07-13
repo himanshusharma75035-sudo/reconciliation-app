@@ -60,14 +60,16 @@ export function BarChart({ categories, series, height = 280, horizontal = false,
               const x = padL + (stacked ? (plotW / maxVal) * stackAcc : 0)
               stacked && (stackAcc += val)
               return <rect key={si} x={x} y={y} width={Math.max(0, len)} height={stacked ? inner : groupW - 2}
-                rx="2" fill={se.colors ? se.colors[i] : se.color}><title>{cat} · {se.name}: {valueFmt(val)}</title></rect>
+                rx="2" fill={se.colors ? se.colors[i] : se.color} className="bar-h"
+                style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{cat} · {se.name}: {valueFmt(val)}</title></rect>
             }
             const len = (plotH / maxVal) * val
             const x = base + (stacked ? 0 : groupW * si)
             const y = padT + plotH - len - (stacked ? (plotH / maxVal) * stackAcc : 0)
             stacked && (stackAcc += val)
             return <rect key={si} x={x} y={y} width={stacked ? inner : groupW - 2} height={Math.max(0, len)}
-              rx="2" fill={se.colors ? se.colors[i] : se.color}><title>{cat} · {se.name}: {valueFmt(val)}</title></rect>
+              rx="2" fill={se.colors ? se.colors[i] : se.color} className="bar-v"
+              style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{cat} · {se.name}: {valueFmt(val)}</title></rect>
           })}
           {horizontal
             ? <text x={padL - 6} y={base + inner / 2 + 3} fontSize="10" fill="#475569" textAnchor="end">{cat}</text>
@@ -100,10 +102,11 @@ export function LineChart({ categories, series, height = 280, valueFmt = fmtN })
       })}
       {series.map((se, si) => (
         <g key={si}>
-          <polyline fill="none" stroke={se.color} strokeWidth="2.5"
+          <polyline fill="none" stroke={se.color} strokeWidth="2.5" className="line-anim" pathLength="1"
             points={se.values.map((v, i) => `${x(i)},${y(v)}`).join(' ')} />
           {se.values.map((v, i) => (
-            <circle key={i} cx={x(i)} cy={y(v)} r="3" fill={se.color}>
+            <circle key={i} cx={x(i)} cy={y(v)} r="3" fill={se.color} className="dot-anim"
+              style={{ animationDelay: `${0.2 + Math.min(i, 24) * 0.02}s` }}>
               <title>{categories[i]} · {se.name}: {valueFmt(v)}</title></circle>
           ))}
         </g>
@@ -138,7 +141,8 @@ export function PieChart({ slices, donut = false, height = 280, valueFmt = fmtN 
           d = `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1} Z`
         }
         a0 = a1
-        return <path key={i} d={d} fill={s.color} stroke="#fff" strokeWidth="1.5">
+        return <path key={i} d={d} fill={s.color} stroke="#fff" strokeWidth="1.5" className="slice-anim"
+          style={{ animationDelay: `${Math.min(i, 12) * 0.05}s` }}>
           <title>{s.label}: {valueFmt(s.value)} ({(frac * 100).toFixed(1)}%)</title></path>
       })}
       {/* legend */}
@@ -175,7 +179,7 @@ export function ChartCard({ title, subtitle, types, defaultType, legend, childre
         </div>
       </div>
       <div className="p-4">
-        {children(type)}
+        <div key={type} className="chart-anim">{children(type)}</div>
         {legend && (
           <div className="flex items-center gap-4 flex-wrap mt-2 justify-center">
             {legend.map((l, i) => (

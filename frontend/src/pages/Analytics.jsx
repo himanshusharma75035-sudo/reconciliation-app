@@ -1,7 +1,7 @@
 // Executive Analytics — CEO/management view of daily reconciliation activity
 // across every product. Date-filterable; charts switch type on demand (bar / line
 // / pie / donut). Read-only; data from GET /reports/analytics (core/analytics.py).
-import { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
 import { BarChart3, CheckCircle2, XCircle, Percent, Wallet, RefreshCw } from 'lucide-react'
@@ -41,6 +41,7 @@ export default function Analytics() {
   const t = data?.totals || {}
   const daily = data?.daily || []
   const byProduct = data?.by_product || []
+  const byGroup = data?.by_group || []
   const byStatus = data?.by_status || []
   const bySide = data?.by_side || []
 
@@ -52,10 +53,11 @@ export default function Analytics() {
   ]
   const rateSeries = [{ name: 'Match rate %', color: PALETTE[3], values: daily.map(d => d.match_rate) }]
   const statusSlices = byStatus.map(s => ({ label: s.label, value: s.count, color: C[s.status] || '#94a3b8' }))
-  const prodCats = byProduct.map(p => p.label)
+  // Chart shows PRODUCT groups (DMT rolled up from Axis/Fino/Levin/Airtel).
+  const prodCats = byGroup.map(g => g.label)
   const prodSeries = [
-    { name: 'Matched', color: C.matched, values: byProduct.map(p => p.matched) },
-    { name: 'Unmatched', color: C.unmatched, values: byProduct.map(p => p.unmatched) },
+    { name: 'Matched', color: C.matched, values: byGroup.map(g => g.matched) },
+    { name: 'Unmatched', color: C.unmatched, values: byGroup.map(g => g.unmatched) },
   ]
   const sideCats = bySide.map(s => s.side === 'bank' ? 'Bank side' : 'Internal side')
   const sideSeries = [
@@ -92,7 +94,11 @@ export default function Analytics() {
           <div className="text-[11px] text-gray-500 mb-0.5">Product</div>
           <select className="input" value={product} onChange={e => setProduct(e.target.value)}>
             <option value="">All products</option>
-            {(data?.products || []).map(p => <option key={p.product} value={p.product}>{p.label}</option>)}
+            {(data?.products || []).map(p => (
+              <option key={p.product} value={p.product}>
+                {p.group_label && p.group_label !== p.label ? `${p.group_label} · ${p.label}` : p.label}
+              </option>
+            ))}
           </select>
         </div>
         <div>
@@ -141,12 +147,12 @@ export default function Analytics() {
 
           {/* Per-product + bank vs internal */}
           <div className="grid lg:grid-cols-2 gap-4">
-            <ChartCard title="By product" subtitle="Matched vs unmatched per product"
+            <ChartCard title="By product" subtitle="Matched vs unmatched per product (DMT groups its banks)"
               types={['barh', 'stacked']} defaultType="barh"
               legend={[{ name: 'Matched', color: C.matched }, { name: 'Unmatched', color: C.unmatched }]}>
-              {type => byProduct.length === 0 ? <Empty />
+              {type => byGroup.length === 0 ? <Empty />
                 : <BarChart categories={prodCats} series={prodSeries} horizontal stacked={type === 'stacked'}
-                    height={Math.max(200, prodCats.length * 34 + 40)} />}
+                    height={Math.max(200, prodCats.length * 40 + 40)} />}
             </ChartCard>
 
             <ChartCard title="Both sides — bank vs internal" subtitle="How many records matched on each side (ledger products)"
@@ -161,13 +167,14 @@ export default function Analytics() {
             </ChartCard>
           </div>
 
-          {/* Per-product table */}
+          {/* Per-product table — grouped by product, banks shown within */}
           <div className="card p-0 overflow-hidden">
             <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50"><h3 className="font-bold text-gray-800 text-sm">Product breakdown</h3></div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead><tr className="text-gray-400 border-b border-gray-100 bg-gray-50/40">
                   <th className="text-left py-2 px-4">Product</th>
+                  <th className="text-left py-2 px-3">Bank / partner</th>
                   <th className="text-right py-2 px-3">Transactions</th>
                   <th className="text-right py-2 px-3">Matched</th>
                   <th className="text-right py-2 px-3">Unmatched</th>
@@ -176,18 +183,39 @@ export default function Analytics() {
                   <th className="text-right py-2 px-4">Matched volume</th>
                 </tr></thead>
                 <tbody>
-                  {byProduct.map(p => (
-                    <tr key={p.product} className="border-b border-gray-50 hover:bg-emerald-50/40">
-                      <td className="py-2 px-4 font-semibold text-gray-700">{p.label}</td>
-                      <td className="py-2 px-3 text-right tabular-nums text-gray-600">{p.transactions.toLocaleString('en-IN')}</td>
-                      <td className="py-2 px-3 text-right tabular-nums text-emerald-600 font-semibold">{p.matched.toLocaleString('en-IN')}</td>
-                      <td className="py-2 px-3 text-right tabular-nums text-red-500">{p.unmatched.toLocaleString('en-IN')}</td>
-                      <td className="py-2 px-3 text-right tabular-nums text-amber-500">{p.mismatch.toLocaleString('en-IN')}</td>
-                      <td className="py-2 px-3 text-right tabular-nums font-medium" style={{ color: p.match_rate >= 85 ? '#059669' : p.match_rate >= 50 ? '#d97706' : '#dc2626' }}>{p.match_rate}%</td>
-                      <td className="py-2 px-4 text-right tabular-nums text-gray-600">{cr(p.matched_volume)}</td>
-                    </tr>
-                  ))}
-                  {byProduct.length === 0 && <tr><td colSpan="7" className="py-6 text-center text-gray-400 italic">No data for this range.</td></tr>}
+                  {byGroup.map(g => {
+                    const banks = byProduct.filter(p => p.group === g.group)
+                    const multi = banks.length > 1
+                    return (
+                      <React.Fragment key={g.group}>
+                        {/* product-level row (bold) */}
+                        <tr className="border-b border-gray-100 bg-gray-50/40">
+                          <td className="py-2 px-4 font-bold text-gray-800">{g.label}</td>
+                          <td className="py-2 px-3 text-gray-400">{multi ? `${banks.length} banks` : ''}</td>
+                          <td className="py-2 px-3 text-right tabular-nums font-semibold text-gray-700">{g.transactions.toLocaleString('en-IN')}</td>
+                          <td className="py-2 px-3 text-right tabular-nums text-emerald-600 font-bold">{g.matched.toLocaleString('en-IN')}</td>
+                          <td className="py-2 px-3 text-right tabular-nums text-red-500 font-semibold">{g.unmatched.toLocaleString('en-IN')}</td>
+                          <td className="py-2 px-3 text-right tabular-nums text-amber-500">{g.mismatch.toLocaleString('en-IN')}</td>
+                          <td className="py-2 px-3 text-right tabular-nums font-bold" style={{ color: g.match_rate >= 85 ? '#059669' : g.match_rate >= 50 ? '#d97706' : '#dc2626' }}>{g.match_rate}%</td>
+                          <td className="py-2 px-4 text-right tabular-nums font-semibold text-gray-700">{cr(g.matched_volume)}</td>
+                        </tr>
+                        {/* per-bank rows only when a product spans multiple banks (DMT) */}
+                        {multi && banks.map(p => (
+                          <tr key={p.product} className="border-b border-gray-50 hover:bg-emerald-50/40">
+                            <td className="py-1.5 px-4"></td>
+                            <td className="py-1.5 px-3 text-gray-600 pl-6">↳ {p.label}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-gray-500">{p.transactions.toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-emerald-600">{p.matched.toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-red-400">{p.unmatched.toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-amber-400">{p.mismatch.toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: p.match_rate >= 85 ? '#059669' : p.match_rate >= 50 ? '#d97706' : '#dc2626' }}>{p.match_rate}%</td>
+                            <td className="py-1.5 px-4 text-right tabular-nums text-gray-500">{cr(p.matched_volume)}</td>
+                          </tr>
+                        ))}
+                      </React.Fragment>
+                    )
+                  })}
+                  {byGroup.length === 0 && <tr><td colSpan="8" className="py-6 text-center text-gray-400 italic">No data for this range.</td></tr>}
                 </tbody>
               </table>
             </div>

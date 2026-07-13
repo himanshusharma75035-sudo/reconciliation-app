@@ -137,3 +137,34 @@
 @keyframes skeleton-shimmer {
   100% { transform: translateX(100%); }
 }
+
+/* ── Chart animations (Analytics) ──────────────────────────────────────────
+   Container re-animates on every chart-type switch (keyed by type in React);
+   bar/slice/line elements animate their own reveal. transform-box: fill-box
+   makes SVG transform-origin resolve within each element's own box. */
+@keyframes chart-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+.chart-anim { animation: chart-in 0.35s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes bar-grow-v { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes bar-grow-h { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.bar-v { transform-box: fill-box; transform-origin: bottom; animation: bar-grow-v 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.bar-h { transform-box: fill-box; transform-origin: left;   animation: bar-grow-h 0.45s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes slice-in { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+.slice-anim { transform-box: fill-box; transform-origin: center; animation: slice-in 0.4s ease both; }
+
+/* pathLength="1" on the polyline normalises its length to 1 regardless of the
+   real geometry, so dasharray:1 is exactly one dash covering the whole line with
+   no repeating gap — the draw works for any number of points / any volatility. */
+@keyframes line-draw { to { stroke-dashoffset: 0; } }
+.line-anim { stroke-dasharray: 1; stroke-dashoffset: 1; animation: line-draw 0.7s ease-out forwards; }
+@keyframes dot-in { from { opacity: 0; } to { opacity: 1; } }
+.dot-anim { animation: dot-in 0.5s ease both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-anim, .bar-v, .bar-h, .slice-anim, .line-anim, .dot-anim { animation: none; }
+  .line-anim { stroke-dasharray: 1; stroke-dashoffset: 0; }
+}
