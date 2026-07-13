@@ -179,8 +179,23 @@ async def upload_bank(
     if not rows:
         raise HTTPException(400, "No transactions found in the statement.")
 
-    # Replace prior bank txns for this account (fresh statement supersedes)
-    db.query(EvalueBankTxn).filter(EvalueBankTxn.reco_acc_no == reco_acc_no).delete()
+    # Replace prior bank txns for this account, but ONLY for the dates this file
+    # actually covers — so incremental daily uploads ACCUMULATE instead of wiping
+    # history, while a re-uploaded/corrected statement still supersedes its own
+    # dates. The old full-account wipe deleted every prior day on each upload, so
+    # operators uploading single-day files silently lost all earlier days from the
+    # recon tables (the funds snapshots survived via per-date upsert, which is why
+    # the EOD-balance email still showed amounts the recon report had lost).
+    file_dates = {r["txn_date"] for r in rows if r.get("txn_date")}
+    if file_dates:
+        db.query(EvalueBankTxn).filter(
+            EvalueBankTxn.reco_acc_no == reco_acc_no,
+            EvalueBankTxn.txn_date.in_(file_dates),
+        ).delete(synchronize_session=False)
+    else:
+        # No parseable dates at all — fall back to full replace to avoid dupes.
+        db.query(EvalueBankTxn).filter(
+            EvalueBankTxn.reco_acc_no == reco_acc_no).delete(synchronize_session=False)
     upload_date = _TODAY()
     for r in rows:
         db.add(EvalueBankTxn(
