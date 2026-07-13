@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Clock, Plus, Play, Trash2, Pencil, Power, X, Mail, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Clock, Plus, Play, Trash2, Pencil, Power, X, Mail, CheckCircle2, AlertCircle, BarChart3 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
 
@@ -52,6 +52,7 @@ const blankForm = () => ({
   day_of_week:  0,
   day_of_month: 1,
   email_to:     '',
+  include_dashboard: false,
 })
 
 export default function ScheduledReports({ partners = [] }) {
@@ -88,6 +89,7 @@ export default function ScheduledReports({ partners = [] }) {
       hour: s.hour, minute: s.minute,
       day_of_week: s.day_of_week ?? 0, day_of_month: s.day_of_month ?? 1,
       email_to: s.email_to || '',
+      include_dashboard: !!s.include_dashboard,
     })
     setShow(true)
   }
@@ -110,6 +112,7 @@ export default function ScheduledReports({ partners = [] }) {
       day_of_week:  form.frequency === 'weekly'  ? Number(form.day_of_week)  : null,
       day_of_month: form.frequency === 'monthly' ? Number(form.day_of_month) : null,
       email_to: form.email_to.trim() || null,
+      include_dashboard: !!form.include_dashboard,
     }
     setSaving(true)
     try {
@@ -192,6 +195,11 @@ export default function ScheduledReports({ partners = [] }) {
                   <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 font-medium">
                     {labelOf(REPORT_TYPES, s.report_type)}
                   </span>
+                  {s.include_dashboard && (
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 font-medium flex items-center gap-1">
+                      <BarChart3 size={10} /> + Dashboard
+                    </span>
+                  )}
                   {!s.is_active && (
                     <span className="text-[11px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 font-medium">Paused</span>
                   )}
@@ -328,6 +336,19 @@ export default function ScheduledReports({ partners = [] }) {
                 <input className="input" placeholder="Leave blank to use your account email — comma-separate for multiple"
                   value={form.email_to} onChange={e => upd({ email_to: e.target.value })} />
               </div>
+
+              <label className="flex items-start gap-2.5 border-t border-gray-100 pt-4 cursor-pointer">
+                <input type="checkbox" className="mt-0.5 w-4 h-4 rounded accent-emerald-600 cursor-pointer shrink-0"
+                  checked={!!form.include_dashboard} onChange={e => upd({ include_dashboard: e.target.checked })} />
+                <span>
+                  <span className="text-sm font-medium text-gray-700 flex items-center gap-1.5">
+                    <BarChart3 size={13} className="text-emerald-600" /> Attach executive dashboard
+                  </span>
+                  <span className="text-[11px] text-gray-400 block mt-0.5">
+                    Embed the reconciliation dashboard — KPIs and per-product match rates for this report's date window — into the email body, with a link to the live view.
+                  </span>
+                </span>
+              </label>
             </div>
 
             <div className="flex justify-end gap-2 px-5 py-3.5 border-t border-gray-100 sticky bottom-0 bg-white">

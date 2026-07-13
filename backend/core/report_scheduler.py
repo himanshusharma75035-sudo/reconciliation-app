@@ -400,6 +400,91 @@ def _send_report(
     return "sent"
 
 
+# ─── Executive dashboard email block ──────────────────────────────────────────
+def _fmt_inr_short(n) -> str:
+    n = float(n or 0)
+    if abs(n) >= 1e7: return f"₹{n / 1e7:.2f} Cr"
+    if abs(n) >= 1e5: return f"₹{n / 1e5:.2f} L"
+    return f"₹{n:,.0f}"
+
+
+def _analytics_email_html(db, from_date: str, to_date: str) -> str:
+    """Executive analytics dashboard as email-safe HTML (inline styles, table layout,
+    pure-CSS bars — no JS/SVG, renders in Gmail/Outlook). Covers the same date window
+    as the host report. Returns '' on ANY error so it can never block the email."""
+    try:
+        import os
+        from core.analytics import build_analytics
+        a = build_analytics(db, date_from=from_date, date_to=to_date)
+        t = a.get("totals", {})
+        groups = a.get("by_group", [])
+        day_label = from_date if from_date == to_date else f"{from_date} → {to_date}"
+        base = os.getenv("APP_PUBLIC_URL", "https://122.176.147.78:8443/recon").rstrip("/")
+        exec_url = base + "/exec"
+
+        kpis = [
+            ("Total txns",     f'{t.get("transactions", 0):,}',        "#111827"),
+            ("Matched",        f'{t.get("matched", 0):,}',             "#059669"),
+            ("Unmatched",      f'{t.get("unmatched", 0):,}',           "#dc2626"),
+            ("Match rate",     f'{t.get("match_rate", 0)}%',           "#4f46e5"),
+            ("Matched volume", _fmt_inr_short(t.get("matched_volume", 0)), "#111827"),
+        ]
+        kpi_cells = "".join(
+            f'<td style="padding:8px 6px;text-align:center;border:1px solid #eef2f7">'
+            f'<div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.03em">{lbl}</div>'
+            f'<div style="font-size:17px;font-weight:800;color:{color};margin-top:2px">{val}</div></td>'
+            for lbl, val, color in kpis)
+
+        def _bar(rate):
+            rate = max(0.0, min(100.0, float(rate or 0)))
+            col = "#059669" if rate >= 85 else ("#d97706" if rate >= 50 else "#dc2626")
+            return (f'<span style="background:#eef2f7;border-radius:4px;height:8px;width:80px;'
+                    f'display:inline-block;vertical-align:middle">'
+                    f'<span style="background:{col};height:8px;width:{rate:.0f}%;'
+                    f'border-radius:4px;display:inline-block"></span></span>')
+
+        rows = "".join(
+            '<tr>'
+            f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#334155">{g.get("label","")}</td>'
+            f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;color:#475569">{g.get("transactions",0):,}</td>'
+            f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;color:#059669;font-weight:600">{g.get("matched",0):,}</td>'
+            f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;color:#dc2626">{g.get("unmatched",0):,}</td>'
+            f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;white-space:nowrap">{_bar(g.get("match_rate",0))} '
+            f'<span style="font-size:11px;color:#64748b">{g.get("match_rate",0)}%</span></td>'
+            '</tr>'
+            for g in groups)
+        if not rows:
+            rows = ('<tr><td colspan="5" style="padding:10px;text-align:center;color:#9ca3af;'
+                    'font-style:italic">No reconciliation activity for this window.</td></tr>')
+
+        return f"""
+        <div style="margin-top:22px">
+          <div style="background:#065f46;color:white;padding:13px 18px;border-radius:8px 8px 0 0">
+            <div style="font-size:11px;opacity:.75;letter-spacing:.04em">EXECUTIVE RECONCILIATION DASHBOARD</div>
+            <div style="font-size:15px;font-weight:700;margin-top:3px">Activity for {day_label} · all products</div>
+          </div>
+          <div style="border:1px solid #e5e7eb;border-top:none;padding:16px 18px;border-radius:0 0 8px 8px;background:#fff">
+            <table width="100%" style="border-collapse:collapse;margin-bottom:14px"><tr>{kpi_cells}</tr></table>
+            <table width="100%" style="border-collapse:collapse;font-size:12.5px">
+              <tr style="color:#94a3b8;text-align:left">
+                <th style="padding:6px 8px;font-weight:600;border-bottom:2px solid #e5e7eb">Product</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Txns</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Matched</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Unmatched</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Match rate</th>
+              </tr>
+              {rows}
+            </table>
+            <div style="margin-top:16px;text-align:center">
+              <a href="{exec_url}" style="display:inline-block;background:#059669;color:#fff;text-decoration:none;font-size:13px;font-weight:600;padding:9px 20px;border-radius:8px">View the live dashboard →</a>
+            </div>
+          </div>
+        </div>"""
+    except Exception as e:
+        logger.warning(f"[report_scheduler] analytics dashboard block skipped: {e}")
+        return ""
+
+
 # ─── Main job function ────────────────────────────────────────────────────────
 def execute_report_subscription(sub_id: str) -> dict:
     """
@@ -423,6 +508,9 @@ def execute_report_subscription(sub_id: str) -> dict:
         date_label   = DATE_RANGE_LABELS.get(sub.date_range, sub.date_range)
         subject = f"[Eko Recon] {sub.name} — {report_label} {from_date} to {to_date}"
         partner_str = filters.get("partner", "All Partners").title()
+        # Opt-in executive dashboard block (same date window as this report).
+        dashboard_html = (_analytics_email_html(db, from_date, to_date)
+                          if getattr(sub, "include_dashboard", False) else "")
 
         html = f"""
         <html><body style="font-family:sans-serif;color:#1f2937;max-width:600px;margin:auto;padding:24px">
@@ -441,6 +529,7 @@ def execute_report_subscription(sub_id: str) -> dict:
               To manage your report subscriptions, open the Recon App → Reports → My Scheduled Reports.
             </div>
           </div>
+          {dashboard_html}
           <div style="margin-top:12px;font-size:11px;color:#9ca3af;text-align:center">
             Auto-generated by Eko Recon · {datetime.datetime.now().strftime('%d %b %Y %H:%M IST')}
           </div>

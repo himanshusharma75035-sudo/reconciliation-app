@@ -706,6 +706,11 @@ class ReportSubscription(Base):
 
     email_to     = Column(String(500), nullable=True)        # comma-separated recipients
 
+    # Opt-in: also embed the executive analytics dashboard (KPIs + per-product match
+    # rates + link to the live dashboard) into the email body. Works with ANY
+    # report_type — the report's own date window is used for the dashboard too.
+    include_dashboard = Column(Boolean, default=False)
+
     is_active    = Column(Boolean,     default=True)
     last_run_at      = Column(DateTime, nullable=True)
     last_run_status  = Column(String(20), nullable=True)     # success | error | skipped_no_smtp
@@ -1659,6 +1664,8 @@ def _run_migrations():
         "portal_requests": [
             ("assignee", "VARCHAR(100)"), ("github_issue_url", "VARCHAR(500)"),
         ],
+        # Opt-in "attach executive dashboard" flag on scheduled reports
+        "report_subscriptions": [("include_dashboard", "BOOLEAN")],
     }
 
     with engine.connect() as conn:

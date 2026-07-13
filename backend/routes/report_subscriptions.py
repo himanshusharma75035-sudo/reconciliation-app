@@ -36,6 +36,7 @@ class SubscriptionIn(BaseModel):
     day_of_week:   Optional[int] = None
     day_of_month:  Optional[int] = None
     email_to:      Optional[str] = None
+    include_dashboard: bool = False
 
 
 # ─── CRUD endpoints ───────────────────────────────────────────────────────────
@@ -82,6 +83,7 @@ def create_subscription(
         day_of_week  = body.day_of_week,
         day_of_month = body.day_of_month,
         email_to     = body.email_to or getattr(current_user, "email", None),
+        include_dashboard = bool(body.include_dashboard),
     )
     db.add(sub)
     db.commit()
@@ -110,6 +112,7 @@ def update_subscription(
     sub.minute       = body.minute
     sub.day_of_week  = body.day_of_week
     sub.day_of_month = body.day_of_month
+    sub.include_dashboard = bool(body.include_dashboard)
     if body.email_to is not None:
         sub.email_to = body.email_to
     db.commit()
@@ -191,6 +194,7 @@ def _to_dict(s: ReportSubscription) -> dict:
         "day_of_week":     s.day_of_week,
         "day_of_month":    s.day_of_month,
         "email_to":        s.email_to,
+        "include_dashboard": bool(s.include_dashboard),
         "is_active":       s.is_active,
         "last_run_at":     str(s.last_run_at) if s.last_run_at else None,
         "last_run_status": s.last_run_status,
