@@ -26,10 +26,19 @@ import Workflow from './pages/Workflow'
 import IngestionMonitor from './pages/IngestionMonitor'
 import DeveloperPortal from './pages/DeveloperPortal'
 import ErrorBoundary from './components/ErrorBoundary'
+import { isViewer } from './utils/permissions'
 
 function RequireAuth({ children }) {
   const token = localStorage.getItem('token')
   if (!token) return <Navigate to="/login" replace />
+  return children
+}
+
+// Dashboard-only "viewer" accounts never enter the main app shell — they are
+// bounced to the standalone executive dashboard. (The server also blocks their
+// token from every non-analytics endpoint, so this is just the UX layer.)
+function RequireOperator({ children }) {
+  if (isViewer()) return <Navigate to="/exec" replace />
   return children
 }
 
@@ -51,7 +60,7 @@ export default function App() {
     <ErrorBoundary>
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route path="/" element={<RequireAuth><Layout /></RequireAuth>}>
+      <Route path="/" element={<RequireAuth><RequireOperator><Layout /></RequireOperator></RequireAuth>}>
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="upload" element={<Upload />} />
@@ -79,7 +88,7 @@ export default function App() {
       </Route>
       {/* Standalone full-screen executive dashboard (no sidebar), login-gated. */}
       <Route path="/exec" element={<RequireAuth><StandaloneAnalytics /></RequireAuth>} />
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      <Route path="*" element={<Navigate to={isViewer() ? '/exec' : '/dashboard'} replace />} />
     </Routes>
     </ErrorBoundary>
   )

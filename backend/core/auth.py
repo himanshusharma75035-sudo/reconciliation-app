@@ -76,6 +76,34 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
 
+# ── Dashboard-only "viewer" accounts ──────────────────────────────────────────
+# A user whose role is "viewer" is restricted to the read-only executive analytics
+# dashboard plus the minimal auth endpoints needed to sign in and bootstrap the
+# SPA — and NOTHING else. Because virtually every protected endpoint depends on
+# get_current_user, enforcing this allowlist centrally here locks these accounts
+# down without per-route changes and with no risk that a forgotten read endpoint
+# leaks transaction-level data. This is a hard server-side boundary; the frontend
+# viewer redirect is only cosmetic on top of it.
+VIEWER_ALLOWED_PREFIXES = (
+    "/api/reports/analytics",   # the dashboard's only data source
+    "/api/auth/me",             # SPA user bootstrap
+    "/api/auth/logout",         # sign out
+)
+
+
+def _enforce_viewer_scope(user, request):
+    """Raise 403 if a role='viewer' account touches anything outside the dashboard."""
+    if getattr(user, "role", "") != "viewer":
+        return
+    path = getattr(getattr(request, "url", None), "path", "") if request is not None else ""
+    # Fail closed: if we can't see the path, or it's not on the allowlist, deny.
+    if not path or not any(path.startswith(p) for p in VIEWER_ALLOWED_PREFIXES):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account can only view the executive dashboard.",
+        )
+
+
 # ── Password helpers ──────────────────────────────────────────────────────────
 
 def verify_password(plain: str, hashed: str) -> bool:
@@ -177,6 +205,7 @@ def get_current_user(
         creator_copy.permissions = api_key.permissions
         creator_copy.full_name   = f"{api_key.name} [API key]"
         set_actor(db, creator_copy)   # additive: attribute config/entitlement changes to this principal
+        _enforce_viewer_scope(creator_copy, request)
         return creator_copy
 
     # ── JWT path ──────────────────────────────────────────────────────────────
@@ -199,6 +228,7 @@ def get_current_user(
     if user is None or not user.is_active:
         raise credentials_exception
     set_actor(db, user)   # additive: attribute config/entitlement changes to this principal
+    _enforce_viewer_scope(user, request)
     return user
 
 

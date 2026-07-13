@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Plus, Edit2, Trash2, ShieldCheck, User as UserIcon, X } from 'lucide-react'
+import { Plus, Edit2, Trash2, ShieldCheck, User as UserIcon, X, Eye } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { createPortal } from 'react-dom'
 import api from '../utils/api'
@@ -141,13 +141,19 @@ export default function Users() {
                 </td>
                 <td className="table-td">
                   <span className={user.role === 'admin' ? 'badge-blue' : 'badge-gray'}>
-                    {user.role === 'admin' ? <><ShieldCheck size={11} className="inline mr-1" />Admin</> : <><UserIcon size={11} className="inline mr-1" />User</>}
+                    {user.role === 'admin'
+                      ? <><ShieldCheck size={11} className="inline mr-1" />Admin</>
+                      : user.role === 'viewer'
+                        ? <><Eye size={11} className="inline mr-1" />Viewer</>
+                        : <><UserIcon size={11} className="inline mr-1" />User</>}
                   </span>
                 </td>
                 <td className="table-td">
                   <div className="flex flex-wrap gap-1">
                     {user.role === 'admin' ? (
                       <span className="badge-blue">All permissions</span>
+                    ) : user.role === 'viewer' ? (
+                      <span className="badge-gray">Dashboard only</span>
                     ) : (
                       PERMS.filter(p => user.permissions?.[p]).map(p => (
                         <span key={p} className="badge-gray">{PERM_LABELS[p]}</span>
@@ -214,6 +220,7 @@ export default function Users() {
                     <label className="text-xs font-medium text-gray-600 block mb-1">Role</label>
                     <select className="select" value={form.role} onChange={e => setForm({...form, role: e.target.value})}>
                       <option value="user">User</option>
+                      <option value="viewer">Viewer — dashboard only</option>
                       <option value="admin">Admin</option>
                     </select>
                   </div>
@@ -266,6 +273,12 @@ export default function Users() {
                     </div>
                   </div>
                 </>
+              ) : (modal === 'create' ? form.role : modal.role) === 'viewer' ? (
+                <p className="text-xs text-gray-500 bg-gray-50 rounded-lg px-3 py-2.5 border border-gray-100">
+                  <strong className="font-semibold text-gray-600">Dashboard-only account.</strong> This user can sign in and see only the
+                  executive analytics dashboard (the <code className="text-[11px]">/exec</code> screen) — no reports, transactions,
+                  uploads, or settings, on screen or via the API. There are no permissions to configure.
+                </p>
               ) : (
                 <p className="text-xs text-gray-500 bg-gray-50 rounded-lg px-3 py-2.5 border border-gray-100">
                   Admin users have full access to every screen and permission — there's nothing to configure here.

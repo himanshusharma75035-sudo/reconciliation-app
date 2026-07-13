@@ -133,6 +133,10 @@ def create_user(data: UserCreate, current_user: User = Depends(require_permissio
         raise HTTPException(status_code=400, detail="Username already exists")
     default_perms = {"upload": True, "run_recon": True, "src_assign": True, "reports": True, "logic_builder": False}
     perms = data.permissions or default_perms
+    # Viewer accounts are dashboard-only: no operational permissions ever apply
+    # (the server-side viewer scope in core/auth.py is the real boundary).
+    if data.role == "viewer":
+        perms = {}
     user = User(
         username=data.username,
         email=data.email,

@@ -23,7 +23,7 @@ export default function Login() {
       localStorage.setItem('token', data.access_token)
       localStorage.setItem('user', JSON.stringify(data.user))
       toast.success(`Welcome, ${data.user.full_name || data.user.username}`)
-      navigate('/dashboard')
+      navigate(data.user.role === 'viewer' ? '/exec' : '/dashboard')
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Login failed')
     } finally {

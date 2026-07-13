@@ -24,6 +24,15 @@ export function isAdmin() {
 }
 
 /**
+ * Dashboard-only account: role 'viewer' can ONLY see the executive analytics
+ * dashboard (the /exec route). Enforced server-side; the app redirects these
+ * users to /exec and hides the rest of the UI.
+ */
+export function isViewer() {
+  return getUser().role === 'viewer'
+}
+
+/**
  * Product access: user.allowed_products is a list of product ids.
  * Empty list / missing = access to ALL products. Admins always see everything.
  * (Backend enforces this on run-recon; the UI hides inaccessible products.)

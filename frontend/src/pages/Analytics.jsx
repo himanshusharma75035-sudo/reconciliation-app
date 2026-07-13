@@ -7,6 +7,7 @@ import api from '../utils/api'
 import toast from 'react-hot-toast'
 import { BarChart3, CheckCircle2, XCircle, Percent, Wallet, RefreshCw, Link2, Maximize2, Scale, LogOut } from 'lucide-react'
 import { BarChart, LineChart, PieChart, ChartCard, PALETTE } from '../components/Charts'
+import { isViewer } from '../utils/permissions'
 
 const C = { matched: '#10b981', unmatched: '#ef4444', mismatch: '#f59e0b', other: '#94a3b8' }
 // Bank vs Internal share the matched/open meaning (green/red) but differ by SHADE
@@ -120,7 +121,7 @@ export default function Analytics({ standalone = false }) {
             <div className="text-[10px] uppercase tracking-widest text-gray-400">Executive Dashboard</div>
           </div>
           <div className="ml-auto flex items-center gap-1.5">
-            <a href={withBase('analytics') + window.location.search} className="btn-ghost text-xs">Open full app ↗</a>
+            {!isViewer() && <a href={withBase('analytics') + window.location.search} className="btn-ghost text-xs">Open full app ↗</a>}
             <button onClick={logout} className="btn-ghost text-xs flex items-center gap-1"><LogOut size={13} /> Logout</button>
           </div>
         </div>
