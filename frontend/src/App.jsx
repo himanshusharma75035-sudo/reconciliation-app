@@ -20,6 +20,7 @@ import SBIKiosk       from './pages/SBIKiosk'
 import Evalue         from './pages/Evalue'
 import Insights       from './pages/Insights'
 import Analytics      from './pages/Analytics'
+import PublicDashboard from './pages/PublicDashboard'
 import Bbps           from './pages/Bbps'
 import ProductReconPage from './pages/ProductReconPage'
 import Workflow from './pages/Workflow'
@@ -42,18 +43,6 @@ function RequireOperator({ children }) {
   return children
 }
 
-// Chrome-free, full-screen Analytics for sharing with management / a display.
-// Same data, still login-gated (RequireAuth), but no app sidebar. Lives at /exec
-// (i.e. /recon/exec in prod). Reuses the Layout's page container/padding.
-function StandaloneAnalytics() {
-  return (
-    <main className="min-h-screen overflow-y-auto bg-surface">
-      <div className="p-6 max-w-7xl mx-auto animate-fade-in">
-        <Analytics standalone />
-      </div>
-    </main>
-  )
-}
 
 export default function App() {
   return (
@@ -86,8 +75,9 @@ export default function App() {
         <Route path="ingestion-monitor" element={<IngestionMonitor />} />
         <Route path="developer-portal" element={<DeveloperPortal />} />
       </Route>
-      {/* Standalone full-screen executive dashboard (no sidebar), login-gated. */}
-      <Route path="/exec" element={<RequireAuth><StandaloneAnalytics /></RequireAuth>} />
+      {/* Standalone full-screen executive dashboard (no sidebar). Public @eko.co.in
+          email-code access OR any existing session; PublicDashboard gates itself. */}
+      <Route path="/exec" element={<PublicDashboard />} />
       <Route path="*" element={<Navigate to={isViewer() ? '/exec' : '/dashboard'} replace />} />
     </Routes>
     </ErrorBoundary>

@@ -59,6 +59,7 @@ from routes.workflow import router as workflow_router
 from routes.ingestion import router as ingestion_router
 from routes.views import router as views_router
 from routes.portal import router as portal_router
+from routes.public_dashboard import router as public_dashboard_router
 
 app = FastAPI(
     title="Eko Bharat Ventures — Reconciliation API",
@@ -113,6 +114,7 @@ app.include_router(workflow_router)
 app.include_router(ingestion_router)
 app.include_router(views_router)
 app.include_router(portal_router)
+app.include_router(public_dashboard_router)
 
 
 def _apply_indexes():

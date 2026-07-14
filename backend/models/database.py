@@ -718,6 +718,25 @@ class ReportSubscription(Base):
     created_at   = Column(DateTime,    default=datetime.datetime.utcnow)
 
 
+class DashboardOtp(Base):
+    """
+    One-time email codes for passwordless @eko.co.in access to the executive
+    dashboard (/exec). A visitor enters their @eko.co.in email, receives a 6-digit
+    code, and exchanges it for a short-lived VIEWER session (dashboard-only). The
+    code is stored only as a SHA-256 hash; single-use; time-boxed. New table —
+    created by create_all(), no migration needed.
+    """
+    __tablename__ = "dashboard_otps"
+
+    id         = Column(String(36),  primary_key=True, default=generate_id)
+    email      = Column(String(200), index=True, nullable=False)
+    code_hash  = Column(String(64),  nullable=False)        # sha256 of the 6-digit code
+    expires_at = Column(DateTime,    nullable=False)
+    used       = Column(Boolean,     default=False)
+    attempts   = Column(Integer,     default=0)
+    created_at = Column(DateTime,    default=datetime.datetime.utcnow)
+
+
 # ─── AePS Settlement Recon Models ─────────────────────────────────────────────
 
 class AepsSettlement(Base):

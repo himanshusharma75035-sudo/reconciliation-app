@@ -2,7 +2,7 @@
 // across every product. Date-filterable; charts switch type on demand (bar / line
 // / pie / donut). Read-only; data from GET /reports/analytics (core/analytics.py).
 import React, { useState, useEffect, useCallback } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
 import { BarChart3, CheckCircle2, XCircle, Percent, Wallet, RefreshCw, Link2, Maximize2, Scale, LogOut } from 'lucide-react'
@@ -35,7 +35,6 @@ export default function Analytics({ standalone = false }) {
   // Filters live in the URL query string so any view is shareable / bookmarkable
   // exactly as filtered (from / to / product / side).
   const [searchParams, setSearchParams] = useSearchParams()
-  const navigate = useNavigate()
   const [from, setFrom] = useState(searchParams.has('from') ? searchParams.get('from') : monthStart())
   const [to, setTo] = useState(searchParams.has('to') ? searchParams.get('to') : today())
   const [product, setProduct] = useState(searchParams.get('product') || '')
@@ -68,7 +67,13 @@ export default function Analytics({ standalone = false }) {
     try { await navigator.clipboard.writeText(window.location.href); toast.success('Dashboard link copied') }
     catch { toast.error('Copy failed — copy the URL from the address bar') }
   }
-  const logout = () => { localStorage.removeItem('token'); localStorage.removeItem('user'); navigate('/login') }
+  const logout = () => {
+    // Viewers (incl. @eko.co.in email-code sessions) return to the /exec gate;
+    // operators go to the normal login. Hard redirect = clean session reset.
+    const dest = isViewer() ? 'exec' : 'login'
+    localStorage.removeItem('token'); localStorage.removeItem('user')
+    window.location.href = withBase(dest)
+  }
 
   const preset = (f, t) => { setFrom(f); setTo(t) }
   const t = data?.totals || {}

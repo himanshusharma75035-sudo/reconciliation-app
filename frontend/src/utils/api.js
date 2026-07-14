@@ -59,8 +59,11 @@ api.interceptors.response.use(
       localStorage.removeItem('token')
       localStorage.removeItem('user')
       // BASE_URL carries the nginx subpath (e.g. /recon/) so this lands on
-      // /recon/login, not a 404 at the server root.
-      window.location.href = import.meta.env.BASE_URL + 'login'
+      // /recon/login, not a 404 at the server root. On the public /exec dashboard
+      // an expired session should return to the email-code gate (also at /exec),
+      // NOT the operator login.
+      const onExec = window.location.pathname.replace(/\/+$/, '').endsWith('/exec')
+      window.location.href = import.meta.env.BASE_URL + (onExec ? 'exec' : 'login')
     }
     return Promise.reject(err)
   }
