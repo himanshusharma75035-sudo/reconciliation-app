@@ -84,6 +84,39 @@ def test_cross_account_match_rejects_amount_gap(db):
     assert db.query(EvalueWalletLoad).filter_by(id="nl").first().recon_status == "unmatched_load"
 
 
+def test_cross_account_rejects_sub_rupee_gap(db):
+    from routes.evalue import _cross_account_reference_match
+    # Same reference + same date but amounts differ by <= Rs 1 (NOT exact) → must NOT
+    # match. Parity with the exact per-account rule (Rajendra 2026-07-14); otherwise a
+    # sub-rupee mismatch would slip through as a clean matched_online with no flag.
+    db.add(EvalueBankTxn(id="nb", reco_acc_no="IDFC-1", txn_date=RD, amount=5000.00,
+                         dr_cr="CR", recon_status="unmatched_bank",
+                         utr="UTIBR62026070187097411"))
+    db.add(EvalueWalletLoad(id="nl", reco_acc_no="IDFC-2", transaction_date=RD, amount=5000.50,
+                            recon_status="unmatched_load",
+                            tid_chequeno="UTIBR62026070187097411"))
+    db.commit()
+    res = _cross_account_reference_match(db)
+    assert res["cross_account_matched"] == 0
+    assert db.query(EvalueBankTxn).filter_by(id="nb").first().recon_status == "unmatched_bank"
+    assert db.query(EvalueWalletLoad).filter_by(id="nl").first().recon_status == "unmatched_load"
+
+
+def test_cross_account_rejects_date_gap(db):
+    from routes.evalue import _cross_account_reference_match
+    # Same reference + exact amount but DIFFERENT dates → must NOT match.
+    db.add(EvalueBankTxn(id="nb", reco_acc_no="IDFC-1", txn_date="2026-07-01", amount=5000.0,
+                         dr_cr="CR", recon_status="unmatched_bank",
+                         utr="UTIBR62026070187097411"))
+    db.add(EvalueWalletLoad(id="nl", reco_acc_no="IDFC-2", transaction_date="2026-07-02", amount=5000.0,
+                            recon_status="unmatched_load",
+                            tid_chequeno="UTIBR62026070187097411"))
+    db.commit()
+    res = _cross_account_reference_match(db)
+    assert res["cross_account_matched"] == 0
+    assert db.query(EvalueBankTxn).filter_by(id="nb").first().recon_status == "unmatched_bank"
+
+
 def test_manual_match_amount_guard(db):
     from routes.evalue import manual_match, ManualMatchIn
     from models.database import User

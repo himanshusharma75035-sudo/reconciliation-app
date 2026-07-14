@@ -699,13 +699,15 @@ def reconcile(bank_rows: list, loads: list, reco_acc_no: str, amount_tol: float 
     amount_tol: rupee tolerance for amount comparison (0 = exact). Falls back to
     BANK_TOLERANCE[bank_name] when amount_tol is 0 and a bank entry exists.
 
-    Rules:
-      ONLINE: bank credit.utr ~= load.utr (prefix/suffix tolerant) AND amount~=  AND same date
+    Rules (per Rajendra 2026-07-14 — amount AND date must BOTH match to link):
+      ONLINE: bank credit reference/UTR matches a load AND amount~= AND SAME date
       CASH:   amount~= AND same date AND (atm/txn no OR branch OR mobile match)
       Extra bank credit matching an already-matched load  → twice_credit
-      Bank credit whose UTR matches a load but amount differs → wrong_amount
       Unmatched bank credit → unmatched_bank ; unmatched load → unmatched_load
       Bank DR rows → classified FEE (transaction_fee) or bank_debit
+      An identifier match whose amount OR date differs is left OPEN (unmatched) —
+      the auto-matcher NEVER creates a 'wrong_amount' link. (wrong_amount now comes
+      only from deliberate MANUAL matches in routes/evalue.py.)
     """
     if not amount_tol:
         amount_tol = BANK_TOLERANCE.get((bank_name or "").strip().upper(), 0.0)
@@ -755,17 +757,14 @@ def reconcile(bank_rows: list, loads: list, reco_acc_no: str, amount_tol: float 
                      and _ref_match(bank_parts, (l.get("tid_chequeno"), l.get("bank_ref"), l.get("utr_number")))]
         if not ref_cands:
             continue
-        amt_ok = [l for l in ref_cands if amt_match(l["amount"], b["amount"])]
+        # amount AND date must both match — an identifier match whose amount or date
+        # differs is left OPEN (no wrong_amount link).
+        amt_ok = [l for l in ref_cands
+                  if amt_match(l["amount"], b["amount"]) and l["transaction_date"] == b["txn_date"]]
         if amt_ok:
             l = amt_ok[0]; mid = new_mid()
-            b["recon_status"] = "matched_online"; b["match_id"] = mid; b["match_note"] = "reference (Particulars ↔ TID/Is_Weekend_Loan)"
-            l["recon_status"] = "matched_online"; l["match_id"] = mid; l["match_note"] = "reference"
-        else:
-            l = ref_cands[0]; mid = new_mid()
-            b["recon_status"] = "wrong_amount"; b["match_id"] = mid
-            b["match_note"] = f"reference match; bank {b['amount']} vs load {l['amount']}"
-            l["recon_status"] = "wrong_amount"; l["match_id"] = mid
-            l["match_note"] = f"bank {b['amount']} vs load {l['amount']}"
+            b["recon_status"] = "matched_online"; b["match_id"] = mid; b["match_note"] = "reference + amount + date"
+            l["recon_status"] = "matched_online"; l["match_id"] = mid; l["match_note"] = "reference + amount + date"
 
     # ── 1) ONLINE match on UTR + amount + date ────────────────────────────────
     for b in credits:
@@ -778,7 +777,8 @@ def reconcile(bank_rows: list, loads: list, reco_acc_no: str, amount_tol: float 
         utr_cands = [l for l in acct_loads
                      if l["recon_status"] == "unmatched_load"
                      and _utr_match(butr, l.get("utr_number"))]
-        # strong: UTR + exact amount + same date
+        # STRICT: UTR + exact amount + SAME date only. A UTR match whose amount or
+        # date differs is left OPEN — no cross-date match, no wrong_amount link.
         exact = [l for l in utr_cands
                  if amt_match(l["amount"], b["amount"])
                  and l["transaction_date"] == b["txn_date"]]
@@ -788,22 +788,6 @@ def reconcile(bank_rows: list, loads: list, reco_acc_no: str, amount_tol: float 
             b["recon_status"] = "matched_online"; b["match_id"] = mid; b["match_note"] = "UTR+amount+date"
             l["recon_status"] = "matched_online"; l["match_id"] = mid; l["match_note"] = "UTR+amount+date"
             continue
-        # UTR + exact amount (date differs) — still a confident match
-        amt_ok = [l for l in utr_cands if amt_match(l["amount"], b["amount"])]
-        if amt_ok:
-            l = amt_ok[0]
-            mid = new_mid()
-            b["recon_status"] = "matched_online"; b["match_id"] = mid; b["match_note"] = "UTR+amount"
-            l["recon_status"] = "matched_online"; l["match_id"] = mid; l["match_note"] = "UTR+amount"
-            continue
-        if utr_cands:
-            # UTR matches but amount differs → wrong amount credit
-            l = utr_cands[0]
-            mid = new_mid()
-            b["recon_status"] = "wrong_amount"; b["match_id"] = mid
-            b["match_note"] = f"UTR match; bank {b['amount']} vs load {l['amount']}"
-            l["recon_status"] = "wrong_amount"; l["match_id"] = mid
-            l["match_note"] = f"bank {b['amount']} vs load {l['amount']}"
 
     # ── 2) CASH match: amount + date + (atm/txn | branch | mobile) ─────────────
     for b in credits:

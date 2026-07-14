@@ -402,8 +402,14 @@ def _cross_account_reference_match(db: Session) -> dict:
                 break
         if not cand:
             continue
-        # amount confirm (₹1 tolerance); reference is unique so this is a safety net
-        if abs(float(b.amount or 0) - float(cand.amount or 0)) > 1.0:
+        # amount AND date must match EXACTLY — full parity with the per-account passes
+        # (E-Value tolerance is exact, behavior-contract item 7; Rajendra 2026-07-14).
+        # A non-exact amount OR a differing date is left OPEN, never recovered here —
+        # otherwise a sub-₹1 mismatch the per-account pass rejected would slip through
+        # as a clean matched_online with no flag.
+        if round(float(b.amount or 0), 2) != round(float(cand.amount or 0), 2):
+            continue
+        if (b.txn_date or "") != (cand.transaction_date or ""):
             continue
         used.add(cand.id)
         n += 1

@@ -52,12 +52,35 @@ def test_online_match_exact():
     res = E.reconcile(bank, loads, "SBI-9460")
     assert res["summary"]["matched_online"] == 1
 
-def test_online_wrong_amount_when_utr_matches_amount_differs():
+def test_utr_match_amount_differs_now_unmatched():
+    # Rajendra 2026-07-14: an identifier match whose AMOUNT differs is left OPEN,
+    # never linked as wrong_amount (the auto-matcher no longer creates wrong_amount).
     bank = [_row(amount=5000.0, utr="HDFCR5ABC1234567890", channel="RTGS")]
     loads = [_load(reco_acc_no="SBI-9460", amount=4000.0, utr_number="R5ABC1234567890")]
     res = E.reconcile(bank, loads, "SBI-9460")
-    assert res["summary"]["wrong_amount"] == 1
+    assert res["summary"]["wrong_amount"] == 0
     assert res["summary"]["matched_online"] == 0
+    assert res["summary"]["unmatched_bank"] == 1
+    assert res["summary"]["unmatched_load"] == 1
+
+
+def test_utr_amount_match_but_date_differs_now_unmatched():
+    # amount matches but the DATE differs → left OPEN (strict amount AND date).
+    bank = [_row(amount=5000.0, utr="HDFCR5ABC1234567890", channel="RTGS", txn_date="2025-11-19")]
+    loads = [_load(reco_acc_no="SBI-9460", amount=5000.0, utr_number="R5ABC1234567890",
+                   transaction_date="2025-11-20")]
+    res = E.reconcile(bank, loads, "SBI-9460")
+    assert res["summary"]["matched_online"] == 0
+    assert res["summary"]["unmatched_bank"] == 1
+    assert res["summary"]["unmatched_load"] == 1
+
+
+def test_utr_amount_and_date_match_still_matches():
+    bank = [_row(amount=5000.0, utr="HDFCR5ABC1234567890", channel="RTGS", txn_date="2025-11-19")]
+    loads = [_load(reco_acc_no="SBI-9460", amount=5000.0, utr_number="R5ABC1234567890",
+                   transaction_date="2025-11-19")]
+    res = E.reconcile(bank, loads, "SBI-9460")
+    assert res["summary"]["matched_online"] == 1
 
 
 # ── Tolerance ─────────────────────────────────────────────────────────────────
