@@ -737,6 +737,25 @@ class DashboardOtp(Base):
     created_at = Column(DateTime,    default=datetime.datetime.utcnow)
 
 
+class LoginOtp(Base):
+    """
+    Second-factor email codes for the app LOGIN (username + password + emailed code).
+    A code is created only AFTER the password is verified, sent to the user's
+    @eko.co.in email, single-use, time-boxed, attempt-capped. New table —
+    created by create_all(), no migration needed.
+    """
+    __tablename__ = "login_otps"
+
+    id         = Column(String(36),  primary_key=True, default=generate_id)
+    username   = Column(String(100), index=True, nullable=False)
+    email      = Column(String(200), nullable=False)
+    code_hash  = Column(String(64),  nullable=False)
+    expires_at = Column(DateTime,    nullable=False)
+    used       = Column(Boolean,     default=False)
+    attempts   = Column(Integer,     default=0)
+    created_at = Column(DateTime,    default=datetime.datetime.utcnow)
+
+
 # ─── AePS Settlement Recon Models ─────────────────────────────────────────────
 
 class AepsSettlement(Base):

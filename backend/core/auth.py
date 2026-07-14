@@ -1,6 +1,7 @@
 import hashlib
 import secrets
 import json
+import re
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
@@ -221,6 +222,11 @@ def get_current_user(
         username = payload.get("sub")
         if username is None:
             raise credentials_exception
+        # Non-session token types (they also carry sub=<username> but must NEVER
+        # authenticate a request): "device_trust" only lets a browser skip the 2FA
+        # code on /login; "login_pending" only lets /verify-otp finish a 2FA login.
+        if payload.get("typ") in ("device_trust", "login_pending"):
+            raise credentials_exception
     except JWTError:
         raise credentials_exception
 
@@ -279,6 +285,58 @@ def require_admin(current_user: User = Depends(get_current_user)):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
+
+
+# ── Login 2FA (email OTP) helpers ─────────────────────────────────────────────
+# All app-user and dashboard emails must be @eko.co.in.
+EKO_EMAIL_RE = re.compile(r"^[^@\s]+@eko\.co\.in$", re.IGNORECASE)
+
+
+def is_eko_email(email: str) -> bool:
+    return bool(EKO_EMAIL_RE.match((email or "").strip().lower()))
+
+
+def login_2fa_enabled() -> bool:
+    """Master switch for login two-factor (email OTP). OFF unless LOGIN_2FA is
+    truthy in the environment — so a bad rollout or SMTP outage is cleared by
+    setting LOGIN_2FA=off and restarting the backend (the break-glass)."""
+    return os.getenv("LOGIN_2FA", "off").strip().lower() in ("1", "on", "true", "yes")
+
+
+def make_device_trust_token(username: str, days: int = 1) -> str:
+    """A short-lived token that lets THIS browser skip the 2FA code on the next
+    login. Carries typ='device_trust' so get_current_user refuses it as a session."""
+    return create_access_token({"sub": username, "typ": "device_trust"},
+                               expires_delta=timedelta(days=days))
+
+
+def device_trust_valid(token: str, username: str) -> bool:
+    """True if `token` is a still-valid device-trust token for `username`."""
+    if not token:
+        return False
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    return payload.get("typ") == "device_trust" and payload.get("sub") == username
+
+
+def make_login_pending_token(username: str, minutes: int = 10) -> str:
+    """Short-lived token proving the password step passed. /verify-otp requires it,
+    so a party who knows only a username can't touch a victim's in-flight OTP."""
+    return create_access_token({"sub": username, "typ": "login_pending"},
+                               expires_delta=timedelta(minutes=minutes))
+
+
+def login_pending_username(token: str) -> Optional[str]:
+    """Return the username from a valid login_pending token, else None."""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
+    return payload.get("sub") if payload.get("typ") == "login_pending" else None
 
 
 # ── Seed admin ────────────────────────────────────────────────────────────────

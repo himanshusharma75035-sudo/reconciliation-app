@@ -73,7 +73,9 @@ def test_create_viewer_stores_no_permissions(db):
 
 def test_create_normal_user_keeps_default_permissions(db):
     admin = SimpleNamespace(id="admin-id", role="admin")
-    create_user(UserCreate(username="op", password="x", role="user"),
+    # non-viewer accounts now require an @eko.co.in email (login 2FA); permissions
+    # default unchanged.
+    create_user(UserCreate(username="op", password="x", role="user", email="op@eko.co.in"),
                 current_user=admin, db=db)
     u = db.query(User).filter(User.username == "op").first()
     assert json.loads(u.permissions).get("upload") is True   # unchanged behaviour

@@ -208,8 +208,10 @@ export default function Users() {
                   <input className="input" value={form.full_name} onChange={e => setForm({...form, full_name: e.target.value})} />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-gray-600 block mb-1">Email</label>
-                  <input className="input" type="email" value={form.email} onChange={e => setForm({...form, email: e.target.value})} />
+                  <label className="text-xs font-medium text-gray-600 block mb-1">Email <span className="text-gray-400 font-normal">(@eko.co.in)</span></label>
+                  <input className="input" type="email" placeholder="name@eko.co.in"
+                    value={form.email} onChange={e => setForm({...form, email: e.target.value})} />
+                  <p className="text-[11px] text-gray-400 mt-1">Must be an @eko.co.in address — login verification codes are sent here (required for non-viewer accounts).</p>
                 </div>
                 <div>
                   <label className="text-xs font-medium text-gray-600 block mb-1">{modal === 'create' ? 'Password' : 'New Password'}</label>

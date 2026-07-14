@@ -1,12 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query, Header
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
+import os
 import json
+import time
+import hashlib
+import secrets
+import smtplib
+import logging
+import threading
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import datetime
-from models.database import get_db, User, APIKey, generate_id, SessionLog
+from models.database import get_db, User, APIKey, generate_id, SessionLog, LoginOtp
 
 
 def _log_session(db, event, username, user_id=None, request=None, detail=None):
@@ -22,9 +31,142 @@ def _log_session(db, event, username, user_id=None, request=None, detail=None):
         db.rollback()
 from core.auth import (verify_password, create_access_token, hash_password,
                        get_current_user, require_permission, require_admin,
-                       generate_api_key)
+                       generate_api_key, is_eko_email, login_2fa_enabled,
+                       make_device_trust_token, device_trust_valid,
+                       make_login_pending_token, login_pending_username)
 
+logger = logging.getLogger("eko_recon.auth")
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# ── Login 2FA (email OTP) ─────────────────────────────────────────────────────
+LOGIN_OTP_TTL_MIN      = 10
+LOGIN_OTP_MAX_ATTEMPTS = 5
+OTP_ISSUE_PER_USER     = 5     # OTP emails per username per 15 min (anti brute-force + anti mail-bomb)
+OTP_ISSUE_WINDOW_S     = 900
+VERIFY_PER_IP          = 20    # /verify-otp calls per IP per minute
+VERIFY_PER_USER        = 15    # /verify-otp calls per username per 15 min
+
+# In-memory sliding-window limiter (single-worker; same pattern as public_dashboard).
+_RL_LOCK = threading.Lock()
+_RL_HITS: dict = {}
+
+
+def _client_ip(request) -> str:
+    """Unspoofable client IP: nginx X-Real-IP, then the LAST XFF hop, then the peer."""
+    h = getattr(request, "headers", None)
+    if h:
+        xri = h.get("x-real-ip")
+        if xri:
+            return xri.strip()
+        xff = h.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[-1].strip()
+    return getattr(getattr(request, "client", None), "host", "") or "unknown"
+
+
+def _rate_ok(key: str, limit: int, window: int) -> bool:
+    now = time.time()
+    with _RL_LOCK:
+        if len(_RL_HITS) > 5000:
+            for k in [k for k, v in _RL_HITS.items() if not v or v[-1] < now - 3600]:
+                _RL_HITS.pop(k, None)
+            if len(_RL_HITS) > 20000:
+                _RL_HITS.clear()
+        hits = [t for t in _RL_HITS.get(key, ()) if t > now - window]
+        if len(hits) >= limit:
+            _RL_HITS[key] = hits
+            return False
+        hits.append(now)
+        _RL_HITS[key] = hits
+        return True
+
+
+def _gen_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _hash_code(code: str) -> str:
+    return hashlib.sha256((code or "").encode()).hexdigest()
+
+
+def _mask_email(email: str) -> str:
+    try:
+        local, dom = (email or "").split("@", 1)
+        return (local[0] + "***@" + dom) if local else ("***@" + dom)
+    except Exception:
+        return "your email"
+
+
+def _send_login_code(to: str, code: str) -> bool:
+    """Email a login verification code. Returns True only if actually sent. NEVER
+    raises (any config/SMTP error → False → the caller returns a clean 503)."""
+    try:
+        SMTP_HOST = os.getenv("SMTP_HOST", "")
+        SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+        SMTP_USER = os.getenv("SMTP_USER", "")
+        SMTP_PASS = os.getenv("SMTP_PASS", "")
+        SMTP_FROM = os.getenv("SMTP_FROM", "recon@eko.co.in")
+        if not SMTP_HOST:
+            logger.warning("[auth] SMTP not configured — login code not emailed")
+            return False
+        msg = MIMEMultipart()
+        msg["Subject"] = f"Your Eko login verification code: {code}"
+        msg["From"] = SMTP_FROM
+        msg["To"] = to
+        html = f"""
+        <div style="font-family:sans-serif;max-width:420px;margin:auto;padding:24px;color:#1f2937">
+          <div style="background:#1e3a5f;color:#fff;padding:16px 20px;border-radius:8px 8px 0 0">
+            <div style="font-size:11px;opacity:.75">Eko Bharat Ventures — Reconciliation</div>
+            <div style="font-size:16px;font-weight:700;margin-top:3px">Login verification</div>
+          </div>
+          <div style="border:1px solid #e5e7eb;border-top:none;padding:20px;border-radius:0 0 8px 8px;text-align:center">
+            <div style="font-size:12px;color:#6b7280">Enter this code to finish signing in</div>
+            <div style="font-size:34px;font-weight:800;letter-spacing:6px;margin:8px 0;color:#1e3a5f">{code}</div>
+            <div style="font-size:12px;color:#6b7280">Expires in {LOGIN_OTP_TTL_MIN} minutes. If this wasn't you, change your password.</div>
+          </div>
+        </div>"""
+        msg.attach(MIMEText(html, "html"))
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            server.ehlo()
+            server.starttls()
+            if SMTP_USER:
+                server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_FROM, [to], msg.as_string())
+        return True
+    except Exception as e:
+        logger.warning("[auth] login code email failed: %s", e)
+        return False
+
+
+def _issue_login_otp(db: Session, user: User) -> bool:
+    """Create + email a fresh login OTP for user; burn earlier unused ones. Returns
+    True if a code was actually sent."""
+    email = (user.email or "").strip().lower()
+    db.query(LoginOtp).filter(LoginOtp.username == user.username,
+                              LoginOtp.used == False).update({"used": True})  # noqa: E712
+    code = _gen_code()
+    db.add(LoginOtp(id=generate_id(), username=user.username, email=email,
+                    code_hash=_hash_code(code),
+                    expires_at=datetime.datetime.utcnow() + datetime.timedelta(minutes=LOGIN_OTP_TTL_MIN),
+                    used=False, attempts=0))
+    db.commit()
+    return _send_login_code(email, code)
+
+
+def _token_response(user: User, token: str) -> dict:
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "email": user.email,
+            "role": user.role,
+            "permissions": json.loads(user.permissions or "{}"),
+            "allowed_products": json.loads(getattr(user, "allowed_products", None) or "[]"),
+        },
+    }
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -48,8 +190,16 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None
     allowed_products: Optional[list] = None
 
-@router.post("/login", response_model=TokenResponse)
-def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+class VerifyOtpIn(BaseModel):
+    pending: str          # the login-pending token from /login (proves the password step)
+    code: str
+    remember_device: bool = True
+
+
+@router.post("/login", response_model=None)
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(),
+          x_device_trust: Optional[str] = Header(None, alias="X-Device-Trust"),
+          db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == form_data.username).first()
     if not user or not verify_password(form_data.password, user.hashed_password):
         _log_session(db, "login_failed", form_data.username, request=request,
@@ -59,21 +209,73 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         _log_session(db, "login_failed", user.username, user.id, request, "account disabled")
         raise HTTPException(status_code=403, detail="Account disabled")
 
+    # ── Second factor: email OTP. Enforced for password accounts only (viewers are
+    # dashboard-only, 2FA-exempt) when LOGIN_2FA is on and this browser isn't
+    # already trusted. Setting LOGIN_2FA=off + restart is the break-glass. ────────
+    if login_2fa_enabled() and user.role != "viewer":
+        if not device_trust_valid(x_device_trust, user.username):
+            if not is_eko_email(user.email):
+                raise HTTPException(status_code=400,
+                    detail="No @eko.co.in email on file for verification — ask an admin to set your email.")
+            # Cap OTP emails per user so a stolen password can't grind the 6-digit
+            # code by re-issuing (each new code would otherwise reset the per-code
+            # attempt budget) and can't mail-bomb the user.
+            if not _rate_ok(f"otp-issue:{user.username}", OTP_ISSUE_PER_USER, OTP_ISSUE_WINDOW_S):
+                raise HTTPException(status_code=429,
+                    detail="Too many verification codes requested — please wait a few minutes.")
+            if not _issue_login_otp(db, user):
+                raise HTTPException(status_code=503,
+                    detail="Couldn't send your verification code right now — please try again in a moment.")
+            _log_session(db, "login_otp_sent", user.username, user.id, request)
+            # 'pending' proves the password step passed; /verify-otp requires it, so a
+            # party who only knows the username can't touch the victim's OTP.
+            return {"otp_required": True,
+                    "pending": make_login_pending_token(user.username, minutes=LOGIN_OTP_TTL_MIN),
+                    "email_hint": _mask_email(user.email)}
+
     token = create_access_token({"sub": user.username})
     _log_session(db, "login", user.username, user.id, request)
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "email": user.email,
-            "role": user.role,
-            "permissions": json.loads(user.permissions or "{}"),
-            "allowed_products": json.loads(getattr(user, "allowed_products", None) or "[]"),
-        }
-    }
+    return _token_response(user, token)
+
+
+@router.post("/verify-otp", response_model=None)
+def verify_login_otp(request: Request, body: VerifyOtpIn, db: Session = Depends(get_db)):
+    """Second step of 2FA login: exchange the emailed code for a session (and,
+    optionally, a 1-day trusted-device token so this browser skips the code next time).
+    The username comes from the 'pending' token (proving the password step), NOT the
+    request body — so a username alone can't spend a victim's OTP attempts."""
+    username = login_pending_username(body.pending)
+    if not username:
+        raise HTTPException(status_code=401, detail="Session expired — sign in again.")
+    ip = _client_ip(request)
+    if (not _rate_ok(f"otp-verify-ip:{ip}", VERIFY_PER_IP, 60) or
+            not _rate_ok(f"otp-verify-user:{username}", VERIFY_PER_USER, OTP_ISSUE_WINDOW_S)):
+        raise HTTPException(status_code=429, detail="Too many attempts — please try again later.")
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Session expired — sign in again.")
+    otp = (db.query(LoginOtp)
+           .filter(LoginOtp.username == user.username, LoginOtp.used == False)  # noqa: E712
+           .order_by(LoginOtp.created_at.desc()).first())
+    if not otp:
+        raise HTTPException(status_code=400, detail="No active code — sign in again to get a new one.")
+    if otp.expires_at < datetime.datetime.utcnow():
+        otp.used = True; db.commit()
+        raise HTTPException(status_code=400, detail="Code expired — sign in again.")
+    if (otp.attempts or 0) >= LOGIN_OTP_MAX_ATTEMPTS:
+        otp.used = True; db.commit()
+        raise HTTPException(status_code=400, detail="Too many attempts — sign in again.")
+    if _hash_code((body.code or "").strip()) != otp.code_hash:
+        otp.attempts = (otp.attempts or 0) + 1; db.commit()
+        raise HTTPException(status_code=400, detail="Incorrect code.")
+
+    otp.used = True; db.commit()
+    token = create_access_token({"sub": user.username})
+    _log_session(db, "login_2fa", user.username, user.id, request)
+    resp = _token_response(user, token)
+    if body.remember_device:
+        resp["device_trust"] = make_device_trust_token(user.username, days=1)
+    return resp
 
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
@@ -131,6 +333,17 @@ def list_users(current_user: User = Depends(require_permission("admin")), db: Se
 def create_user(data: UserCreate, current_user: User = Depends(require_permission("admin")), db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
+    # Email must be @eko.co.in. Password accounts (admin/user) REQUIRE one — it
+    # receives their login verification code; viewers (dashboard-only) may omit it.
+    email = (data.email or "").strip().lower() or None
+    if data.role != "viewer":
+        if not email:
+            raise HTTPException(status_code=400,
+                detail="An @eko.co.in email is required — it receives the login verification code.")
+        if not is_eko_email(email):
+            raise HTTPException(status_code=400, detail="Email must be an @eko.co.in address.")
+    elif email and not is_eko_email(email):
+        raise HTTPException(status_code=400, detail="Email must be an @eko.co.in address.")
     default_perms = {"upload": True, "run_recon": True, "src_assign": True, "reports": True, "logic_builder": False}
     perms = data.permissions or default_perms
     # Viewer accounts are dashboard-only: no operational permissions ever apply
@@ -139,7 +352,7 @@ def create_user(data: UserCreate, current_user: User = Depends(require_permissio
         perms = {}
     user = User(
         username=data.username,
-        email=data.email,
+        email=email,
         full_name=data.full_name,
         hashed_password=hash_password(data.password),
         role=data.role,
@@ -156,7 +369,14 @@ def update_user(user_id: str, data: UserUpdate, current_user: User = Depends(req
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     if data.full_name is not None: user.full_name = data.full_name
-    if data.email is not None: user.email = data.email
+    if data.email is not None:
+        email = (data.email or "").strip().lower() or None
+        if email and not is_eko_email(email):
+            raise HTTPException(status_code=400, detail="Email must be an @eko.co.in address.")
+        if not email and user.role != "viewer":
+            raise HTTPException(status_code=400,
+                detail="An @eko.co.in email is required for this account (login verification).")
+        user.email = email
     if data.is_active is not None: user.is_active = data.is_active
     if data.permissions is not None: user.permissions = json.dumps(data.permissions)
     if data.allowed_products is not None: user.allowed_products = json.dumps(data.allowed_products)
