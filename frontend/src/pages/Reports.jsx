@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { DMT_PARTNERS } from '../productRegistry'
 import { Download, BarChart2, FileText, CreditCard, Layers, Tag, Clock, Wallet, Receipt, TrendingUp, ExternalLink } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
@@ -131,7 +132,7 @@ export default function Reports() {
   // collapse into one "DMT" option that the backend expands across all of them.
   // The other core products map 1:1 to a partner. (E-Value / BBPS / SBI have
   // their own report tabs since they reconcile in separate tables.)
-  const DMT_SLUGS = ['fino', 'airtel', 'axis', 'levin']
+  const DMT_SLUGS = DMT_PARTNERS
   const partners = (() => {
     const src = (partnerList.length > 0 ? partnerList : FALLBACK_PARTNERS)
       .filter(p => !MODULE_PRODUCTS.includes(p.product) && !MODULE_SLUGS.includes(p.slug))

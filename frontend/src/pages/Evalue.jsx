@@ -27,7 +27,7 @@ const STATUS_META = {
   ignore:           { label: 'Ignored',          cls: 'bg-gray-100 text-gray-500' },
 }
 const OVERRIDE_STATUSES = ['written_off', 'twice_credit', 'wrong_amount', 'adhoc_settlement', 'under_review', 'ignore']
-const SRC_CODES = ['UNCLAIMED', 'ADVANCE_CREDIT', 'BANK_CHARGES', 'TWICE_CREDITED', 'INTERNAL_TXN', 'DELAYED_TXN', 'DUPLICATE', 'MISSING_TID', 'OTHER']
+import { SRC_CODES } from '../srcCodes'
 const SRC_STATUSES = ['unmatched_bank', 'unmatched_load', 'twice_credit', 'wrong_amount', 'src_assigned']
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 const isMatched = s => ['matched_online', 'matched_cash', 'matched_manual', 'interbank_matched'].includes(s)

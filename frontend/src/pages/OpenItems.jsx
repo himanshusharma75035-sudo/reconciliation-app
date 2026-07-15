@@ -43,10 +43,7 @@ const AGING_BADGE = {
   'D+7+':    { label: 'D+7+',   cls: 'bg-red-100 text-red-700 font-bold' },
 }
 
-const SRC_CODES = [
-  'UNCLAIMED','ADVANCE_CREDIT','BANK_CHARGES','TWICE_CREDITED',
-  'INTERNAL_TXN','DELAYED_TXN','DUPLICATE','MISSING_TID','OTHER'
-]
+import { SRC_CODES } from '../srcCodes'
 
 // Statuses where an SRC tag is offered — open/exception rows across the core ledger
 // AND the module products (E-Value / BBPS), plus src_assigned itself (to re-tag).

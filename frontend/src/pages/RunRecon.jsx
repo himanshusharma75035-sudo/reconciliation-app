@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { DMT_PARTNERS } from '../productRegistry'
 import { Play, Zap, CheckCircle, RefreshCw, ArrowLeftRight, ExternalLink, Info } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
@@ -10,7 +11,7 @@ import api from '../utils/api'
 // module products (BBPS, E-Value) call their own run endpoints. SBI is a 4-process
 // recon and is run from its dedicated window.
 const GROUPS = [
-  { label: 'DMT Banks',     slugs: ['fino', 'airtel', 'axis', 'levin'] },
+  { label: 'DMT Banks',     slugs: DMT_PARTNERS },
   { label: 'Core Products', slugs: ['aeps', 'pg', 'qr', 'digikhata', 'indonepal'] },
   { label: 'Modules',       slugs: ['bbps', 'evalue', 'sbi'] },
 ]

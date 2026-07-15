@@ -166,7 +166,7 @@ function RunBar({ process, reconDate, setReconDate, onRun, running, children }) 
 }
 
 // Disposition reason codes for unmatched SBI rows (mirrors backend SRC_CODES)
-const SRC_CODES = ['UNCLAIMED', 'ADVANCE_CREDIT', 'BANK_CHARGES', 'TWICE_CREDITED', 'INTERNAL_TXN', 'DELAYED_TXN', 'DUPLICATE', 'MISSING_TID', 'OTHER']
+import { SRC_CODES } from '../srcCodes'
 // Maker-checker: a queued action returns {queued:true, message}; toast "pending" not "done".
 const mcQueued = (data) => {
   if (data?.queued) { toast(data.message || 'Pending approval by another user', { icon: '🕐' }); return true }

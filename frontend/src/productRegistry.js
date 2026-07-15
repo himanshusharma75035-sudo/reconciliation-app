@@ -65,3 +65,8 @@ export const isOpenItemsPartner = (p) =>
 
 // Just the core products that use ProductReconPage
 export const CORE_PRODUCTS = PRODUCTS.filter(p => p.kind === 'core')
+
+// DMT member banks — the single list 'dmt' fans out to. Import this instead of
+// re-hardcoding ['fino','airtel','axis','levin'] in Run Recon, Reports, Dashboard,
+// ProductReconPage, Auto Upload, etc. (backend mirror: routes/reports.py PRODUCT_PARTNERS).
+export const DMT_PARTNERS = PRODUCT_BY_ID.dmt.partners

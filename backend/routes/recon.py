@@ -1071,8 +1071,8 @@ def get_open_items(
     elif recon_status in (
         "matched", "manual_matched", "unmatched", "src_assigned",
         "fee_matched", "fund_transfer", "amount_mismatch", "duplicate",
-        "failed", "interbank_matched", "adhoc_settlement", "reversal_matched",
-        "human_override",
+        "failed", "interbank_matched", "internal_matched", "adhoc_settlement",
+        "reversal_matched", "human_override",
     ):
         q = q.filter(Transaction.recon_status == recon_status)
     elif match_id:

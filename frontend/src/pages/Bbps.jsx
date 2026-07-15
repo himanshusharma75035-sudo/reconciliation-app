@@ -20,7 +20,7 @@ const STATUS_META = {
   under_review:          { label: 'Under Review', cls: 'bg-yellow-50 text-yellow-700' },
 }
 const OVERRIDE = ['matched', 'failed_refunded', 'failed_pending_refund', 'refunded_but_success', 'written_off', 'under_review']
-const SRC_CODES = ['UNCLAIMED', 'ADVANCE_CREDIT', 'BANK_CHARGES', 'TWICE_CREDITED', 'INTERNAL_TXN', 'DELAYED_TXN', 'DUPLICATE', 'MISSING_TID', 'OTHER']
+import { SRC_CODES } from '../srcCodes'
 const SRC_ASSIGNABLE = ['unmatched_bank', 'unmatched_internal', 'failed_pending_refund', 'refunded_but_success', 'amount_mismatch', 'src_assigned']
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 // Maker-checker: a queued action returns {queued:true, message}; toast "pending" not "done".

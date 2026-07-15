@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
+import { DMT_PARTNERS } from '../productRegistry'
 import axios from '../utils/api'
 import {
   FolderOpen, Play, Clock, CheckCircle, XCircle, AlertCircle,
@@ -369,7 +370,7 @@ const PRODUCT_GROUPS = [
     desc:     'Domestic Money Transfer — Fino, Airtel, Axis, Levin',
     icon:     '💸',
     color:    { badge: 'bg-blue-100 text-blue-700',   border: 'border-blue-200' },
-    partners: ['fino', 'airtel', 'axis', 'levin'],
+    partners: DMT_PARTNERS,
   },
   {
     key:      'aeps',
