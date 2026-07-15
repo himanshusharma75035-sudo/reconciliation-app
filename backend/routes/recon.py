@@ -690,7 +690,7 @@ def manual_interbank_match(
 def do_manual_match_bulk(
     req: BulkManualMatchRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("run_recon")),
+    current_user: User = Depends(require_permission("manual_match")),
 ):
     """
     Match multiple bank↔internal pairs in a single request.
@@ -769,7 +769,7 @@ def do_assign_src_bulk(req: BulkSRCRequest, db: Session = Depends(get_db),
 
 @router.post("/manual-match")
 def do_manual_match(req: ManualMatchRequest, db: Session = Depends(get_db),
-                    current_user: User = Depends(require_permission("run_recon"))):
+                    current_user: User = Depends(require_permission("manual_match"))):
     queued = maker_checker.intercept(
         db, current_user, "manual_match",
         payload={"bank_txn_id": req.bank_txn_id, "internal_txn_id": req.internal_txn_id},

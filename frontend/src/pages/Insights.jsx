@@ -7,10 +7,14 @@ import toast from 'react-hot-toast'
 import api from '../utils/api'
 import { isCoreLedgerPartner } from '../productRegistry'
 
+// Fallback only — used until /admin/partners-public loads. Kept in sync with the seeded
+// core partners (was missing levin / digikhata / indonepal).
 const FALLBACK_PARTNERS = [
   { slug: 'fino', display_name: 'Fino' }, { slug: 'airtel', display_name: 'Airtel' },
-  { slug: 'axis', display_name: 'Axis' }, { slug: 'aeps', display_name: 'AePS' },
-  { slug: 'pg', display_name: 'PG' }, { slug: 'qr', display_name: 'QR' },
+  { slug: 'axis', display_name: 'Axis' }, { slug: 'levin', display_name: 'Levin' },
+  { slug: 'aeps', display_name: 'AePS' }, { slug: 'pg', display_name: 'PG' },
+  { slug: 'qr', display_name: 'QR' }, { slug: 'digikhata', display_name: 'Digikhata' },
+  { slug: 'indonepal', display_name: 'Indo-Nepal' },
 ]
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 const isAdmin = () => { try { return JSON.parse(localStorage.getItem('user') || '{}').role === 'admin' } catch { return false } }

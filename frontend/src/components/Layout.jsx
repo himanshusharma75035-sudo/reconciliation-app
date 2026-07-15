@@ -17,7 +17,7 @@ const navItems = [
   { to: '/run-recon',    icon: Play,            label: 'Run Recon',     requiredPerm: 'run_recon' },
   { to: '/open-items',   icon: AlertTriangle,   label: 'Open Items' },
   { to: '/mismatches',   icon: AlertOctagon,    label: 'Mismatches' },
-  { to: '/manual-match', icon: GitMerge,        label: 'Manual Match',  requiredPerm: 'src_assign' },
+  { to: '/manual-match', icon: GitMerge,        label: 'Manual Match',  requiredPerm: 'manual_match' },
   { to: '/reports',      icon: BarChart2,       label: 'Reports',       requiredPerm: 'reports' },
   { to: '/rules',        icon: BookOpen,        label: 'Logic Builder', requiredPerm: 'logic_builder' },
   // Per-product recon windows (AePS, QR, SBI Kiosk, E-Value, BBPS) open from the
