@@ -57,17 +57,20 @@ def test_rollup_across_products_and_sides(db):
 
     a = build_analytics(db, date_from="2026-07-01", date_to="2026-07-01")
     t = a["totals"]
-    assert t["matched"] == 4          # qr x2 + evalue x1 + sbi x1
-    assert t["unmatched"] == 3        # qr x1 + evalue x1 + sbi x1
-    assert t["matched_volume"] == 700.0
+    # A matched PAIR (qr bank + qr internal for the same txn) is counted ONCE in the
+    # headline — the bank leg. So: qr 1 + evalue 1 + sbi 1 = 3, NOT 4.
+    assert t["matched"] == 3          # qr(1 pair) + evalue(1) + sbi(1)
+    assert t["unmatched"] == 3        # qr bank x1 + evalue load x1 + sbi x1
+    assert t["matched_volume"] == 600.0   # qr 100 (once) + evalue 200 + sbi 300
     assert t["open_volume"] == 320.0
     prods = {p["product"]: p for p in a["by_product"]}
-    assert prods["qr"]["matched"] == 2 and prods["qr"]["unmatched"] == 1
+    assert prods["qr"]["matched"] == 1 and prods["qr"]["unmatched"] == 1   # pair counted once
     assert prods["evalue"]["matched"] == 1
     assert prods["sbi_kiosk"]["matched"] == 1
-    # both-sides breakdown (ledger products: core + evalue)
+    # by_side still shows BOTH legs (that chart is about the two sides): qr matched
+    # appears on both bank and internal.
     sides = {s["side"]: s for s in a["by_side"]}
-    assert sides["bank"]["matched"] >= 1 and sides["internal"]["matched"] >= 1
+    assert sides["bank"]["matched"] == 3 and sides["internal"]["matched"] == 1
 
 
 def test_date_filter_excludes_out_of_range(db):

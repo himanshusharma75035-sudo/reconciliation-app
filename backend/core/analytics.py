@@ -185,6 +185,14 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     group_meta = {}      # group_slug → label
     prod_meta = {}       # prod key → (group_slug, group_label, bank_label)
     totals = _blank()
+
+    def _apply(bag, b, cnt, amt):
+        bag[b] += cnt
+        if b == "matched":
+            bag["matched_volume"] = round(bag["matched_volume"] + amt, 2)
+        elif b == "unmatched":
+            bag["open_volume"] = round(bag["open_volume"] + amt, 2)
+
     for prod, sd, d, status, cnt, amt in recs:
         products.add(prod)
         if prod not in prod_meta:
@@ -192,13 +200,17 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         g, glabel, _ = prod_meta[prod]
         group_meta[g] = glabel
         b = _bucket(status)
-        for bag in (totals, by_product.setdefault(prod, _blank()), by_group.setdefault(g, _blank()),
-                    by_side_map.setdefault(sd, _blank()), daily_map.setdefault(d, _blank())):
-            bag[b] += cnt
-            if b == "matched":
-                bag["matched_volume"] = round(bag["matched_volume"] + amt, 2)
-            elif b == "unmatched":
-                bag["open_volume"] = round(bag["open_volume"] + amt, 2)
+        # by_side always sees BOTH legs — the "bank vs internal" chart is about exactly that.
+        _apply(by_side_map.setdefault(sd, _blank()), b, cnt, amt)
+        # A matched / amount-mismatch PAIR is ONE transaction represented by two rows —
+        # a bank leg and an internal leg. Count it ONCE (the bank leg) in every headline
+        # figure so counts and volume aren't doubled. Unmatched legs are distinct orphans
+        # (no counterpart), so both sides are kept.
+        if b in ("matched", "mismatch") and sd == "internal":
+            continue
+        for bag in (totals, by_product.setdefault(prod, _blank()),
+                    by_group.setdefault(g, _blank()), daily_map.setdefault(d, _blank())):
+            _apply(bag, b, cnt, amt)
 
     def _rate(bag):
         m = bag["matched"]; denom = m + bag["unmatched"] + bag["mismatch"]

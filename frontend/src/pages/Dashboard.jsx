@@ -74,20 +74,20 @@ function RateBar({ rate, size = 'md' }) {
 
 // ── Zone 1 — KPI Cards ─────────────────────────────────────────────────────────
 
-function KpiStrip({ data, allPartners }) {
-  const totals = useMemo(() => {
-    let txn = 0, matched = 0, open = 0, amtMatched = 0, amtOpen = 0
-    for (const p of allPartners) {
-      const s = sumRows(data?.internal?.[p])
-      txn       += s.txn
-      matched   += s.matched
-      open      += s.open
-      amtMatched += s.amtMatched
-      amtOpen   += s.amtOpen
-    }
-    const rate = txn > 0 ? (matched / txn) * 100 : 0
-    return { txn, matched, open, amtMatched, amtOpen, rate }
-  }, [data, allPartners])
+function KpiStrip({ analytics }) {
+  // Headline KPIs come from the executive analytics aggregator (ALL products — core
+  // ledger + E-Value + SBI Kiosk + BBPS — with each matched pair counted once, not
+  // once per bank leg AND once per internal leg) so this strip and the /exec dashboard
+  // always show the SAME numbers.
+  const t = analytics || {}
+  const totals = {
+    txn:        t.transactions   || 0,
+    matched:    t.matched        || 0,
+    open:       t.unmatched      || 0,
+    amtMatched: t.matched_volume || 0,
+    amtOpen:    t.open_volume    || 0,
+    rate:       t.match_rate     || 0,
+  }
 
   const kpis = [
     {
@@ -1029,6 +1029,7 @@ export default function Dashboard() {
   const defaultRange = thisMonth()  // default to current month for relevance
 
   const [data, setData]             = useState({ internal: {}, bank: {} })
+  const [analytics, setAnalytics]   = useState(null)   // all-products headline totals
   const [partnerConfigs, setPartnerConfigs] = useState([])
   const [loading, setLoading]       = useState(true)
   const [showClear, setShowClear]   = useState(false)
@@ -1050,8 +1051,15 @@ export default function Dashboard() {
       const params = {}
       if (range.from) params.date_from = range.from
       if (range.to)   params.date_to   = range.to
-      const { data: d } = await api.get('/recon/dashboard-summary', { params })
+      // dashboard-summary drives the per-partner product tabs (core ledger); the
+      // analytics aggregator drives the all-products headline KPIs (same source the
+      // /exec dashboard uses, so the two never disagree).
+      const [{ data: d }, aRes] = await Promise.all([
+        api.get('/recon/dashboard-summary', { params }),
+        api.get('/reports/analytics', { params }).catch(() => ({ data: null })),
+      ])
       setData(d)
+      setAnalytics(aRes?.data?.totals || null)
     } catch { toast.error('Failed to load dashboard') } finally { setLoading(false) }
   }, [dateRange])
 
@@ -1151,7 +1159,7 @@ export default function Dashboard() {
       </div>
 
       {/* ── Zone 1: KPI strip ────────────────────────────── */}
-      <KpiStrip data={data} allPartners={allPartners} />
+      <KpiStrip analytics={analytics} />
 
       {/* ── Funds Position (EOD) — director/CFO view ─────── */}
       <FundsPositionPanel />
