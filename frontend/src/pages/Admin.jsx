@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
-import { CORE_PRODUCTS } from '../productRegistry'
+import { CORE_PRODUCTS, isCoreLedgerPartner } from '../productRegistry'
 
 const TABS = [
   { key: 'partners',        label: 'Partners & Banks' },
@@ -514,7 +514,7 @@ function RulesTab() {
         <div className="flex items-center gap-3">
           <select className="select w-48" value={filter} onChange={e => setFilter(e.target.value)}>
             <option value="">All partners</option>
-            {partners.map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}
+            {partners.filter(isCoreLedgerPartner).map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}
           </select>
           <p className="text-sm text-gray-400">Rules applied in priority order — lower number = tried first.</p>
         </div>
@@ -535,7 +535,7 @@ function RulesTab() {
               <label className="text-xs font-medium text-gray-500 block mb-1">Partner</label>
               <select className="select" value={form.partner} onChange={e => setForm(f => ({...f, partner: e.target.value}))}>
                 <option value="">Select partner</option>
-                {partners.map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}
+                {partners.filter(isCoreLedgerPartner).map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}
               </select>
             </div>
             <div>
