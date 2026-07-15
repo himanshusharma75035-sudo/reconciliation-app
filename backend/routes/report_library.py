@@ -124,8 +124,8 @@ def _core_partner_slugs(db, product: str):
     falling back to the Reports page's static expansion (e.g. dmt → its banks)."""
     slugs = [p.slug for p in db.query(PartnerConfig).filter(PartnerConfig.product == product).all()]
     if not slugs:
-        from routes.reports import _expand_partner
-        slugs = _expand_partner(product) or []
+        from routes.reports import _partner_slugs
+        slugs = _partner_slugs(product) or []
     return slugs
 
 

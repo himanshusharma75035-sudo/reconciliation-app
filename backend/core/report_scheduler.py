@@ -30,6 +30,10 @@ REPORT_LABELS = {
     "evalue_summary":     "E-Value Summary",
     "evalue_exceptions":  "E-Value Exceptions",
     "evalue_unmatched":   "E-Value Unmatched",
+    "bbps_summary":       "BBPS Summary",
+    "bbps_exceptions":    "BBPS Exceptions",
+    "bbps_unmatched":     "BBPS Unmatched",
+    "funds_position":     "Funds Position",
 }
 
 DATE_RANGE_LABELS = {
@@ -257,8 +261,14 @@ def _generate_report(report_type: str, filters: dict, date_range: str, db) -> tu
     q = q.filter(Transaction.recon_date >= from_date,
                  Transaction.recon_date <= to_date)
 
-    # Common filters
-    if partner:  q = q.filter(Transaction.partner == partner)
+    # Common filters — expand a PRODUCT-level partner (e.g. 'dmt') to its member
+    # banks so a scheduled DMT report isn't an empty workbook (parity with the
+    # on-demand Reports page's _apply_partner). A 1:1 product returns [partner].
+    if partner:
+        from routes.reports import _partner_slugs
+        _slugs = _partner_slugs(partner)
+        if _slugs:
+            q = q.filter(Transaction.partner.in_(_slugs))
     if side:     q = q.filter(Transaction.side    == side)
     if src_code: q = q.filter(Transaction.src_code == src_code)
 

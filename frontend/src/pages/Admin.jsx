@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
+import { CORE_PRODUCTS } from '../productRegistry'
 
 const TABS = [
   { key: 'partners',        label: 'Partners & Banks' },
@@ -16,7 +17,10 @@ const TABS = [
   { key: 'api-keys',        label: '🔑 API Keys' },
 ]
 
-const PRODUCTS = ['dmt', 'aeps', 'pg']
+// Derived from the product registry (single source of truth) so a new core product
+// auto-appears here instead of being hard-coded — was ['dmt','aeps','pg'], which
+// silently dropped qr / digikhata / indonepal.
+const PRODUCTS = CORE_PRODUCTS.map(p => p.id)
 const SIDES    = ['bank', 'internal']
 const MATCH_FIELD_OPTIONS = ['eko_tid', 'tracking_number', 'utr_number', 'amount']
 
