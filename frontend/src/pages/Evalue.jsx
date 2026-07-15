@@ -51,23 +51,43 @@ export default function Evalue() {
   useEffect(() => { loadSummary() }, [dates.from, dates.to])
   const accountsForBank = banks.find(b => b.bank_name === selBank)?.accounts || []
 
-  const uploadInternal = async f => {
-    if (!f) return
-    setBusy(true); const fd = new FormData(); fd.append('file', f)
-    try { const { data } = await api.post('/evalue/upload-internal', fd)
-      toast.success(`Internal dump: ${data.rows} loads across ${data.accounts} accounts`); loadSummary()
+  // Shared upload driver. allowForce is BANK-ONLY: a bank re-upload is idempotent
+  // (per-date replace, preserving matched/SRC rows), so on a 409 [DUPLICATE] we offer a
+  // confirm to re-upload with force=true — this is how an operator restores rows that
+  // were removed since. The INTERNAL path never bulk-deletes (upsert per eko id) and
+  // would DUPLICATE eko-less rows on a forced replay, so it never gets force: a 409
+  // there is a genuine accidental re-upload and is simply surfaced. buildFd() rebuilds
+  // a fresh FormData for the retry.
+  const postUpload = async (url, buildFd, onOk, allowForce = false) => {
+    setBusy(true)
+    const attempt = force => { const fd = buildFd(); if (force) fd.append('force', 'true'); return api.post(url, fd) }
+    try {
+      let res
+      try { res = await attempt(false) }
+      catch (e) {
+        const detail = e.response?.data?.detail || 'Upload failed'
+        if (allowForce && e.response?.status === 409 &&
+            window.confirm(`${detail}\n\nRe-upload anyway and replace the existing rows for these dates? (matched/SRC rows are kept)`)) {
+          res = await attempt(true)
+        } else { toast.error(detail); return }
+      }
+      onOk(res.data)
     } catch (e) { toast.error(e.response?.data?.detail || 'Upload failed') }
     finally { setBusy(false) }
   }
-  const uploadBank = async f => {
+  const uploadInternal = f => {
+    if (!f) return
+    postUpload('/evalue/upload-internal',
+      () => { const fd = new FormData(); fd.append('file', f); return fd },
+      data => { toast.success(`Internal dump: ${data.rows} loads across ${data.accounts} accounts`); loadSummary() })
+  }
+  const uploadBank = f => {
     if (!f) return
     if (!selBank || !selAcct) { toast.error('Select bank and account first'); return }
-    setBusy(true); const fd = new FormData()
-    fd.append('file', f); fd.append('bank_name', selBank); fd.append('reco_acc_no', selAcct)
-    try { const { data } = await api.post('/evalue/upload-bank', fd)
-      toast.success(`${data.account}: ${data.rows} rows (${data.credits} credits)`); loadSummary()
-    } catch (e) { toast.error(e.response?.data?.detail || 'Upload failed') }
-    finally { setBusy(false) }
+    postUpload('/evalue/upload-bank',
+      () => { const fd = new FormData(); fd.append('file', f); fd.append('bank_name', selBank); fd.append('reco_acc_no', selAcct); return fd },
+      data => { toast.success(`${data.account}: ${data.rows} rows (${data.credits} credits)`); loadSummary() },
+      true)
   }
   const runOne = async acct => {
     setBusy(true)

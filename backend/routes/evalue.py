@@ -107,6 +107,11 @@ async def upload_internal(
 ):
     raw = await file.read()
     from core.file_hash_guard import guard_duplicate_file
+    # No force= here on purpose: the internal path UPSERTS per eko_trxn_id and never
+    # bulk-deletes, so its data cannot be "lost" the way bank rows can — a byte-identical
+    # re-upload is therefore always a genuine accidental duplicate and must stay blocked.
+    # (Rows with a blank eko_trxn_id are appended, not upserted, so a forced re-apply
+    # would duplicate them — another reason force is bank-only.)
     guard_duplicate_file(db, "evalue", "internal", raw, file.filename, user)
     try:
         loads = EV.parse_internal_dump(raw, file.filename)
@@ -163,6 +168,7 @@ async def upload_bank(
     file: UploadFile = File(...),
     bank_name: str = Form(...),
     reco_acc_no: str = Form(...),
+    force: bool = Form(False),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -171,7 +177,7 @@ async def upload_bank(
         raise HTTPException(404, f"Unknown account {reco_acc_no}")
     raw = await file.read()
     from core.file_hash_guard import guard_duplicate_file
-    guard_duplicate_file(db, "evalue", f"bank:{reco_acc_no}", raw, file.filename, user)
+    guard_duplicate_file(db, "evalue", f"bank:{reco_acc_no}", raw, file.filename, user, force=force)
     try:
         rows = EV.parse_bank_statement(bank_name, raw, file.filename)
     except Exception as e:
@@ -187,17 +193,58 @@ async def upload_bank(
     # recon tables (the funds snapshots survived via per-date upsert, which is why
     # the EOD-balance email still showed amounts the recon report had lost).
     file_dates = {r["txn_date"] for r in rows if r.get("txn_date")}
-    if file_dates:
-        db.query(EvalueBankTxn).filter(
-            EvalueBankTxn.reco_acc_no == reco_acc_no,
-            EvalueBankTxn.txn_date.in_(file_dates),
-        ).delete(synchronize_session=False)
-    else:
-        # No parseable dates at all — fall back to full replace to avoid dupes.
-        db.query(EvalueBankTxn).filter(
-            EvalueBankTxn.reco_acc_no == reco_acc_no).delete(synchronize_session=False)
+    if not file_dates:
+        # Rows parsed but NONE carry a transaction date — that is a parse failure, not a
+        # real statement. The old code full-wiped the account here "to avoid dupes",
+        # which silently destroyed every prior day's rows on one bad parse (this is how
+        # the 8th's data vanished). Refuse instead: never delete history we can't key.
+        raise HTTPException(
+            422,
+            f"[FORMAT] Parsed {len(rows)} rows from '{file.filename}' but none had a readable "
+            f"transaction date, so this file cannot safely replace prior data for {reco_acc_no}. "
+            f"Check the statement format/columns and re-upload.",
+        )
+    # Replace only the dates this file covers (incremental daily uploads accumulate) —
+    # but NEVER delete a row carrying a preserved disposition: a cross-account match
+    # (EVX-), an interbank link into the core ledger (EVIBT-), a manual match (EVMAN-)
+    # or an SRC tag. Deleting the bank side of one of those orphans its counterpart —
+    # which stays marked matched (a load in another account, a core-ledger Transaction,
+    # or a human decision) — and auto-recon cannot re-pair it. Keep those; replace only
+    # the ordinary (auto-matched / unmatched) rows. Parity with _run_one's _PRESERVED
+    # filter, which likewise never re-feeds these to the matcher.
+    _PRESERVED_PREFIXES = ("EVX-", "EVIBT-", "EVMAN-")
+    def _preserved(b):
+        return b.recon_status == "src_assigned" or (b.match_id or "").startswith(_PRESERVED_PREFIXES)
+    existing = db.query(EvalueBankTxn).filter(
+        EvalueBankTxn.reco_acc_no == reco_acc_no,
+        EvalueBankTxn.txn_date.in_(file_dates)).all()
+    kept = [b for b in existing if _preserved(b)]
+    for b in existing:
+        if not _preserved(b):
+            db.delete(b)
+    # A surviving preserved row already represents its bank txn; skip re-inserting the
+    # file's copy of it so the re-upload doesn't create a duplicate bank row. Skip at
+    # most ONE file row per preserved row of the same signature (Counter, not set) — so
+    # a genuinely-additional same-day/same-amount txn is still ingested rather than
+    # swallowed. The signature includes atm_ref AND description because banks often leave
+    # ref_no/utr blank on cash/CDM credits, and those two fields are then the ONLY thing
+    # distinguishing two same-day same-amount deposits — omitting them could drop a real
+    # credit (or duplicate a matched row) on collision. Only rows identical across ALL of
+    # these (truly indistinguishable) collapse, which is the correct behaviour.
+    from collections import Counter as _Counter
+    def _norm(s):
+        return (s or "").strip()
+    def _sig(txn_date, amount, dr_cr, ref_no, utr, atm_ref, description):
+        return (txn_date or "", round(float(amount or 0), 2), _norm(dr_cr),
+                _norm(ref_no), _norm(utr), _norm(atm_ref), _norm(description))
+    kept_sigs = _Counter(_sig(b.txn_date, b.amount, b.dr_cr, b.ref_no, b.utr, b.atm_ref, b.description) for b in kept)
     upload_date = _TODAY()
     for r in rows:
+        _s = _sig(r["txn_date"], r["amount"], r["dr_cr"], r.get("ref_no"), r.get("utr"),
+                  r.get("atm_ref"), r.get("description"))
+        if kept_sigs.get(_s, 0) > 0:
+            kept_sigs[_s] -= 1
+            continue
         db.add(EvalueBankTxn(
             id=generate_id(), upload_date=upload_date, bank_name=bank_name.strip().upper(),
             reco_acc_no=reco_acc_no, account_number=acct.account_number,
