@@ -23,6 +23,11 @@ const OVERRIDE = ['matched', 'failed_refunded', 'failed_pending_refund', 'refund
 const SRC_CODES = ['UNCLAIMED', 'ADVANCE_CREDIT', 'BANK_CHARGES', 'TWICE_CREDITED', 'INTERNAL_TXN', 'DELAYED_TXN', 'DUPLICATE', 'MISSING_TID', 'OTHER']
 const SRC_ASSIGNABLE = ['unmatched_bank', 'unmatched_internal', 'failed_pending_refund', 'refunded_but_success', 'amount_mismatch', 'src_assigned']
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
+// Maker-checker: a queued action returns {queued:true, message}; toast "pending" not "done".
+const mcQueued = (data) => {
+  if (data?.queued) { toast(data.message || 'Pending approval by another user', { icon: '🕐' }); return true }
+  return false
+}
 
 export default function Bbps() {
   const [tab, setTab] = useState('upload')
@@ -133,7 +138,7 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
   const unmatch = (mid) => setModal({
     config: { title: 'Unmatch pair', danger: true, confirmLabel: 'Unmatch',
       description: `Break match ${mid} — both rows go back to unmatched.`, fields: [] },
-    action: async () => { await api.post(`/bbps/unmatch?match_id=${encodeURIComponent(mid)}`); toast.success('Unmatched') },
+    action: async () => { const { data } = await api.post(`/bbps/unmatch?match_id=${encodeURIComponent(mid)}`); if (!mcQueued(data)) toast.success('Unmatched') },
   })
   const override = (row) => setModal({
     config: { title: 'Override status', danger: true, confirmLabel: 'Override',
@@ -142,7 +147,7 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
         { name: 'status', label: 'New status', type: 'select', options: OVERRIDE, required: true, default: 'written_off' },
         { name: 'note', label: 'Reason', required: true, minLength: 10, placeholder: 'Why is this being overridden? (min 10 chars)' },
       ] },
-    action: async (v) => { await api.post('/bbps/override-status', { id: row.id, side: row._side, status: v.status, note: v.note }); toast.success('Status updated') },
+    action: async (v) => { const { data } = await api.post('/bbps/override-status', { id: row.id, side: row._side, status: v.status, note: v.note }); if (!mcQueued(data)) toast.success('Status updated') },
   })
   const assignSrc = (row) => setModal({
     config: { title: 'Assign SRC', confirmLabel: 'Assign',
@@ -151,7 +156,7 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
         { name: 'src_code', label: 'SRC code', type: 'select', options: SRC_CODES, required: true, default: row.src_code || 'UNCLAIMED' },
         { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional context for this SRC assignment' },
       ] },
-    action: async (v) => { const { data } = await api.post('/bbps/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); toast.success(`SRC assigned: ${data.src_code}`) },
+    action: async (v) => { const { data } = await api.post('/bbps/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); if (!mcQueued(data)) toast.success(`SRC assigned: ${data.src_code}`) },
   })
   const runModal = async (v) => {
     setModalBusy(true)

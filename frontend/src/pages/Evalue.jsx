@@ -31,6 +31,12 @@ const SRC_CODES = ['UNCLAIMED', 'ADVANCE_CREDIT', 'BANK_CHARGES', 'TWICE_CREDITE
 const SRC_STATUSES = ['unmatched_bank', 'unmatched_load', 'twice_credit', 'wrong_amount', 'src_assigned']
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 const isMatched = s => ['matched_online', 'matched_cash', 'matched_manual', 'interbank_matched'].includes(s)
+// Maker-checker: a queued action returns {queued:true, message} instead of executing.
+// Show a "pending approval" toast rather than a success one. Returns true when queued.
+const mcQueued = (data) => {
+  if (data?.queued) { toast(data.message || 'Pending approval by another user', { icon: '🕐' }); return true }
+  return false
+}
 
 export default function Evalue() {
   const [tab, setTab] = useState('upload')
@@ -217,7 +223,7 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
   const unmatch = (matchId) => setModal({
     config: { title: 'Unmatch pair', danger: true, confirmLabel: 'Unmatch',
       description: `Break match ${matchId} — both rows go back to unmatched.`, fields: [] },
-    action: async () => { await api.post(`/evalue/unmatch?match_id=${encodeURIComponent(matchId)}`); toast.success('Unmatched') },
+    action: async () => { const { data } = await api.post(`/evalue/unmatch?match_id=${encodeURIComponent(matchId)}`); if (!mcQueued(data)) toast.success('Unmatched') },
   })
   const override = (row, sd) => setModal({
     config: { title: 'Override status', danger: true, confirmLabel: 'Override',
@@ -226,7 +232,7 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
         { name: 'status', label: 'New status', type: 'select', options: OVERRIDE_STATUSES, required: true, default: 'written_off' },
         { name: 'note', label: 'Reason / remark', required: true, minLength: 5, placeholder: 'Required — recorded in the audit trail' },
       ] },
-    action: async (v) => { await api.post('/evalue/override-status', { id: row.id, side: row._side, status: v.status, note: v.note }); toast.success('Status updated') },
+    action: async (v) => { const { data } = await api.post('/evalue/override-status', { id: row.id, side: row._side, status: v.status, note: v.note }); if (!mcQueued(data)) toast.success('Status updated') },
   })
   const assignSrc = (row) => setModal({
     config: { title: 'Assign SRC', confirmLabel: 'Assign',
@@ -235,7 +241,7 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
         { name: 'src_code', label: 'SRC code', type: 'select', options: SRC_CODES, required: true, default: row.src_code || 'UNCLAIMED' },
         { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional — recorded with the SRC', default: row.src_note || '' },
       ] },
-    action: async (v) => { const { data } = await api.post('/evalue/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); toast.success(`SRC assigned: ${data.src_code}`) },
+    action: async (v) => { const { data } = await api.post('/evalue/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); if (!mcQueued(data)) toast.success(`SRC assigned: ${data.src_code}`) },
   })
   const runModal = async (v) => {
     setModalBusy(true)
@@ -340,8 +346,10 @@ function ManualMatchPanel({ acct, onDone }) {
         !window.confirm(`⚠ Amounts differ: bank ${inr(bAmt)} vs load ${inr(lAmt)}.\nThe pair will be linked but flagged "wrong_amount" — it will NOT count as matched. Continue?`)) return
     setBusy(true)
     try { const { data } = await api.post('/evalue/manual-match', { bank_txn_id: selB, load_id: selL })
-      if (data.status === 'wrong_amount') toast(data.message, { icon: '⚠️' })
-      else toast.success(data.cross_account ? 'Matched (cross-account)' : 'Matched')
+      if (!mcQueued(data)) {
+        if (data.status === 'wrong_amount') toast(data.message, { icon: '⚠️' })
+        else toast.success(data.cross_account ? 'Matched (cross-account)' : 'Matched')
+      }
       setSelB(null); setSelL(null); load(); onDone?.()
     } catch (e) { toast.error(e.response?.data?.detail || 'Failed') } finally { setBusy(false) }
   }
@@ -426,6 +434,13 @@ function ManualMatchView() {
     try {
       const res = await Promise.allSettled(queue.map(p =>
         api.post('/evalue/manual-match', { bank_txn_id: p.bank.id, load_id: p.load.id })))
+      const queuedN = res.filter(r => r.status === 'fulfilled' && r.value?.data?.queued).length
+      if (queuedN) {
+        const failedN = res.length - queuedN
+        setQueue([])
+        toast(`${queuedN} pair(s) queued for approval${failedN ? `, ${failedN} failed` : ''}`, { icon: '🕐' })
+        return
+      }
       const okIdx = res.map(r => r.status === 'fulfilled')
       const ok = okIdx.filter(Boolean).length
       const flagged = res.filter(r => r.status === 'fulfilled' && r.value?.data?.status === 'wrong_amount').length
@@ -732,8 +747,10 @@ function InterbankView({ summary, refresh }) {
   }
   const link = async (txnId) => {
     try { const { data } = await api.post('/evalue/interbank/manual-match', { bank_txn_id: cands.bank_txn.id, transaction_id: txnId })
-      if (data.amount_diff > 1) toast(data.message, { icon: '⚠️' })
-      else toast.success('Interbank matched')
+      if (!mcQueued(data)) {
+        if (data.amount_diff > 1) toast(data.message, { icon: '⚠️' })
+        else toast.success('Interbank matched')
+      }
       setCands(null); loadMatches(); loadUnmatched(acct); refresh()
     } catch (e) { toast.error(e.response?.data?.detail || 'Failed') }
   }

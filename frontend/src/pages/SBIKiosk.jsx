@@ -167,6 +167,11 @@ function RunBar({ process, reconDate, setReconDate, onRun, running, children }) 
 
 // Disposition reason codes for unmatched SBI rows (mirrors backend SRC_CODES)
 const SRC_CODES = ['UNCLAIMED', 'ADVANCE_CREDIT', 'BANK_CHARGES', 'TWICE_CREDITED', 'INTERNAL_TXN', 'DELAYED_TXN', 'DUPLICATE', 'MISSING_TID', 'OTHER']
+// Maker-checker: a queued action returns {queued:true, message}; toast "pending" not "done".
+const mcQueued = (data) => {
+  if (data?.queued) { toast(data.message || 'Pending approval by another user', { icon: '🕐' }); return true }
+  return false
+}
 
 // ── Reusable modals ─────────────────────────────────────────────────────────────
 
@@ -210,8 +215,8 @@ function ManualMatchModal({ row, summary, onClose, onDone }) {
     if ((form.remark || '').trim().length < 5) { toast.error('Remark (≥5 chars) required'); return }
     setSaving(true)
     try {
-      await api.post('/sbi/manual-match', { process: 'p02', result_id: row.id, counterpart_ref: form.counterpart_ref || null, remark: form.remark.trim() })
-      toast.success('Manually matched'); onDone()
+      const { data } = await api.post('/sbi/manual-match', { process: 'p02', result_id: row.id, counterpart_ref: form.counterpart_ref || null, remark: form.remark.trim() })
+      if (!mcQueued(data)) toast.success('Manually matched'); onDone()
     } catch (e) { toast.error(e.response?.data?.detail || 'Manual match failed') }
     finally { setSaving(false) }
   }
@@ -674,7 +679,7 @@ function P02Tab() {
 
   async function undoManualMatch(row, reload) {
     if (!row.manual_match_id || !confirm('Undo this manual match?')) return
-    try { await api.delete(`/sbi/manual-match/${row.manual_match_id}`); toast.success('Reverted'); reload() }
+    try { const { data } = await api.delete(`/sbi/manual-match/${row.manual_match_id}`); if (!mcQueued(data)) toast.success('Reverted'); reload() }
     catch { toast.error('Undo failed') }
   }
 }
@@ -924,9 +929,9 @@ function UnifiedMatchModal({ entry, onClose, onDone }) {
     if ((form.remark || '').trim().length < 5) { toast.error('Remark (≥5 chars) required'); return }
     setSaving(true)
     try {
-      await api.post('/sbi/manual-match', { process: entry.result_process, result_id: entry.result_id,
+      const { data } = await api.post('/sbi/manual-match', { process: entry.result_process, result_id: entry.result_id,
         counterpart_ref: form.counterpart_ref || null, remark: form.remark.trim() })
-      toast.success('Manually matched'); onDone()
+      if (!mcQueued(data)) toast.success('Manually matched'); onDone()
     } catch (e) { toast.error(e.response?.data?.detail || 'Manual match failed') }
     finally { setSaving(false) }
   }

@@ -43,9 +43,14 @@ from models.database import (
     SBIP01Result, SBIP02Result, SBIP03Result, SBIP04Result,
     SBIManualMatch, SBISrcAssignment,
 )
-from core.auth import get_current_user, require_permission
+from core.auth import get_current_user, require_permission, require_product_access
+from core import maker_checker
 
-router = APIRouter(prefix="/api/sbi", tags=["sbi-kiosk"])
+# Gate on the "kiosk" product id directly (what Users.jsx writes into allowed_products),
+# so access does not depend on the PartnerConfig(slug='sbi'->product='kiosk') seed row
+# existing — check_product_access falls back to product==partner when no slug matches.
+router = APIRouter(prefix="/api/sbi", tags=["sbi-kiosk"],
+                   dependencies=[Depends(require_product_access("kiosk"))])
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1980,6 +1985,14 @@ def create_manual_match(
         SBIManualMatch.process == p,
         SBIManualMatch.match_key == key,
     ).first()
+    queued = maker_checker.intercept(
+        db, current_user, "sbi_manual_match",
+        payload={"process": body.process, "result_id": body.result_id,
+                 "counterpart_ref": body.counterpart_ref, "remark": body.remark},
+        summary=f"SBI Kiosk manual match: {p} {body.result_id}",
+        partner="kiosk")
+    if queued:
+        return queued
     if existing:
         existing.counterpart_ref = body.counterpart_ref
         existing.remark = body.remark.strip()
@@ -2013,6 +2026,13 @@ def delete_manual_match(
     mm = db.query(SBIManualMatch).filter(SBIManualMatch.id == mm_id).first()
     if not mm:
         raise HTTPException(status_code=404, detail="Manual match not found")
+    queued = maker_checker.intercept(
+        db, current_user, "sbi_delete_manual_match",
+        payload={"mm_id": mm_id},
+        summary=f"SBI Kiosk undo manual match: {mm_id}",
+        partner="kiosk")
+    if queued:
+        return queued
     db.delete(mm)
     try:
         db.add(AuditLog(user_id=current_user.id, username=current_user.username,

@@ -27,9 +27,10 @@ from models.database import (
     get_db, AepsSettlement, AepsAnomaly, AepsCIB, Transaction,
     ReconStatus, generate_id, AuditLog, PIIntegrityCheck
 )
-from core.auth import get_current_user, require_permission
+from core.auth import get_current_user, require_permission, require_product_access
 
-router = APIRouter(prefix="/api/aeps", tags=["aeps-settlement"])
+router = APIRouter(prefix="/api/aeps", tags=["aeps-settlement"],
+                   dependencies=[Depends(require_product_access("aeps"))])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

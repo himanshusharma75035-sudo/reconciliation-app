@@ -264,6 +264,18 @@ def check_product_access(db, user, partner: str):
         )
 
 
+def require_product_access(partner: str):
+    """Router-level dependency: 403 if the user's allowed_products excludes this
+    product's partner. Admins and users with empty allowed_products pass (see
+    check_product_access). Attach to a module router as
+    `APIRouter(..., dependencies=[Depends(require_product_access("evalue"))])` so
+    every endpoint on it — reads included — is gated exactly like core recon is."""
+    def _dep(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+        check_product_access(db, user, partner)
+        return user
+    return _dep
+
+
 def require_permission(permission: str):
     def checker(current_user: User = Depends(get_current_user)):
         if current_user.role == "admin":

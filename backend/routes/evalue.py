@@ -25,13 +25,15 @@ from models.database import (
     get_db, generate_id, AuditLog,
     EvalueAccount, EvalueWalletLoad, EvalueBankTxn, Transaction,
 )
-from core.auth import get_current_user
+from core.auth import get_current_user, require_product_access
 from core import evalue_engine as EV
+from core import maker_checker
 from pydantic import BaseModel
 from typing import Optional, List
 
 logger = logging.getLogger("eko_recon")
-router = APIRouter(prefix="/api/evalue", tags=["evalue"])
+router = APIRouter(prefix="/api/evalue", tags=["evalue"],
+                   dependencies=[Depends(require_product_access("evalue"))])
 
 _TODAY = lambda: datetime.date.today().isoformat()
 
@@ -665,6 +667,13 @@ def manual_match(body: ManualMatchIn, db: Session = Depends(get_db), user=Depend
     cross = (b.reco_acc_no != l.reco_acc_no)
     diff = round(abs(float(b.amount or 0) - float(l.amount or 0)), 2)
     status = "matched_manual" if diff <= 1.0 else "wrong_amount"
+    queued = maker_checker.intercept(
+        db, user, "evalue_manual_match",
+        payload={"bank_txn_id": body.bank_txn_id, "load_id": body.load_id},
+        summary=f"E-Value manual match: bank {body.bank_txn_id} <-> load {body.load_id}",
+        partner="evalue")
+    if queued:
+        return queued
     mid = _ev_mid("EVMAN", b.reco_acc_no)
     note = "manual match" + (f" — cross-account (bank {b.reco_acc_no} / load {l.reco_acc_no})" if cross else "")
     if status == "wrong_amount":
@@ -694,6 +703,13 @@ def unmatch(match_id: str = Query(None), bank_txn_id: str = Query(None),
         if not ref:
             raise HTTPException(404, "Row not found")
         mid = ref.match_id
+    queued = maker_checker.intercept(
+        db, user, "evalue_unmatch",
+        payload={"match_id": match_id, "bank_txn_id": bank_txn_id, "load_id": load_id},
+        summary=f"E-Value unmatch: {mid or bank_txn_id or load_id}",
+        partner="evalue")
+    if queued:
+        return queued
     n = 0
     if mid:
         for b in db.query(EvalueBankTxn).filter(EvalueBankTxn.match_id == mid).all():
@@ -734,6 +750,13 @@ def override_status(body: OverrideIn, db: Session = Depends(get_db), user=Depend
     row = db.query(Model).filter(Model.id == body.id).first()
     if not row:
         raise HTTPException(404, "Row not found")
+    queued = maker_checker.intercept(
+        db, user, "evalue_override",
+        payload={"id": body.id, "side": body.side, "status": body.status, "note": body.note},
+        summary=f"E-Value override {body.side} {body.id} -> {body.status}",
+        partner="evalue")
+    if queued:
+        return queued
     prev = {"recon_status": row.recon_status, "match_id": row.match_id}
     row.prev_recon_status = row.recon_status
     row.recon_status = body.status
@@ -775,6 +798,13 @@ def assign_src(body: EvalueSRCIn, db: Session = Depends(get_db), user=Depends(ge
     row = db.query(Model).filter(Model.id == body.id).first()
     if not row:
         raise HTTPException(404, "Row not found")
+    queued = maker_checker.intercept(
+        db, user, "evalue_assign_src",
+        payload={"id": body.id, "side": body.side, "src_code": body.src_code, "src_note": body.src_note},
+        summary=f"E-Value SRC {body.src_code} -> {body.side} {body.id}",
+        partner="evalue")
+    if queued:
+        return queued
     prev = {"recon_status": row.recon_status, "src_code": row.src_code, "match_id": row.match_id}
     row.prev_recon_status = row.recon_status
     row.recon_status = "src_assigned"
@@ -797,6 +827,13 @@ def assign_src_bulk(body: EvalueBulkSRCIn, db: Session = Depends(get_db), user=D
         raise HTTPException(400, f"Invalid SRC code. Allowed: {SRC_CODES}")
     Model = EvalueBankTxn if body.side == "bank" else EvalueWalletLoad
     rows = db.query(Model).filter(Model.id.in_(body.ids or [])).all()
+    queued = maker_checker.intercept(
+        db, user, "evalue_assign_src_bulk",
+        payload={"ids": body.ids, "side": body.side, "src_code": body.src_code, "src_note": body.src_note},
+        summary=f"E-Value bulk SRC {body.src_code} -> {len(body.ids or [])} {body.side} rows",
+        partner="evalue")
+    if queued:
+        return queued
     for row in rows:
         row.prev_recon_status = row.recon_status
         row.recon_status = "src_assigned"
@@ -874,6 +911,13 @@ def interbank_manual(body: IbtManualIn, db: Session = Depends(get_db), user=Depe
     if not b or not t:
         raise HTTPException(404, "Bank txn or ledger transaction not found")
     diff = round(abs(float(b.amount or 0) - float(t.amount or 0)), 2)
+    queued = maker_checker.intercept(
+        db, user, "evalue_interbank_match",
+        payload={"bank_txn_id": body.bank_txn_id, "transaction_id": body.transaction_id},
+        summary=f"E-Value interbank match: bank {body.bank_txn_id} <-> txn {body.transaction_id}",
+        partner="evalue")
+    if queued:
+        return queued
     mid = _do_interbank_link(db, b, t, user, "manual")
     if diff > 1.0:
         note = f"interbank manual; evalue {b.amount} vs {t.partner} {t.amount} (Δ {diff})"
@@ -1147,6 +1191,13 @@ def bulk_override(body: BulkOverrideIn, db: Session = Depends(get_db), user=Depe
     if body.status not in EV_OVERRIDE_STATUSES:
         raise HTTPException(400, f"Invalid status. Allowed: {EV_OVERRIDE_STATUSES}")
     Model = EvalueBankTxn if body.side == "bank" else EvalueWalletLoad
+    queued = maker_checker.intercept(
+        db, user, "evalue_bulk_override",
+        payload={"ids": body.ids, "side": body.side, "status": body.status, "note": body.note},
+        summary=f"E-Value bulk override {len(body.ids or [])} {body.side} rows -> {body.status}",
+        partner="evalue")
+    if queued:
+        return queued
     n = 0
     for rid in body.ids:
         row = db.query(Model).filter(Model.id == rid).first()
@@ -1167,6 +1218,13 @@ def bulk_override(body: BulkOverrideIn, db: Session = Depends(get_db), user=Depe
 @router.post("/bulk-unmatch")
 def bulk_unmatch(match_ids: List[str] = None, db: Session = Depends(get_db), user=Depends(get_current_user)):
     match_ids = match_ids or []
+    queued = maker_checker.intercept(
+        db, user, "evalue_bulk_unmatch",
+        payload={"match_ids": match_ids},
+        summary=f"E-Value bulk unmatch: {len(match_ids)} match(es)",
+        partner="evalue")
+    if queued:
+        return queued
     n = 0
     for mid in match_ids:
         for b in db.query(EvalueBankTxn).filter(EvalueBankTxn.match_id == mid).all():

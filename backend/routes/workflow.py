@@ -131,7 +131,20 @@ class ReviewBody(BaseModel):
 
 
 def _execute_approved(req: ApprovalRequest, db: Session, approver: User) -> dict:
-    """Run the queued action as the approver. Lazy imports avoid circular deps."""
+    """Run the queued action as the approver, inside a maker-checker REPLAY context so
+    the replayed endpoints (core AND product routers self-intercept) EXECUTE directly
+    instead of re-queuing. Required because 'approver' is a grantable permission on
+    non-admin users, so the admin bypass alone would drop the action and re-queue it."""
+    from core import maker_checker as _mc
+    _tok = _mc.begin_replay()
+    try:
+        return _dispatch_approved(req, db, approver)
+    finally:
+        _mc.end_replay(_tok)
+
+
+def _dispatch_approved(req: ApprovalRequest, db: Session, approver: User) -> dict:
+    """Reconstruct and run the approved action. Lazy imports avoid circular deps."""
     p = json.loads(req.payload or "{}")
     from routes.recon import (
         override_status, bulk_override_status, do_assign_src,
@@ -155,6 +168,53 @@ def _execute_approved(req: ApprovalRequest, db: Session, approver: User) -> dict
     if req.action_type == "delete_txns":
         from routes.upload import clear_selected
         return clear_selected(transaction_ids=p["transaction_ids"], db=db, current_user=approver)
+
+    # ── Product-router actions (E-Value / BBPS / SBI Kiosk) ──────────────────────
+    # Replay the queued product action AS the approver. The product endpoints call
+    # maker_checker.intercept() themselves, but the approver is a checker (admin), so
+    # intercept returns None and the action executes directly — parity with the core
+    # replay above. Body-less endpoints (unmatch / bulk-unmatch / delete) are replayed
+    # with their original query/path args from the payload.
+    if req.action_type.startswith("evalue_"):
+        import routes.evalue as EV
+        v = req.action_type[len("evalue_"):]
+        if v == "manual_match":
+            return EV.manual_match(EV.ManualMatchIn(**p), db=db, user=approver)
+        if v == "unmatch":
+            return EV.unmatch(match_id=p.get("match_id"), bank_txn_id=p.get("bank_txn_id"),
+                              load_id=p.get("load_id"), db=db, user=approver)
+        if v == "override":
+            return EV.override_status(EV.OverrideIn(**p), db=db, user=approver)
+        if v == "assign_src":
+            return EV.assign_src(EV.EvalueSRCIn(**p), db=db, user=approver)
+        if v == "assign_src_bulk":
+            return EV.assign_src_bulk(EV.EvalueBulkSRCIn(**p), db=db, user=approver)
+        if v == "bulk_override":
+            return EV.bulk_override(EV.BulkOverrideIn(**p), db=db, user=approver)
+        if v == "bulk_unmatch":
+            return EV.bulk_unmatch(match_ids=p.get("match_ids"), db=db, user=approver)
+        if v == "interbank_match":
+            return EV.interbank_manual(EV.IbtManualIn(**p), db=db, user=approver)
+    if req.action_type.startswith("bbps_"):
+        import routes.bbps as BP
+        v = req.action_type[len("bbps_"):]
+        if v == "manual_match":
+            return BP.manual_match(BP.ManualMatchIn(**p), db=db, user=approver)
+        if v == "unmatch":
+            return BP.unmatch(match_id=p.get("match_id"), db=db, user=approver)
+        if v == "override":
+            return BP.override_status(BP.OverrideIn(**p), db=db, user=approver)
+        if v == "assign_src":
+            return BP.assign_src(BP.BbpsSRCIn(**p), db=db, user=approver)
+        if v == "assign_src_bulk":
+            return BP.assign_src_bulk(BP.BbpsBulkSRCIn(**p), db=db, user=approver)
+    if req.action_type == "sbi_manual_match":
+        import routes.sbi_kiosk as SK
+        return SK.create_manual_match(SK.ManualMatchIn(**p), db=db, current_user=approver)
+    if req.action_type == "sbi_delete_manual_match":
+        import routes.sbi_kiosk as SK
+        return SK.delete_manual_match(p["mm_id"], db=db, current_user=approver)
+
     raise HTTPException(400, f"Unknown action type '{req.action_type}'")
 
 

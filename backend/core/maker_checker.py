@@ -10,6 +10,22 @@ Admins always execute directly (they are the checkers).
 """
 import json
 import datetime
+import contextvars
+
+# When set, we are REPLAYING an already-approved action (from workflow._execute_approved).
+# intercept() must then execute directly instead of re-queuing — the approver may be a
+# non-admin 'approver', so the admin bypass alone would wrongly re-queue the action and
+# silently drop it while marking the original request 'approved'.
+_replaying = contextvars.ContextVar("maker_checker_replaying", default=False)
+
+
+def begin_replay():
+    """Enter the approved-action replay context. Returns a token for end_replay()."""
+    return _replaying.set(True)
+
+
+def end_replay(token):
+    _replaying.reset(token)
 
 
 def is_enabled(db) -> bool:
@@ -31,10 +47,13 @@ def set_enabled(db, enabled: bool, username: str = None):
 
 def intercept(db, user, action_type: str, payload: dict, summary: str, partner: str = None):
     """
-    Returns None when the action should execute directly (feature off, or the
-    user is an admin/checker). Otherwise queues an ApprovalRequest and returns
-    the response payload the route should hand back to the caller.
+    Returns None when the action should execute directly (feature off, the user is
+    an admin/checker, or we are replaying an already-approved action). Otherwise
+    queues an ApprovalRequest and returns the response payload the route hands back.
     """
+    if _replaying.get():
+        # This action was already approved and is being replayed by a checker — run it.
+        return None
     if getattr(user, "role", "") == "admin":
         return None
     if not is_enabled(db):

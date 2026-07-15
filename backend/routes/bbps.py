@@ -22,11 +22,13 @@ from pydantic import BaseModel
 from typing import Optional, List
 
 from models.database import get_db, generate_id, AuditLog, BbpsInternal, BbpsBankTxn
-from core.auth import get_current_user
+from core.auth import get_current_user, require_product_access
 from core import bbps_engine as BB
+from core import maker_checker
 
 logger = logging.getLogger("eko_recon")
-router = APIRouter(prefix="/api/bbps", tags=["bbps"])
+router = APIRouter(prefix="/api/bbps", tags=["bbps"],
+                   dependencies=[Depends(require_product_access("bbps"))])
 _TODAY = lambda: datetime.date.today().isoformat()
 
 STATUS_LABELS = {
@@ -250,6 +252,13 @@ def manual_match(body: ManualMatchIn, db: Session = Depends(get_db), user=Depend
     i = db.query(BbpsInternal).filter(BbpsInternal.id == body.internal_id).first()
     if not b or not i:
         raise HTTPException(404, "Operator or internal row not found")
+    queued = maker_checker.intercept(
+        db, user, "bbps_manual_match",
+        payload={"bank_id": body.bank_id, "internal_id": body.internal_id},
+        summary=f"BBPS manual match: bank {body.bank_id} <-> internal {body.internal_id}",
+        partner="bbps")
+    if queued:
+        return queued
     mid = f"BBPSMAN-{generate_id()[:6].upper()}"
     status = BB._classify({"amount": b.amount, "status": b.status},
                           {"amount": i.amount, "is_refunded": i.is_refunded})
@@ -262,6 +271,13 @@ def manual_match(body: ManualMatchIn, db: Session = Depends(get_db), user=Depend
 
 @router.post("/unmatch")
 def unmatch(match_id: str = Query(...), db: Session = Depends(get_db), user=Depends(get_current_user)):
+    queued = maker_checker.intercept(
+        db, user, "bbps_unmatch",
+        payload={"match_id": match_id},
+        summary=f"BBPS unmatch: {match_id}",
+        partner="bbps")
+    if queued:
+        return queued
     n = 0
     for b in db.query(BbpsBankTxn).filter(BbpsBankTxn.match_id == match_id).all():
         b.recon_status = "unmatched_bank"; b.match_id = ""; b.match_note = "unmatched"; n += 1
@@ -289,6 +305,13 @@ def override_status(body: OverrideIn, db: Session = Depends(get_db), user=Depend
     row = db.query(Model).filter(Model.id == body.id).first()
     if not row:
         raise HTTPException(404, "Row not found")
+    queued = maker_checker.intercept(
+        db, user, "bbps_override",
+        payload={"id": body.id, "side": body.side, "status": body.status, "note": body.note},
+        summary=f"BBPS override {body.side} {body.id} -> {body.status}",
+        partner="bbps")
+    if queued:
+        return queued
     prev = {"recon_status": row.recon_status}
     row.prev_recon_status = row.recon_status
     row.recon_status = body.status
@@ -328,6 +351,13 @@ def assign_src(body: BbpsSRCIn, db: Session = Depends(get_db), user=Depends(get_
     row = db.query(Model).filter(Model.id == body.id).first()
     if not row:
         raise HTTPException(404, "Row not found")
+    queued = maker_checker.intercept(
+        db, user, "bbps_assign_src",
+        payload={"id": body.id, "side": body.side, "src_code": body.src_code, "src_note": body.src_note},
+        summary=f"BBPS SRC {body.src_code} -> {body.side} {body.id}",
+        partner="bbps")
+    if queued:
+        return queued
     prev = {"recon_status": row.recon_status, "src_code": row.src_code, "match_id": row.match_id}
     row.prev_recon_status = row.recon_status
     row.recon_status = "src_assigned"
@@ -350,6 +380,13 @@ def assign_src_bulk(body: BbpsBulkSRCIn, db: Session = Depends(get_db), user=Dep
         raise HTTPException(400, f"Invalid SRC code. Allowed: {SRC_CODES}")
     Model = BbpsBankTxn if body.side == "bank" else BbpsInternal
     rows = db.query(Model).filter(Model.id.in_(body.ids or [])).all()
+    queued = maker_checker.intercept(
+        db, user, "bbps_assign_src_bulk",
+        payload={"ids": body.ids, "side": body.side, "src_code": body.src_code, "src_note": body.src_note},
+        summary=f"BBPS bulk SRC {body.src_code} -> {len(body.ids or [])} {body.side} rows",
+        partner="bbps")
+    if queued:
+        return queued
     for row in rows:
         row.prev_recon_status = row.recon_status
         row.recon_status = "src_assigned"

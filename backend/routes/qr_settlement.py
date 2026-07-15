@@ -29,9 +29,10 @@ from models.database import (
     get_db, QRSettlement, QRChargeback, Transaction,
     ReconStatus, generate_id, AuditLog
 )
-from core.auth import get_current_user, require_permission
+from core.auth import get_current_user, require_permission, require_product_access
 
-router = APIRouter(prefix="/api/qr", tags=["qr-settlement"])
+router = APIRouter(prefix="/api/qr", tags=["qr-settlement"],
+                   dependencies=[Depends(require_product_access("qr"))])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
