@@ -743,6 +743,15 @@ def reconcile(bank_rows: list, loads: list, reco_acc_no: str, amount_tol: float 
         return abs(float(a or 0) - float(b or 0)) <= amount_tol if amount_tol \
             else amt_key(a) == amt_key(b)
 
+    # Internal reconciliation date = the load's VALUE date (Rajendra, finance ops,
+    # 2026-07-15). The bank credits an E-Value load on its value date, not its
+    # transaction/initiation date, so the value date is what must equal the bank's
+    # single statement date. Fall back to the transaction date only when the value
+    # date is blank. Both dates stay stored on the row — only this MATCH comparison
+    # switched from transaction_date to value_date.
+    def load_date(l):
+        return l.get("value_date") or l.get("transaction_date") or ""
+
     # ── 0) REFERENCE match (PRIMARY) ──────────────────────────────────────────
     # Per finance ops: match the bank statement Particulars reference (e.g.
     # HDFCR52026060767796815) against the load's TID_ChequeNo / Is_Weekend_Loan,
@@ -758,9 +767,9 @@ def reconcile(bank_rows: list, loads: list, reco_acc_no: str, amount_tol: float 
         if not ref_cands:
             continue
         # amount AND date must both match — an identifier match whose amount or date
-        # differs is left OPEN (no wrong_amount link).
+        # differs is left OPEN (no wrong_amount link). Date = the load's VALUE date.
         amt_ok = [l for l in ref_cands
-                  if amt_match(l["amount"], b["amount"]) and l["transaction_date"] == b["txn_date"]]
+                  if amt_match(l["amount"], b["amount"]) and load_date(l) == b["txn_date"]]
         if amt_ok:
             l = amt_ok[0]; mid = new_mid()
             b["recon_status"] = "matched_online"; b["match_id"] = mid; b["match_note"] = "reference + amount + date"
@@ -779,9 +788,10 @@ def reconcile(bank_rows: list, loads: list, reco_acc_no: str, amount_tol: float 
                      and _utr_match(butr, l.get("utr_number"))]
         # STRICT: UTR + exact amount + SAME date only. A UTR match whose amount or
         # date differs is left OPEN — no cross-date match, no wrong_amount link.
+        # Date = the load's VALUE date.
         exact = [l for l in utr_cands
                  if amt_match(l["amount"], b["amount"])
-                 and l["transaction_date"] == b["txn_date"]]
+                 and load_date(l) == b["txn_date"]]
         if exact:
             l = exact[0]
             mid = new_mid()
@@ -796,7 +806,7 @@ def reconcile(bank_rows: list, loads: list, reco_acc_no: str, amount_tol: float 
         cands = [l for l in acct_loads
                  if l["recon_status"] == "unmatched_load"
                  and amt_match(l["amount"], b["amount"])
-                 and l["transaction_date"] == b["txn_date"]]
+                 and load_date(l) == b["txn_date"]]
         best = None; best_score = 0
         for l in cands:
             score = 0

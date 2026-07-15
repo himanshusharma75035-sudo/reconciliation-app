@@ -57,7 +57,12 @@ Reviewers: cite this file by item number.
     `reco_acc_no` must exactly equal the dump's `source` label **including deliberate
     quirks** (BOI-0351/0352 swap, PNB suffix mismatches); the cross-account reference pass
     runs globally after every per-account recon; fuzzy UTR/reference regexes and the cash
-    `score >= 1` threshold are tuned to real narrations.
+    `score >= 1` threshold are tuned to real narrations. **The internal side reconciles on
+    the load's VALUE date, not its transaction date** (`load_date()` in `evalue_engine.py`
+    and the cross-account pass in `evalue.py`): the bank credits an E-Value load on its value
+    date, so value date is compared against the bank's single statement date, falling back to
+    the transaction date only when value date is blank. Both dates stay stored; only the match
+    comparison uses value date (finance ops / Rajendra, 2026-07-15).
 14. **Open-Items contracts** — default status filter is unmatched+src_assigned; the
     `_skip_row_type` gate; `match_id` lookups bypass status & row-type gates; the literal
     `'all'` recon_status is accepted; `dmt` fans out to the DMT partners; "All partners"

@@ -295,7 +295,8 @@ def _run_one(db: Session, reco_acc_no: str) -> dict:
     loads = []
     for l in load_objs:
         loads.append({"_db": l, "reco_acc_no": l.reco_acc_no, "amount": float(l.amount or 0),
-                      "transaction_date": l.transaction_date or "", "status": l.status or "",
+                      "transaction_date": l.transaction_date or "", "value_date": l.value_date or "",
+                      "status": l.status or "",
                       "dr_cr": l.dr_cr or "CR", "utr_number": l.utr_number or "",
                       "tid_chequeno": l.tid_chequeno or "", "bank_ref": getattr(l, "bank_ref", "") or "",
                       "cdm_txn_number": l.cdm_txn_number or "",
@@ -409,7 +410,9 @@ def _cross_account_reference_match(db: Session) -> dict:
         # as a clean matched_online with no flag.
         if round(float(b.amount or 0), 2) != round(float(cand.amount or 0), 2):
             continue
-        if (b.txn_date or "") != (cand.transaction_date or ""):
+        # Internal side reconciles on the VALUE date (fallback transaction date) —
+        # parity with the per-account passes' load_date() (Rajendra, 2026-07-15).
+        if (b.txn_date or "") != (cand.value_date or cand.transaction_date or ""):
             continue
         used.add(cand.id)
         n += 1
