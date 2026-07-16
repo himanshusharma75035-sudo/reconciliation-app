@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Scale, Eye, EyeOff, Loader2, KeyRound, ArrowLeft } from 'lucide-react'
+import { Eye, EyeOff, Loader2, KeyRound, ArrowLeft } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
+import EkoLogo from '../components/EkoLogo'
 
 const DEVICE_TRUST_KEY = 'device_trust'
 
@@ -81,8 +82,8 @@ export default function Login() {
 
       <div className="relative w-full max-w-md animate-fade-in">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-accent/15 ring-1 ring-accent/30 rounded-2xl mb-4 shadow-lg">
-            <Scale size={30} className="text-accent" />
+          <div className="inline-flex items-center justify-center px-6 h-16 bg-accent/15 ring-1 ring-accent/30 rounded-2xl mb-4 shadow-lg">
+            <EkoLogo variant="full" height={44} />
           </div>
           <h1 className="text-2xl font-bold text-white tracking-tight">Eko Bharat Ventures</h1>
           <p className="text-white/60 text-sm mt-1">Reconciliation Portal</p>

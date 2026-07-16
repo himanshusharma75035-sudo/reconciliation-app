@@ -5,6 +5,7 @@ import {
   BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2, PieChart
 } from 'lucide-react'
 import { hasPermission, isAdmin } from '../utils/permissions'
+import EkoLogo from './EkoLogo'
 
 // requiredPerm: nav item is hidden if user doesn't have this permission
 // adminOnly:    nav item is hidden for non-admins
@@ -57,7 +58,7 @@ export default function Layout() {
         {/* Logo */}
         <div className={`flex items-center gap-3 px-4 py-4 border-b border-white/10 ${collapsed ? 'justify-center px-2' : ''}`}>
           <div className="w-9 h-9 rounded-xl bg-accent/15 ring-1 ring-accent/30 flex items-center justify-center flex-shrink-0">
-            <Scale size={18} className="text-accent" />
+            <EkoLogo variant="mark" height={22} />
           </div>
           {!collapsed && (
             <div className="min-w-0 leading-tight">
