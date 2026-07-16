@@ -62,3 +62,6 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+# Local scratch/trash (moved-aside junk) and server-only ops dir — never commit
+_trash/
+ops/
