@@ -49,11 +49,28 @@ function sumRows(rows = []) {
     txn:          acc.txn          + (r.txn_total      || 0),
     matched:      acc.matched      + (r.matched        || 0),
     open:         acc.open         + (r.unmatched      || 0),
+    mismatch:     acc.mismatch     + (r.amount_mismatch|| 0),
     failed:       acc.failed       + (r.failed         || 0),
+    duplicate:    acc.duplicate    + (r.duplicate      || 0),
     src:          acc.src          + (r.src_assigned   || 0),
+    // "other" = rows that don't require reconciliation (fees, fund transfers, settlements)
+    other:        acc.other        + (r.fee_matched || 0) + (r.fee_charge || 0)
+                                   + (r.settlement_credit || 0) + (r.fund_transfer || 0),
     amtMatched:   acc.amtMatched   + (r.amount_matched || 0),
     amtOpen:      acc.amtOpen      + (r.amount_open    || 0),
-  }), { txn: 0, matched: 0, open: 0, failed: 0, src: 0, amtMatched: 0, amtOpen: 0 })
+  }), { txn: 0, matched: 0, open: 0, mismatch: 0, failed: 0, duplicate: 0, src: 0, other: 0, amtMatched: 0, amtOpen: 0 })
+}
+
+// Compact "not matched / not open" summary for a partner row — the rows that are neither
+// matched nor an open exception (failed, duplicate, fees, fund transfers, src-assigned,
+// amount-mismatch). Returns {count, label} so a row/total always reconciles to its txn count.
+function nonReconOf(s) {
+  const parts = [
+    [s.failed,    'failed'], [s.duplicate, 'duplicate'], [s.mismatch, 'amount-mismatch'],
+    [s.src,       'src-assigned'], [s.other, 'fee/transfer'],
+  ].filter(([n]) => n > 0)
+  return { count: parts.reduce((a, [n]) => a + n, 0),
+           label: parts.map(([n, l]) => `${n.toLocaleString('en-IN')} ${l}`).join(' · ') }
 }
 
 function RateBar({ rate, size = 'md' }) {
@@ -217,7 +234,8 @@ function PartnerRow({ slug, displayName, data }) {
         <div className={`text-sm font-semibold tabular-nums ${intl.open > 0 ? 'text-red-500' : 'text-gray-300'}`}>
           {intl.open.toLocaleString()}
         </div>
-        {intl.failed > 0 && <div className="text-xs text-gray-400">{intl.failed} failed</div>}
+        {(() => { const nr = nonReconOf(intl); return nr.count > 0 &&
+          <div className="text-xs text-gray-400" title={`Neither matched nor open — ${nr.label}`}>{nr.count.toLocaleString()} other</div> })()}
       </td>
       <td className="py-3 px-5">
         <div className="min-w-[100px]">

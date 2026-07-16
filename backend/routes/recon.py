@@ -1263,7 +1263,12 @@ def dashboard_summary(
         if row.row_type == "txn":
             d["txn_total"] += cnt
             rs = row.recon_status
-            if rs in (ReconStatus.matched, ReconStatus.manual_matched):
+            # All genuine matches count as matched — incl. interbank_matched (CR↔DR via UTR)
+            # and internal_matched (internal self-match); omitting them understated the matched
+            # count + rate for internal-heavy products (Indo-Nepal, Digikhata). Mirrors
+            # core/analytics.py _MATCHED so the Dashboard and the Analytics view agree.
+            if rs in (ReconStatus.matched, ReconStatus.manual_matched,
+                      ReconStatus.interbank_matched, ReconStatus.internal_matched):
                 d["matched"] += cnt; d["amount_matched"] += amt
             elif rs == ReconStatus.unmatched:
                 d["unmatched"] += cnt; d["amount_open"] += amt
