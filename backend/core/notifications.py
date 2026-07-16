@@ -61,63 +61,40 @@ def send_eod_summary(db):
     if not EOD_EMAIL_TO:
         return
 
-    from sqlalchemy import func
-    from models.database import Transaction, ReconStatus, ReconRun
-
     today = str(datetime.date.today())
 
-    # Per-partner stats for today
-    rows = db.execute(
-        """
-        SELECT partner, recon_status, COUNT(*) as cnt, SUM(amount) as amt
-        FROM transactions
-        WHERE recon_date = :today AND row_type = 'txn' AND side = 'bank'
-        GROUP BY partner, recon_status
-        """,
-        {"today": today}
-    ).fetchall()
+    # Per-PRODUCT stats for today, deduped across ALL products (core ledger + E-Value +
+    # BBPS + SBI Kiosk + AePS/QR) — the same aggregator the analytics dashboard uses, so
+    # the digest now covers every product, not just the core ledger (audit #21).
+    from core.analytics import build_analytics
+    a = build_analytics(db, today, today)
+    tot = a.get("totals", {})
+    overall_total     = tot.get("transactions", 0)
+    overall_matched   = tot.get("matched", 0)
+    overall_unmatched = tot.get("unmatched", 0) + tot.get("mismatch", 0)
+    overall_rate      = tot.get("match_rate", 0)
 
-    if not rows:
+    if not overall_total:
         logger.info("[notifications] EOD email skipped — no transactions for today")
         return
 
-    # Aggregate per partner
-    partners = {}
-    for r in rows:
-        p = r[0] or "unknown"
-        if p not in partners:
-            partners[p] = {"matched": 0, "unmatched": 0, "failed": 0, "total": 0, "amount": 0.0}
-        status = str(r[1])
-        cnt    = r[2] or 0
-        amt    = float(r[3] or 0)
-        partners[p]["total"] += cnt
-        partners[p]["amount"] += amt
-        if status in ("matched", "manual_matched", "interbank_matched"):
-            partners[p]["matched"] += cnt
-        elif status in ("unmatched", "src_assigned", "amount_mismatch"):
-            partners[p]["unmatched"] += cnt
-        elif status == "failed":
-            partners[p]["failed"] += cnt
-
-    overall_matched   = sum(v["matched"]   for v in partners.values())
-    overall_total     = sum(v["total"]     for v in partners.values())
-    overall_unmatched = sum(v["unmatched"] for v in partners.values())
-    overall_rate      = round(overall_matched / max(overall_total, 1) * 100, 1)
-
     rate_color = "#16a34a" if overall_rate >= 95 else "#d97706" if overall_rate >= 85 else "#dc2626"
 
-    # Build partner rows
+    # Build per-product rows (one per product group)
     partner_rows_html = ""
-    for p, s in sorted(partners.items()):
-        rate = round(s["matched"] / max(s["total"], 1) * 100, 1)
+    for g in a.get("by_group", []):
+        total   = g.get("transactions", 0)
+        matched = g.get("matched", 0)
+        openn   = g.get("unmatched", 0) + g.get("mismatch", 0)
+        rate    = g.get("match_rate", 0)
         flag = " ⚠️" if rate < ALERT_THRESHOLD else ""
         rc   = "#dc2626" if rate < ALERT_THRESHOLD else "#16a34a" if rate >= 95 else "#d97706"
         partner_rows_html += f"""
         <tr>
-          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-transform:capitalize;font-weight:600">{p}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-align:center">{s['total']:,}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-align:center;color:#16a34a;font-weight:600">{s['matched']:,}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-align:center;color:#dc2626">{s['unmatched']:,}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;font-weight:600">{g.get('label','')}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-align:center">{total:,}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-align:center;color:#16a34a;font-weight:600">{matched:,}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-align:center;color:#dc2626">{openn:,}</td>
           <td style="padding:8px 12px;border-bottom:1px solid #f3f4f6;text-align:center;color:{rc};font-weight:700">{rate}%{flag}</td>
         </tr>"""
 
@@ -150,7 +127,7 @@ def send_eod_summary(db):
       <table style="width:100%;border-collapse:collapse;background:white;border:1px solid #e5e7eb;border-top:none">
         <thead>
           <tr style="background:#f3f4f6;font-size:11px;text-transform:uppercase;color:#6b7280">
-            <th style="padding:8px 12px;text-align:left">Partner</th>
+            <th style="padding:8px 12px;text-align:left">Product</th>
             <th style="padding:8px 12px;text-align:center">Total</th>
             <th style="padding:8px 12px;text-align:center">Matched</th>
             <th style="padding:8px 12px;text-align:center">Open</th>
