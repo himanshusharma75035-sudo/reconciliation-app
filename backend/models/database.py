@@ -1276,6 +1276,15 @@ class EvalueWalletLoad(Base):
         Index("ix_evload_status", "recon_status"),
     )
 
+    @property
+    def recon_date_effective(self):
+        """The date this load RECONCILES on = its VALUE date, falling back to the
+        transaction date only when value date is blank. The bank credits an E-Value
+        load on its value date, so that is the date every data view / filter / ageing
+        keys off; transaction_date stays stored as the initiation date. Finance ops /
+        Rajendra — see behavior-contract item 13."""
+        return self.value_date or self.transaction_date or ""
+
 
 class EvalueBankTxn(Base):
     """

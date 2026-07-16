@@ -20,11 +20,20 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from models.database import (
     get_db, generate_id, AuditLog,
     EvalueAccount, EvalueWalletLoad, EvalueBankTxn, Transaction,
 )
+
+# The date a wallet load RECONCILES on = its VALUE date (the bank credits an E-Value
+# load on its value date), falling back to the transaction date only when value date
+# is blank. Used for every load date filter / ordering; transaction_date stays stored
+# and is still shown alongside. Mirrors evalue_engine.load_date() and the model's
+# recon_date_effective property. (Finance ops / Rajendra — behavior-contract item 13.)
+_LOAD_DATE = func.coalesce(func.nullif(EvalueWalletLoad.value_date, ""),
+                           EvalueWalletLoad.transaction_date)
 from core.auth import get_current_user, require_product_access
 from core import evalue_engine as EV
 from core import maker_checker
@@ -518,12 +527,12 @@ def summary(date_from: str = Query(""), date_to: str = Query(""),
     total_counts = dict(tq.group_by(EvalueBankTxn.reco_acc_no).all())
 
     lq = db.query(EvalueWalletLoad.reco_acc_no, func.count(EvalueWalletLoad.id))
-    lq = _ev_date(lq, EvalueWalletLoad.transaction_date, date_from, date_to)
+    lq = _ev_date(lq, _LOAD_DATE, date_from, date_to)
     load_counts = dict(lq.group_by(EvalueWalletLoad.reco_acc_no).all())
 
     uq = db.query(EvalueWalletLoad.reco_acc_no, func.count(EvalueWalletLoad.id)) \
            .filter(EvalueWalletLoad.recon_status == "unmatched_load")
-    uq = _ev_date(uq, EvalueWalletLoad.transaction_date, date_from, date_to)
+    uq = _ev_date(uq, _LOAD_DATE, date_from, date_to)
     unmatched_load_counts = dict(uq.group_by(EvalueWalletLoad.reco_acc_no).all())
 
     by_acct = {}
@@ -572,11 +581,15 @@ def results(
         q = db.query(EvalueWalletLoad).filter(EvalueWalletLoad.reco_acc_no == reco_acc_no)
         if status:
             q = q.filter(EvalueWalletLoad.recon_status == status)
-        q = _ev_date(q, EvalueWalletLoad.transaction_date, date_from, date_to)
-        rows = q.order_by(EvalueWalletLoad.transaction_date, EvalueWalletLoad.amount).all()
+        q = _ev_date(q, _LOAD_DATE, date_from, date_to)
+        rows = q.order_by(_LOAD_DATE, EvalueWalletLoad.amount).all()
         return [{
             "id": l.id,
-            "transaction_date": l.transaction_date, "csp_code": l.csp_code,
+            # recon_date = the load's VALUE date (fallback txn) — the date it reconciles
+            # on. transaction_date kept for reference. (behavior-contract item 13)
+            "recon_date": l.recon_date_effective,
+            "transaction_date": l.transaction_date, "value_date": l.value_date,
+            "csp_code": l.csp_code,
             "merchant_name": l.merchant_name, "cell_number": l.cell_number,
             "amount": l.amount, "load_mode": l.load_mode, "utr_number": l.utr_number,
             "eko_trxn_id": l.eko_trxn_id, "recon_status": l.recon_status,
@@ -596,7 +609,7 @@ def export(
     bank = _ev_date(db.query(EvalueBankTxn).filter(EvalueBankTxn.reco_acc_no == reco_acc_no),
                     EvalueBankTxn.txn_date, date_from, date_to).all()
     loads = _ev_date(db.query(EvalueWalletLoad).filter(EvalueWalletLoad.reco_acc_no == reco_acc_no),
-                     EvalueWalletLoad.transaction_date, date_from, date_to).all()
+                     _LOAD_DATE, date_from, date_to).all()
     bank_df = pd.DataFrame([{
         "Txn Date": b.txn_date, "Description": b.description, "Dr/Cr": b.dr_cr,
         "Amount": b.amount, "Channel": b.channel, "UTR": b.utr, "ATM/CDM Ref": b.atm_ref,
@@ -604,7 +617,8 @@ def export(
         "Match ID": b.match_id, "Note": b.match_note,
     } for b in bank])
     load_df = pd.DataFrame([{
-        "Txn Date": l.transaction_date, "CSP Code": l.csp_code, "Merchant": l.merchant_name,
+        "Value Date": l.value_date, "Txn Date": l.transaction_date, "CSP Code": l.csp_code,
+        "Merchant": l.merchant_name,
         "Mobile": l.cell_number, "Amount": l.amount, "Mode": l.load_mode,
         "UTR": l.utr_number, "Eko TID": l.eko_trxn_id, "Recon Status": l.recon_status,
         "Match ID": l.match_id, "Note": l.match_note,
@@ -989,10 +1003,10 @@ def _ev_filtered_bank(db, frm, to, bank, reco, statuses=None):
 def _ev_filtered_loads(db, frm, to, reco, statuses=None):
     q = db.query(EvalueWalletLoad)
     if reco: q = q.filter(EvalueWalletLoad.reco_acc_no == reco)
-    if frm:  q = q.filter(EvalueWalletLoad.transaction_date >= frm)
-    if to:   q = q.filter(EvalueWalletLoad.transaction_date <= to)
+    if frm:  q = q.filter(_LOAD_DATE >= frm)   # VALUE date (fallback txn) — item 13
+    if to:   q = q.filter(_LOAD_DATE <= to)
     if statuses: q = q.filter(EvalueWalletLoad.recon_status.in_(statuses))
-    return q.order_by(EvalueWalletLoad.reco_acc_no, EvalueWalletLoad.transaction_date).all()
+    return q.order_by(EvalueWalletLoad.reco_acc_no, _LOAD_DATE).all()
 
 
 def _bank_row(b):
@@ -1003,7 +1017,8 @@ def _bank_row(b):
 
 
 def _load_row(l):
-    return {"Account": l.reco_acc_no, "Txn Date": l.transaction_date, "CSP Code": l.csp_code,
+    return {"Account": l.reco_acc_no, "Value Date": l.value_date, "Txn Date": l.transaction_date,
+            "CSP Code": l.csp_code,
             "Merchant": l.merchant_name, "Mobile": l.cell_number, "Amount": l.amount,
             "Mode": l.load_mode, "UTR": l.utr_number, "Eko TID": l.eko_trxn_id,
             "Recon Status": l.recon_status, "Match ID": l.match_id, "Note": l.match_note}
@@ -1089,7 +1104,7 @@ def report_export(report: str = Query("summary"), frm: str = Query(None, alias="
                 pairs.append({"Account": b.reco_acc_no, "Match ID": b.match_id, "Status": b.recon_status,
                               "Bank Date": b.txn_date, "Bank Amount": b.amount, "Bank UTR": b.utr,
                               "Bank Channel": b.channel,
-                              "Load Date": l.transaction_date if l else "", "Load Amount": l.amount if l else "",
+                              "Load Date": (l.recon_date_effective if l else ""), "Load Amount": l.amount if l else "",
                               "CSP": l.csp_code if l else "", "Load UTR": l.utr_number if l else "",
                               "Eko TID": l.eko_trxn_id if l else ""})
             sheet("Matched Pairs", pairs)
@@ -1159,11 +1174,12 @@ def ageing(reco_acc_no: str = Query(None), db: Session = Depends(get_db), user=D
                                "date": b.txn_date, "age_days": days, "amount": b.amount,
                                "utr": b.utr, "description": b.description})
     for l in lq.all():
-        days = _age_days(l.transaction_date); bk = _bucket(days)
+        # age from the VALUE date (the date the load reconciles on), fallback txn — item 13
+        days = _age_days(l.recon_date_effective); bk = _bucket(days)
         agg[bk]["load"] += 1; agg[bk]["load_amount"] += float(l.amount or 0)
         if days > 7:
             escalation.append({"side": "load", "id": l.id, "reco_acc_no": l.reco_acc_no,
-                               "date": l.transaction_date, "age_days": days, "amount": l.amount,
+                               "date": l.recon_date_effective, "age_days": days, "amount": l.amount,
                                "csp_code": l.csp_code, "utr": l.utr_number})
     escalation.sort(key=lambda x: -x["age_days"])
     return {"buckets": agg, "escalation_count": len(escalation), "escalation": escalation}

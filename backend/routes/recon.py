@@ -981,9 +981,9 @@ def _module_rows(module, *, recon_date=None, date_from=None, date_to=None, side=
             "bank_description": b.description,  # E-Value bank txns already store the narration
             "csp_code": None, "csp_name": None,  # CSP is on the internal side only
         }, "bank")
-        _collect(db.query(EvalueWalletLoad), "transaction_date", lambda l: {
-            "id": l.id, "partner": "evalue", "side": "internal", "recon_date": l.transaction_date,
-            "transaction_date": l.transaction_date, "eko_tid": l.eko_trxn_id,
+        _collect(db.query(EvalueWalletLoad), "recon_date_effective", lambda l: {
+            "id": l.id, "partner": "evalue", "side": "internal", "recon_date": l.recon_date_effective,
+            "transaction_date": l.transaction_date, "value_date": l.value_date, "eko_tid": l.eko_trxn_id,
             "tracking_number": l.reco_acc_no, "utr_number": l.utr_number, "amount": l.amount,
             "dr_cr": None, "status": l.status, "recon_status": l.recon_status,
             "match_id": l.match_id, "src_code": l.src_code, "src_note": l.src_note,

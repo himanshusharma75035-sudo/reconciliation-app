@@ -109,8 +109,12 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         recs.append((partner, sd or "bank", d, _statv(status), cnt or 0, float(amt or 0)))
 
     # ── 2. E-Value (bank + wallet-load sides, own tables) ─────────────────────
+    # E-Value load side is dated by its VALUE date (fallback txn) — the date it
+    # reconciles on (behavior-contract item 13); bank side has a single date.
     for model, datecol, sd in ((EvalueBankTxn, EvalueBankTxn.txn_date, "bank"),
-                               (EvalueWalletLoad, EvalueWalletLoad.transaction_date, "internal")):
+                               (EvalueWalletLoad,
+                                F.coalesce(F.nullif(EvalueWalletLoad.value_date, ""),
+                                           EvalueWalletLoad.transaction_date), "internal")):
         eq = db.query(datecol, model.recon_status, F.count(model.id), F.sum(model.amount))
         if date_from:
             eq = eq.filter(datecol >= date_from)

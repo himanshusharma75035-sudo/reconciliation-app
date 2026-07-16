@@ -363,7 +363,7 @@ function ManualMatchPanel({ acct, onDone }) {
         <MiniPick title="Unmatched bank credits" rows={bank} sel={selB} setSel={setSelB}
           render={b => `${b.txn_date} · ${inr(b.amount)} · ${b.channel} · ${b.utr || b.atm_ref || '—'}`} idKey="id" />
         <MiniPick title="Unmatched loads" rows={loads} sel={selL} setSel={setSelL}
-          render={l => `${l.transaction_date} · ${inr(l.amount)} · ${l.csp_code || ''} · ${l.utr_number || '—'}`} idKey="id" />
+          render={l => `${l.recon_date || l.transaction_date} · ${inr(l.amount)} · ${l.csp_code || ''} · ${l.utr_number || '—'}`} idKey="id" />
       </div>
       <p className="text-[11px] text-gray-400 mt-2">Tip: loads from a different account also appear in their own account — use this for same-account pairs the engine missed; cross-account pairing is supported via the API.</p>
     </div>
@@ -480,7 +480,7 @@ function ManualMatchView() {
                     className={`border-b border-gray-50 ${isQ ? 'bg-gray-100 opacity-50 cursor-not-allowed' : 'cursor-pointer'} ${isS ? `bg-${color}-100 ring-1 ring-inset ring-${color}-300` : `hover:bg-${color}-50`}`}>
                     <td className="px-2 py-2"><div className={`w-3.5 h-3.5 rounded-full border-2 ${isS ? `border-${color}-500 bg-${color}-500` : 'border-gray-300'}`} /></td>
                     <td className="px-2 py-2 font-mono text-gray-700">{it.tracking_number || '—'}</td>
-                    <td className="px-2 py-2 text-gray-500">{it.transaction_date || '—'}</td>
+                    <td className="px-2 py-2 text-gray-500" title={isLoad && it.transaction_date ? `Txn date: ${it.transaction_date}` : ''}>{it.recon_date || it.transaction_date || '—'}</td>
                     <td className="px-2 py-2 text-right tabular-nums font-medium">{inr(it.amount)}</td>
                     <td className="px-2 py-2 font-mono text-gray-500">{it.eko_tid || it.utr_number || '—'}</td>
                     <td className="px-2 py-2 text-gray-500 max-w-[12rem]"><span className="block truncate" title={isLoad ? (it.csp_code || '') : (it.bank_description || '')}>{isLoad ? (it.csp_code || '—') : (it.bank_description || '—')}</span></td>
@@ -607,7 +607,7 @@ function RowsTable({ rows, onUnmatch, onOverride, onAssignSrc }) {
             return (
               <tr key={i} className="border-b border-gray-50 hover:bg-gray-50">
                 <td className="table-td"><span className={`px-2 py-0.5 rounded-full text-[10px] ${isBank ? 'bg-blue-50 text-blue-700' : 'bg-violet-50 text-violet-700'}`}>{isBank ? 'Bank' : 'Load'}</span></td>
-                <td className="table-td font-mono">{isBank ? r.txn_date : r.transaction_date}</td>
+                <td className="table-td font-mono" title={!isBank && r.transaction_date ? `Txn date: ${r.transaction_date}` : ''}>{isBank ? r.txn_date : (r.recon_date || r.transaction_date)}</td>
                 <td className="table-td text-left max-w-xs truncate" title={detail}>{detail}</td>
                 <td className="table-td font-mono">{ref}</td>
                 <td className="table-td text-right tabular-nums">{inr(r.amount)}</td>

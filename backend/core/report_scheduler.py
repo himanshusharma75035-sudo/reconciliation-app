@@ -85,12 +85,17 @@ def _generate_evalue_report(report_type, filters, from_date, to_date, db):
     import pandas as pd
     from openpyxl.styles import PatternFill, Font as XFont
     from models.database import EvalueBankTxn, EvalueWalletLoad
+    from sqlalchemy import func
 
     reco = filters.get("reco_acc_no") or None
+    # Wallet loads window on the VALUE date (fallback txn) — the date the load reconciles
+    # on, matching every interactive view (behavior-contract item 13).
+    _load_date = func.coalesce(func.nullif(EvalueWalletLoad.value_date, ""),
+                               EvalueWalletLoad.transaction_date)
     bq = db.query(EvalueBankTxn).filter(EvalueBankTxn.txn_date >= from_date,
                                         EvalueBankTxn.txn_date <= to_date)
-    lq = db.query(EvalueWalletLoad).filter(EvalueWalletLoad.transaction_date >= from_date,
-                                           EvalueWalletLoad.transaction_date <= to_date)
+    lq = db.query(EvalueWalletLoad).filter(_load_date >= from_date,
+                                           _load_date <= to_date)
     if reco:
         bq = bq.filter(EvalueBankTxn.reco_acc_no == reco)
         lq = lq.filter(EvalueWalletLoad.reco_acc_no == reco)
@@ -129,7 +134,8 @@ def _generate_evalue_report(report_type, filters, from_date, to_date, db):
             style(w.sheets["Summary"])
         elif report_type == "evalue_exceptions":
             exc = [brow(b) for b in bank if b.recon_status in ("twice_credit", "wrong_amount", "unmatched_bank")]
-            unl = [{"Account": l.reco_acc_no, "Txn Date": l.transaction_date, "CSP": l.csp_code,
+            unl = [{"Account": l.reco_acc_no, "Value Date": l.value_date, "Txn Date": l.transaction_date,
+                    "CSP": l.csp_code,
                     "Amount": l.amount, "Mode": l.load_mode, "UTR": l.utr_number}
                    for l in loads if l.recon_status == "unmatched_load"]
             (pd.DataFrame(exc) if exc else pd.DataFrame({"info": ["none"]})).to_excel(w, index=False, sheet_name="Bank Exceptions")
