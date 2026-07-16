@@ -6,6 +6,7 @@ import {
 import toast from 'react-hot-toast'
 import api from '../utils/api'
 import { isCoreLedgerPartner } from '../productRegistry'
+import { hasPermission } from '../utils/permissions'
 
 // Fallback only — used until /admin/partners-public loads. Kept in sync with the seeded
 // core partners (was missing levin / digikhata / indonepal).
@@ -145,7 +146,7 @@ function Certificate({ partners }) {
         <div><label className="text-xs text-gray-500 block mb-1">Partner</label><select className="select" value={partner} onChange={e => setPartner(e.target.value)}>{partners.map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}</select></div>
         <div><label className="text-xs text-gray-500 block mb-1">Month</label><input type="month" className="input" value={month} onChange={e => setMonth(e.target.value)} /></div>
       </div>
-      <button onClick={dl} className="btn-primary flex items-center gap-2"><Download size={15} /> Download Certificate PDF</button>
+      {hasPermission('reports') && <button onClick={dl} className="btn-primary flex items-center gap-2"><Download size={15} /> Download Certificate PDF</button>}
     </div>
   )
 }
@@ -196,7 +197,7 @@ function CarryForward({ partners }) {
         <div><label className="text-xs text-gray-500 block mb-1">Partner</label><select className="select" value={partner} onChange={e => setPartner(e.target.value)}>{partners.map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}</select></div>
         <div><label className="text-xs text-gray-500 block mb-1">Recon Date</label><input type="date" className="input" value={date} onChange={e => setDate(e.target.value)} /></div>
       </div>
-      <button onClick={run} disabled={busy} className="btn-primary flex items-center gap-2"><Play size={15} /> Run Carry-Forward</button>
+      {hasPermission('run_recon') && <button onClick={run} disabled={busy} className="btn-primary flex items-center gap-2"><Play size={15} /> Run Carry-Forward</button>}
     </div>
   )
 }

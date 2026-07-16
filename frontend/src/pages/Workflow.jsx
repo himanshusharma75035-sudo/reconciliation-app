@@ -5,6 +5,7 @@ import api from '../utils/api'
 import ActionModal from '../components/ActionModal'
 import { inr } from '../utils/formatters'
 import { isCoreLedgerPartner } from '../productRegistry'
+import { hasPermission, isAdmin } from '../utils/permissions'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Workflow — Tier 1 operations layer:
@@ -103,8 +104,9 @@ function ApprovalsTab() {
             When on, manual matches / overrides by non-admin users wait here until a different user approves them.
           </p>
         </div>
-        <button onClick={toggleMc}
-          className={`px-4 py-2 rounded-lg text-sm font-medium ${mcEnabled ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-600'}`}>
+        <button onClick={toggleMc} disabled={!isAdmin()}
+          title={isAdmin() ? '' : 'Only admins can change dual control'}
+          className={`px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-60 disabled:cursor-not-allowed ${mcEnabled ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-600'}`}>
           {mcEnabled ? 'ON — actions need approval' : 'OFF — actions execute directly'}
         </button>
       </div>
@@ -132,7 +134,7 @@ function ApprovalsTab() {
                     {r.reviewed_by && <> → {r.status} by {r.reviewed_by}{r.review_note ? ` (“${r.review_note}”)` : ''}</>}
                   </div>
                 </div>
-                {r.status === 'pending' && (
+                {r.status === 'pending' && hasPermission('approver') && (
                   <div className="flex gap-2">
                     <button onClick={() => review(r, 'approve')} className="px-3 py-1 rounded text-xs font-medium bg-green-600 text-white hover:bg-green-700 flex items-center gap-1"><CheckCircle2 size={12} /> Approve</button>
                     <button onClick={() => review(r, 'reject')} className="px-3 py-1 rounded text-xs font-medium bg-red-600 text-white hover:bg-red-700 flex items-center gap-1"><XCircle size={12} /> Reject</button>
@@ -203,7 +205,7 @@ function FeeRulesTab() {
       <div className="card">
         <div className="flex items-center justify-between mb-3">
           <p className="text-xs text-gray-400">Expected fee per partner — used by “Verify Fees” in each product window to flag wrong deductions.</p>
-          <button onClick={() => openForm(null)} className="btn-primary text-xs flex items-center gap-1"><Plus size={13} /> Add rule</button>
+          {hasPermission('logic_builder') && <button onClick={() => openForm(null)} className="btn-primary text-xs flex items-center gap-1"><Plus size={13} /> Add rule</button>}
         </div>
         {rules.length === 0 ? <p className="text-sm text-gray-400 py-6 text-center">No fee rules yet — add one to start verifying charges.</p> : (
           <table className="w-full text-xs">
@@ -219,8 +221,10 @@ function FeeRulesTab() {
                 <td className="table-td">{r.gst_percent}%</td>
                 <td className="table-td">{inr(r.tolerance)}</td>
                 <td className="table-td"><div className="flex gap-1">
-                  <button onClick={() => openForm(r)} className="p-1 rounded hover:bg-blue-50 text-blue-600"><Pencil size={12} /></button>
-                  <button onClick={() => remove(r)} className="p-1 rounded hover:bg-red-50 text-red-500"><Trash2 size={12} /></button>
+                  {hasPermission('logic_builder') && <>
+                    <button onClick={() => openForm(r)} className="p-1 rounded hover:bg-blue-50 text-blue-600"><Pencil size={12} /></button>
+                    <button onClick={() => remove(r)} className="p-1 rounded hover:bg-red-50 text-red-500"><Trash2 size={12} /></button>
+                  </>}
                 </div></td>
               </tr>
             ))}</tbody>
