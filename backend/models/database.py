@@ -1969,55 +1969,10 @@ def seed_match_rules(db):
     Safe to call every startup — skips partners that already have rules.
     """
     import json as _json
-    default_rules = {
-        "airtel": [
-            {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
-            {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 2},
-            {"name": "Tracking Only",  "fields": ["tracking_number"],            "priority": 3},
-        ],
-        "fino": [
-            {"name": "TID + Tracking + UTR", "fields": ["eko_tid", "tracking_number", "utr_number"], "priority": 1},
-            {"name": "TID + Tracking",       "fields": ["eko_tid", "tracking_number"],               "priority": 2},
-            {"name": "TID + UTR",            "fields": ["eko_tid", "utr_number"],                    "priority": 3},
-            {"name": "TID Only",             "fields": ["eko_tid"],                                  "priority": 4},
-            {"name": "Tracking Only",        "fields": ["tracking_number"],                          "priority": 5},
-            {"name": "UTR Only",             "fields": ["utr_number"],                               "priority": 6},
-        ],
-        "aeps": [
-            {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
-            {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 2},
-        ],
-        "pg": [
-            {"name": "TID + Amount", "fields": ["eko_tid", "amount"], "priority": 1},
-            {"name": "TID Only",     "fields": ["eko_tid"],           "priority": 2},
-        ],
-        "axis": [
-            {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
-            {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 2},
-            {"name": "Tracking Only",  "fields": ["tracking_number"],            "priority": 3},
-        ],
-        "levin": [
-            {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
-            {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 2},
-            {"name": "Tracking Only",  "fields": ["tracking_number"],            "priority": 3},
-            {"name": "UTR Only",       "fields": ["utr_number"],                 "priority": 4},
-        ],
-        "qr": [
-            {"name": "TID + RRN",    "fields": ["eko_tid", "tracking_number"], "priority": 1},
-            {"name": "RRN + Amount", "fields": ["tracking_number", "amount"],  "priority": 2},
-            {"name": "TID Only",     "fields": ["eko_tid"],                    "priority": 3},
-        ],
-        "digikhata": [
-            {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
-            {"name": "TID + Amount",   "fields": ["eko_tid", "amount"],          "priority": 2},
-            {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 3},
-        ],
-        "indonepal": [
-            {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
-            {"name": "TID + UTR",      "fields": ["eko_tid", "utr_number"],      "priority": 2},
-            {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 3},
-        ],
-    }
+    # Single source of truth for default matching rules — imported from the engine's
+    # DEFAULT_RULES so the DB seed and the engine fallback can never drift again (audit #4).
+    # Lazy import (inside the function) avoids a circular import at module load.
+    from core.matching_engine import DEFAULT_RULES as default_rules
     from models.database import MatchRule
     for partner, rules in default_rules.items():
         existing = db.query(MatchRule).filter(MatchRule.partner == partner).first()

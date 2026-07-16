@@ -141,40 +141,41 @@ DEFAULT_RULES = {
         {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 2},
         {"name": "Tracking Only",  "fields": ["tracking_number"],            "priority": 3},
     ],
-    # Levin DMT — Levin bank statement (TBD) vs Simplibank Levin dump
+    # Levin DMT — Levin bank statement vs Simplibank Levin dump.
+    # Finance ops (Rajendra, 2026-07-16): tracking number / UTR are the PRIORITY match
+    # keys for Levin, tried before the Eko TID.
     "levin": [
-        {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
-        {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 2},
-        {"name": "Tracking Only",  "fields": ["tracking_number"],            "priority": 3},
+        {"name": "Tracking Only",  "fields": ["tracking_number"],            "priority": 1},
+        {"name": "UTR Only",       "fields": ["utr_number"],                 "priority": 2},
+        {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 3},
+        {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 4},
     ],
     # QR Collection — Paypoint transaction export vs Simplibank dump
     # Bank OrderId = internal TrackingNumber (primary)
     # Bank RRN     = internal UTRNUMBER (secondary)
     # All QR txns are Success on internal side; Failed bank rows auto-set to failed.
     "qr": [
-        {"name": "Tracking + UTR", "fields": ["tracking_number", "utr_number"], "priority": 1},
-        {"name": "Tracking Only",  "fields": ["tracking_number"],               "priority": 2},
-        {"name": "UTR Only",       "fields": ["utr_number"],                    "priority": 3},
+        {"name": "TID + RRN",    "fields": ["eko_tid", "tracking_number"], "priority": 1},
+        {"name": "RRN + Amount", "fields": ["tracking_number", "amount"],  "priority": 2},
+        {"name": "TID Only",     "fields": ["eko_tid"],                    "priority": 3},
     ],
     # Digikhata PPI Wallet Load — Digikhata bank report vs Simplibank dump
     # The Simplibank dump has multiple sub-entries per TID (main load + CCF + GST + commission).
     # TID + Amount ensures we match the correct main load row and leave charge sub-entries visible.
     # Irrespective of status (Success / Fail / Refunded).
     "digikhata": [
-        {"name": "TID + Amount", "fields": ["eko_tid", "amount"], "priority": 1},
-        {"name": "TID Only",     "fields": ["eko_tid"],           "priority": 2},
+        {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
+        {"name": "TID + Amount",   "fields": ["eko_tid", "amount"],          "priority": 2},
+        {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 3},
     ],
-    # Indonepal Fund Transfer — Indonepal bank report vs Simplibank dump
-    # Match successful transactions on Eko TID (PartnerPinNo in bank = eko_trxn_id in dump).
-    # Failed DR+CR pairs in the dump are fund reversals — ingested but not matched.
-    "kiosk": [
-        {"name": "TID + Tracking",    "fields": ["eko_tid", "tracking_number"], "priority": 1},
-        {"name": "TID Only",           "fields": ["eko_tid"],                    "priority": 2},
-        {"name": "Tracking Only",      "fields": ["tracking_number"],            "priority": 3},
-    ],
+    # Indonepal Fund Transfer — Indonepal bank report vs Simplibank dump.
+    # Eko TID is the PRIORITY match key (PartnerPinNo in bank = eko_trxn_id in dump).
+    # (The old 'kiosk' key here was a mislabelled copy — SBI Kiosk uses its own engine and
+    # never reads these rules, so it was inert; removed.)
     "indonepal": [
         {"name": "TID + Tracking", "fields": ["eko_tid", "tracking_number"], "priority": 1},
-        {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 2},
+        {"name": "TID + UTR",      "fields": ["eko_tid", "utr_number"],      "priority": 2},
+        {"name": "TID Only",       "fields": ["eko_tid"],                    "priority": 3},
     ],
 }
 
