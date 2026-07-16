@@ -70,3 +70,9 @@ export const CORE_PRODUCTS = PRODUCTS.filter(p => p.kind === 'core')
 // re-hardcoding ['fino','airtel','axis','levin'] in Run Recon, Reports, Dashboard,
 // ProductReconPage, Auto Upload, etc. (backend mirror: routes/reports.py PRODUCT_PARTNERS).
 export const DMT_PARTNERS = PRODUCT_BY_ID.dmt.partners
+
+// The match fields the core matching engine actually keys on (matching_engine.DEFAULT_RULES
+// only ever uses these). Single source for BOTH rule editors — the Logic Builder and the
+// Admin Matching Rules tab — which previously exposed different palettes. ('status' was a
+// spurious option: the engine pairs rows by identifier/amount, never by status.)
+export const MATCH_FIELDS = ['eko_tid', 'tracking_number', 'utr_number', 'amount']

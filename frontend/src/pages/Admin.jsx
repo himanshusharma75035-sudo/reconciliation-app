@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
-import { CORE_PRODUCTS, isCoreLedgerPartner } from '../productRegistry'
+import { CORE_PRODUCTS, isCoreLedgerPartner, MATCH_FIELDS } from '../productRegistry'
 
 const TABS = [
   { key: 'partners',        label: 'Partners & Banks' },
@@ -22,7 +22,7 @@ const TABS = [
 // silently dropped qr / digikhata / indonepal.
 const PRODUCTS = CORE_PRODUCTS.map(p => p.id)
 const SIDES    = ['bank', 'internal']
-const MATCH_FIELD_OPTIONS = ['eko_tid', 'tracking_number', 'utr_number', 'amount']
+const MATCH_FIELD_OPTIONS = MATCH_FIELDS   // single source (productRegistry) — was a divergent copy
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function Badge({ label, color = 'gray' }) {

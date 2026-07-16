@@ -1467,6 +1467,22 @@ def create_rule(data: RuleCreate, db: Session = Depends(get_db),
     db.commit()
     return {"id": rule.id, "message": "Rule created"}
 
+@router.put("/rules/{rule_id}")
+def update_rule(rule_id: str, data: RuleCreate, db: Session = Depends(get_db),
+                current_user: User = Depends(require_permission("logic_builder"))):
+    """Edit a matching rule in place (Logic Builder). Same permission as create/toggle/
+    delete, so the Logic Builder is a full editor — not create-and-delete only."""
+    rule = db.query(MatchRule).filter(MatchRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    rule.name = data.name
+    rule.partner = data.partner
+    rule.priority = data.priority
+    rule.match_fields = json.dumps(data.match_fields)
+    rule.description = data.description
+    db.commit()
+    return {"id": rule.id, "message": "Rule updated"}
+
 @router.put("/rules/{rule_id}/toggle")
 def toggle_rule(rule_id: str, db: Session = Depends(get_db),
                 current_user: User = Depends(require_permission("logic_builder"))):

@@ -1,15 +1,16 @@
 import React, { useState, useEffect } from 'react'
-import { Plus, Trash2, ToggleLeft, ToggleRight, BookOpen } from 'lucide-react'
+import { Plus, Trash2, ToggleLeft, ToggleRight, BookOpen, Edit2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
-import { isCoreLedgerPartner } from '../productRegistry'
+import { isCoreLedgerPartner, MATCH_FIELDS } from '../productRegistry'
 
-const FIELDS = ['eko_tid', 'tracking_number', 'utr_number', 'amount', 'status']
+const FIELDS = MATCH_FIELDS
 
 export default function Rules() {
   const [rules, setRules] = useState([])
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({ name: '', partner: '', priority: 1, match_fields: ['eko_tid'], description: '' })
+  const [editingId, setEditingId] = useState(null)
   const [partnerList, setPartnerList] = useState([])
   const user = JSON.parse(localStorage.getItem('user') || '{}')
 
@@ -23,10 +24,23 @@ export default function Rules() {
       .catch(() => {})
   }, [])
 
-  const handleCreate = async () => {
+  const startNew = () => {
+    setEditingId(null)
+    setForm({ name: '', partner: '', priority: 1, match_fields: ['eko_tid'], description: '' })
+    setShowForm(true)
+  }
+  const startEdit = (r) => {
+    setEditingId(r.id)
+    setForm({ name: r.name, partner: r.partner, priority: r.priority,
+              match_fields: r.match_fields, description: r.description || '' })
+    setShowForm(true)
+  }
+  const closeForm = () => { setShowForm(false); setEditingId(null) }
+  const handleSave = async () => {
     try {
-      await api.post('/recon/rules', form)
-      toast.success('Rule created'); setShowForm(false); load()
+      if (editingId) { await api.put(`/recon/rules/${editingId}`, form); toast.success('Rule updated') }
+      else { await api.post('/recon/rules', form); toast.success('Rule created') }
+      closeForm(); load()
     } catch (err) { toast.error(err.response?.data?.detail || 'Failed') }
   }
 
@@ -55,35 +69,22 @@ export default function Rules() {
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-xl font-bold text-gray-800">Logic Builder</h1>
         {canEdit && (
-          <button onClick={() => setShowForm(true)} className="btn-primary flex items-center gap-2">
+          <button onClick={startNew} className="btn-primary flex items-center gap-2">
             <Plus size={15} /> New Rule
           </button>
         )}
       </div>
       <p className="text-sm text-gray-500 mb-5">Define and manage matching rules. Rules are applied in priority order.</p>
 
-      {/* Default rules info */}
+      {/* How rules work (the real per-partner defaults are seeded and listed below —
+          this box used to hard-code a stale Airtel/Fino sample). */}
       <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 mb-5 text-sm text-blue-700">
-        <p className="font-semibold mb-1 flex items-center gap-2"><BookOpen size={14} /> Default Rules (always active if no custom rules exist)</p>
-        <div className="grid grid-cols-2 gap-4 mt-2 text-xs">
-          <div>
-            <p className="font-medium">Airtel:</p>
-            <ol className="list-decimal list-inside space-y-0.5 mt-1 text-blue-600">
-              <li>TID + Tracking Number</li>
-              <li>TID Only</li>
-              <li>Tracking Number Only</li>
-            </ol>
-          </div>
-          <div>
-            <p className="font-medium">Fino:</p>
-            <ol className="list-decimal list-inside space-y-0.5 mt-1 text-blue-600">
-              <li>TID + Tracking + UTR</li>
-              <li>TID + Tracking</li>
-              <li>TID + UTR</li>
-              <li>TID Only</li>
-            </ol>
-          </div>
-        </div>
+        <p className="font-semibold mb-1 flex items-center gap-2"><BookOpen size={14} /> How matching rules work</p>
+        <p className="text-xs text-blue-600 mt-1">
+          Every partner is seeded with sensible default rules (shown below). Rules run in priority
+          order (1 = tried first) and match on the fields you select — the first rule that matches
+          wins. Edit, disable, or add your own here.
+        </p>
       </div>
 
       {/* Custom rules */}
@@ -111,6 +112,9 @@ export default function Rules() {
                 </div>
                 {canEdit && (
                   <div className="flex gap-2">
+                    <button onClick={() => startEdit(rule)} className="text-gray-400 hover:text-primary" title="Edit">
+                      <Edit2 size={15} />
+                    </button>
                     <button onClick={() => handleToggle(rule.id)} className="text-gray-400 hover:text-primary">
                       {rule.is_active ? <ToggleRight size={20} className="text-green-500" /> : <ToggleLeft size={20} />}
                     </button>
@@ -129,7 +133,7 @@ export default function Rules() {
       {showForm && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
-            <h3 className="font-semibold text-gray-800 mb-4">Create Matching Rule</h3>
+            <h3 className="font-semibold text-gray-800 mb-4">{editingId ? 'Edit' : 'Create'} Matching Rule</h3>
             <div className="space-y-3">
               <div>
                 <label className="text-xs text-gray-500 block mb-1">Rule Name</label>
@@ -170,8 +174,8 @@ export default function Rules() {
               </div>
             </div>
             <div className="flex gap-3 mt-4">
-              <button onClick={() => setShowForm(false)} className="btn-ghost flex-1">Cancel</button>
-              <button onClick={handleCreate} disabled={!form.name || form.match_fields.length === 0} className="btn-primary flex-1">Create Rule</button>
+              <button onClick={closeForm} className="btn-ghost flex-1">Cancel</button>
+              <button onClick={handleSave} disabled={!form.name || form.match_fields.length === 0} className="btn-primary flex-1">{editingId ? 'Save Changes' : 'Create Rule'}</button>
             </div>
           </div>
         </div>
