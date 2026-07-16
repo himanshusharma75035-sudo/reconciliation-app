@@ -532,8 +532,9 @@ def _trigger_bbps_upload(config, current_user, db):
     handler = upload_internal if config.side == "internal" else upload_bank
 
     try:
+        # routes.bbps upload handlers' auth param is `user=`, not `current_user=`.
         result = asyncio.get_event_loop().run_until_complete(
-            handler(file=fake_file, db=db, current_user=current_user)
+            handler(file=fake_file, db=db, user=current_user)
         )
     except Exception as e:
         config.last_triggered_at   = datetime.datetime.utcnow()
@@ -585,8 +586,10 @@ def _trigger_evalue_upload(config, current_user, db):
 
     fake_file = _FileObj()
     try:
+        # routes.evalue.upload_internal's auth param is `user=`, not `current_user=` —
+        # passing current_user= raised TypeError, so E-Value auto-upload always failed.
         result = asyncio.get_event_loop().run_until_complete(
-            upload_internal(file=fake_file, db=db, current_user=current_user)
+            upload_internal(file=fake_file, db=db, user=current_user)
         )
     except Exception as e:
         config.last_triggered_at   = datetime.datetime.utcnow()
