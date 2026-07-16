@@ -1406,7 +1406,48 @@ def get_mismatches(
             "internal_csp_code": (getattr(i, "csp_code", None) if i else None),
             "internal_csp_name": (getattr(i, "csp_name", None) if i else None),
             "delta":             round(bank_amt - int_amt, 2),
+            "core":              True,
+            "product":           (b.partner or "").upper(),
         })
+
+    # ── Product mismatches (E-Value wrong_amount, BBPS amount_mismatch) — shown here so
+    # the Mismatches page is cross-product, not core-ledger only. READ-ONLY here: each is
+    # resolved in its own product window (the resolve endpoint below stays core-only).
+    # Wrapped so a schema surprise can never break the core mismatches view.
+    try:
+        from models.database import EvalueBankTxn, EvalueWalletLoad, BbpsBankTxn, BbpsInternal
+        _evb = db.query(EvalueBankTxn).filter(EvalueBankTxn.recon_status == "wrong_amount")
+        if date_from: _evb = _evb.filter(EvalueBankTxn.txn_date >= date_from)
+        if date_to:   _evb = _evb.filter(EvalueBankTxn.txn_date <= date_to)
+        _evb = _evb.all()
+        _evm = [b.match_id for b in _evb if b.match_id]
+        _evl = {l.match_id: l for l in db.query(EvalueWalletLoad).filter(EvalueWalletLoad.match_id.in_(_evm)).all()} if _evm else {}
+        for b in _evb:
+            l = _evl.get(b.match_id); ba = float(b.amount or 0); la = float((l.amount if l else 0) or 0)
+            result.append({"match_id": b.match_id, "partner": "evalue", "product": "E-Value",
+                "core": False, "resolve_in": "/evalue", "recon_date": b.txn_date, "bank_txn_id": b.id,
+                "bank_eko_tid": b.utr or "—", "bank_tracking": b.ref_no or "—", "bank_amount": round(ba, 2),
+                "bank_description": b.description, "internal_txn_id": (l.id if l else None),
+                "internal_eko_tid": (l.eko_trxn_id if l else "—"), "internal_amount": round(la, 2),
+                "internal_csp_code": (l.csp_code if l else None), "internal_csp_name": (l.merchant_name if l else None),
+                "delta": round(ba - la, 2)})
+        _bbb = db.query(BbpsBankTxn).filter(BbpsBankTxn.recon_status == "amount_mismatch")
+        if date_from: _bbb = _bbb.filter(BbpsBankTxn.transaction_date >= date_from)
+        if date_to:   _bbb = _bbb.filter(BbpsBankTxn.transaction_date <= date_to)
+        _bbb = _bbb.all()
+        _bbm = [b.match_id for b in _bbb if b.match_id]
+        _bbi = {i.match_id: i for i in db.query(BbpsInternal).filter(BbpsInternal.match_id.in_(_bbm)).all()} if _bbm else {}
+        for b in _bbb:
+            i = _bbi.get(b.match_id); ba = float(b.amount or 0); ia = float((i.amount if i else 0) or 0)
+            result.append({"match_id": b.match_id, "partner": "bbps", "product": "BBPS",
+                "core": False, "resolve_in": "/bbps", "recon_date": b.transaction_date, "bank_txn_id": b.id,
+                "bank_eko_tid": (b.provider or "—"), "bank_tracking": "—", "bank_amount": round(ba, 2),
+                "bank_description": None, "internal_txn_id": (i.id if i else None),
+                "internal_eko_tid": (i.eko_trxn_id if i else "—"), "internal_amount": round(ia, 2),
+                "internal_csp_code": (i.csp_code if i else None), "internal_csp_name": (i.merchant_name if i else None),
+                "delta": round(ba - ia, 2)})
+    except Exception:
+        pass
 
     return sorted(result, key=lambda x: (x["recon_date"] or ""), reverse=True)
 

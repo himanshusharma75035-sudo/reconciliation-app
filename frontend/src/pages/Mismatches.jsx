@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { AlertOctagon, CheckCircle, Search, TrendingDown } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
@@ -54,7 +55,8 @@ export default function Mismatches() {
     <div>
       <h1 className="text-xl font-bold text-gray-800 mb-1">Amount Mismatches</h1>
       <p className="text-sm text-gray-500 mb-5">
-        Pairs where IDs matched but amounts differ. Review and accept or escalate.
+        Pairs where IDs matched but amounts differ — across <b>every product</b>. Core-ledger
+        pairs can be accepted here; E-Value / BBPS pairs are resolved in their own window.
       </p>
 
       {/* Filter bar */}
@@ -120,7 +122,7 @@ export default function Mismatches() {
               <thead className="bg-gray-50 border-b border-gray-100">
                 <tr>
                   <th className="table-th">Match ID</th>
-                  <th className="table-th">Partner</th>
+                  <th className="table-th">Product</th>
                   <th className="table-th">Date</th>
                   <th className="table-th">Eko TID</th>
                   <th className="table-th text-right text-blue-600">Bank Amt</th>
@@ -128,14 +130,18 @@ export default function Mismatches() {
                   <th className="table-th text-right text-red-500">Delta</th>
                   <th className="table-th">Bank Description</th>
                   <th className="table-th">Internal CSP</th>
-                  {canResolve && <th className="table-th">Action</th>}
+                  <th className="table-th">Action</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map(row => (
                   <tr key={row.bank_txn_id} className="hover:bg-orange-50/30 border-b border-gray-50">
                     <td className="table-td font-mono text-xs text-primary">{row.match_id}</td>
-                    <td className="table-td capitalize">{row.partner}</td>
+                    <td className="table-td">
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${row.core ? 'bg-gray-100 text-gray-600' : 'bg-purple-50 text-purple-700'}`}>
+                        {row.product || row.partner}
+                      </span>
+                    </td>
                     <td className="table-td font-mono text-xs">{row.recon_date}</td>
                     <td className="table-td font-mono text-xs">
                       <span title={`Bank: ${row.bank_eko_tid}\nInternal: ${row.internal_eko_tid}`}>
@@ -164,8 +170,12 @@ export default function Mismatches() {
                           </span>
                         : <span className="text-gray-300">—</span>}
                     </td>
-                    {canResolve && (
-                      <td className="table-td">
+                    <td className="table-td">
+                      {!row.core ? (
+                        <Link to={row.resolve_in || '#'} className="text-xs text-primary hover:underline whitespace-nowrap">
+                          Resolve in {row.product} →
+                        </Link>
+                      ) : canResolve ? (
                         <button
                           onClick={() => resolve(row.bank_txn_id, row.match_id)}
                           disabled={resolving === row.bank_txn_id}
@@ -173,8 +183,8 @@ export default function Mismatches() {
                           <CheckCircle size={12} />
                           {resolving === row.bank_txn_id ? 'Resolving…' : 'Accept'}
                         </button>
-                      </td>
-                    )}
+                      ) : <span className="text-gray-300 text-xs">—</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
