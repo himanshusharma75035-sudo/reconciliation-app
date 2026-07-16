@@ -244,6 +244,7 @@ export default function Analytics({ standalone = false }) {
                   <th className="text-right py-2 px-3">Matched</th>
                   <th className="text-right py-2 px-3">Unmatched</th>
                   <th className="text-right py-2 px-3">Mismatch</th>
+                  <th className="text-right py-2 px-3" title="Rows that need no reconciliation — failed, duplicate, fees, reversals, bank debits. Hover a value for the reason breakdown. Excluded from the match rate.">Other</th>
                   <th className="text-right py-2 px-3">Match rate</th>
                   <th className="text-right py-2 px-4">Matched volume</th>
                 </tr></thead>
@@ -261,6 +262,7 @@ export default function Analytics({ standalone = false }) {
                           <td className="py-2 px-3 text-right tabular-nums text-emerald-600 font-bold">{g.matched.toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-red-500 font-semibold">{g.unmatched.toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-amber-500">{g.mismatch.toLocaleString('en-IN')}</td>
+                          <td className="py-2 px-3 text-right tabular-nums text-gray-400" title={Object.entries(g.other_statuses || {}).map(([k, v]) => `${k}: ${Number(v).toLocaleString('en-IN')}`).join(' · ') || 'no non-reconcilable rows'}>{Number(g.other || 0).toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right tabular-nums font-bold" style={{ color: g.match_rate >= 85 ? '#059669' : g.match_rate >= 50 ? '#d97706' : '#dc2626' }}>{g.match_rate}%</td>
                           <td className="py-2 px-4 text-right tabular-nums font-semibold text-gray-700">{cr(g.matched_volume)}</td>
                         </tr>
@@ -273,6 +275,7 @@ export default function Analytics({ standalone = false }) {
                             <td className="py-1.5 px-3 text-right tabular-nums text-emerald-600">{p.matched.toLocaleString('en-IN')}</td>
                             <td className="py-1.5 px-3 text-right tabular-nums text-red-400">{p.unmatched.toLocaleString('en-IN')}</td>
                             <td className="py-1.5 px-3 text-right tabular-nums text-amber-400">{p.mismatch.toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-gray-400" title={Object.entries(p.other_statuses || {}).map(([k, v]) => `${k}: ${Number(v).toLocaleString('en-IN')}`).join(' · ') || 'no non-reconcilable rows'}>{Number(p.other || 0).toLocaleString('en-IN')}</td>
                             <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: p.match_rate >= 85 ? '#059669' : p.match_rate >= 50 ? '#d97706' : '#dc2626' }}>{p.match_rate}%</td>
                             <td className="py-1.5 px-4 text-right tabular-nums text-gray-500">{cr(p.matched_volume)}</td>
                           </tr>
@@ -280,7 +283,7 @@ export default function Analytics({ standalone = false }) {
                       </React.Fragment>
                     )
                   })}
-                  {byGroup.length === 0 && <tr><td colSpan="8" className="py-6 text-center text-gray-400 italic">No data for this range.</td></tr>}
+                  {byGroup.length === 0 && <tr><td colSpan="9" className="py-6 text-center text-gray-400 italic">No data for this range.</td></tr>}
                 </tbody>
               </table>
             </div>

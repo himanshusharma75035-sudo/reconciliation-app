@@ -20,6 +20,7 @@ logger = logging.getLogger("eko_recon.analytics")
 # ── Status → bucket mapping (lower-cased match) ───────────────────────────────
 _MATCHED = {
     "matched", "manual_matched", "interbank_matched",          # core ledger
+    "internal_matched",                                        # core: internal self-match (NEFT D+1 / internal pass) — a real match
     "matched_online", "matched_cash", "matched_manual",        # e-value
     "sbi_matched",                                             # (label form)
     "failed_refunded",                                        # bbps: Failed+Refunded pair IS reconciled (bbps_engine.RECON_OK)
@@ -49,6 +50,24 @@ def _bucket(status: str) -> str:
 def _blank():
     return {"matched": 0, "unmatched": 0, "mismatch": 0, "other": 0,
             "matched_volume": 0.0, "open_volume": 0.0}
+
+
+# Friendly label for a raw recon_status (used to explain the 'other' bucket, e.g.
+# duplicate / failed / bank_debit / transaction_fee / reversal — rows that don't
+# require reconciliation and so aren't matched OR open).
+_OTHER_LABELS = {
+    "duplicate": "Duplicate", "failed": "Failed", "0": "Failed",
+    "reversal_matched": "Reversal (matched)", "reversal": "Reversal",
+    "bank_debit": "Bank debit", "transaction_fee": "Fee", "fee_matched": "Fee (matched)",
+    "fund_transfer": "Fund transfer", "settlement_credit": "Settlement credit",
+    "src_assigned": "Source-assigned", "twice_credit": "Twice credit",
+    "under_review": "Under review", "ignore": "Ignored",
+}
+
+
+def _status_label(s):
+    key = str(s or "").strip().lower()
+    return _OTHER_LABELS.get(key, (str(s or "").replace("_", " ").strip().title() or "Other"))
 
 
 # Product-group display names (the PartnerConfig.product value → friendly label).
@@ -198,6 +217,9 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         elif b == "unmatched":
             bag["open_volume"] = round(bag["open_volume"] + amt, 2)
 
+    # status-composition of the 'other' bucket, per group / product / overall — so the
+    # dashboard can show WHY those rows aren't matched or open (Failed, Duplicate, Fee, …).
+    other_g, other_p, other_t = {}, {}, {}
     for prod, sd, d, status, cnt, amt in recs:
         products.add(prod)
         if prod not in prod_meta:
@@ -210,12 +232,18 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         # A matched / amount-mismatch PAIR is ONE transaction represented by two rows —
         # a bank leg and an internal leg. Count it ONCE (the bank leg) in every headline
         # figure so counts and volume aren't doubled. Unmatched legs are distinct orphans
-        # (no counterpart), so both sides are kept.
-        if b in ("matched", "mismatch") and sd == "internal":
+        # (no counterpart), so both sides are kept. EXCEPT internal_matched, which is an
+        # internal self-match with NO bank leg — dropping it would zero it out, so keep it.
+        if b in ("matched", "mismatch") and sd == "internal" and str(status).lower() != "internal_matched":
             continue
         for bag in (totals, by_product.setdefault(prod, _blank()),
                     by_group.setdefault(g, _blank()), daily_map.setdefault(d, _blank())):
             _apply(bag, b, cnt, amt)
+        if b == "other":
+            lbl = _status_label(status)
+            other_t[lbl] = other_t.get(lbl, 0) + cnt
+            other_g.setdefault(g, {})[lbl] = other_g.setdefault(g, {}).get(lbl, 0) + cnt
+            other_p.setdefault(prod, {})[lbl] = other_p.setdefault(prod, {}).get(lbl, 0) + cnt
 
     def _rate(bag):
         m = bag["matched"]; denom = m + bag["unmatched"] + bag["mismatch"]
@@ -226,17 +254,20 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
 
     totals["transactions"] = _total(totals)
     totals["match_rate"] = _rate(totals)
+    totals["other_statuses"] = other_t
 
     by_product_list = sorted(
         ({"product": p, "label": prod_meta[p][2],
           "group": prod_meta[p][0], "group_label": prod_meta[p][1],
-          **v, "transactions": _total(v), "match_rate": _rate(v)}
+          **v, "transactions": _total(v), "match_rate": _rate(v),
+          "other_statuses": other_p.get(p, {})}
          for p, v in by_product.items()),
         key=lambda x: (x["group_label"], -x["transactions"]))
 
     by_group_list = sorted(
         ({"group": g, "label": group_meta[g], **v,
-          "transactions": _total(v), "match_rate": _rate(v)}
+          "transactions": _total(v), "match_rate": _rate(v),
+          "other_statuses": other_g.get(g, {})}
          for g, v in by_group.items()),
         key=lambda x: -x["transactions"])
 
