@@ -1605,16 +1605,11 @@ def sbi_report_options(current_user=Depends(get_current_user)):
     return {"reports": _SBI_REPORTS}
 
 
-@router.get("/report")
-def sbi_report(
-    type: str = Query(..., description="one of the /sbi/report-options ids"),
-    recon_date: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    """Build one report from the SBI report library as a styled Excel workbook."""
+def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=None, current_user=None):
+    """Build one SBI report-library workbook. SHARED by the /sbi/report route AND the
+    scheduled sbi_* reports so both produce the same file. Returns (bytes, filename, tag).
+    current_user is only threaded to get_unified/get_p01_lines, which use it purely as an
+    auth dependency (never in their body), so the scheduler can pass None."""
     t = (type or "").lower()
     if t not in {r["id"] for r in _SBI_REPORTS}:
         raise HTTPException(status_code=400, detail="Unknown report type — see /sbi/report-options")
@@ -1815,14 +1810,26 @@ def sbi_report(
             _sheet(w, "Manual Matches", rows,
                    ["recon_date", "process", "match_key", "counterpart_ref", "remark", "by", "at"])
 
-    output.seek(0)
-    fname = f"sbi_{t}_{tag}.xlsx"
+    return output.getvalue(), f"sbi_{t}_{tag}.xlsx", str(tag)
+
+
+@router.get("/report")
+def sbi_report(
+    type: str = Query(..., description="one of the /sbi/report-options ids"),
+    recon_date: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Build one report from the SBI report library as a styled Excel workbook."""
+    data, fname, tag = build_sbi_report_xlsx(db, type, recon_date, date_from, date_to, current_user)
     return StreamingResponse(
-        output,
+        io.BytesIO(data),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={
             "Content-Disposition": f'attachment; filename="{fname}"',
-            "X-Recon-Date": str(tag),
+            "X-Recon-Date": tag,
             "Access-Control-Expose-Headers": "X-Recon-Date",
         },
     )

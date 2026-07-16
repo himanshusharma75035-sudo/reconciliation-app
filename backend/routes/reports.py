@@ -529,19 +529,11 @@ def export_matched_pairs(
     )
 
 
-@router.get("/eod-summary/export")
-def export_eod_summary(
-    partner: str,
-    recon_date: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_permission("reports"))
-):
-    """
-    EOD reconciliation summary — one Excel file with 3 sheets:
-    1. Summary   — headline numbers (match rate, open items, aging)
-    2. Open Items — all unmatched + amount_mismatch rows
-    3. SRC Breakdown — count per SRC code
-    """
+def build_eod_summary_xlsx(db, partner, recon_date):
+    """The rich 3-sheet EOD summary workbook (Summary / Open Items / SRC Breakdown).
+    SHARED by the on-demand /eod-summary/export route AND the scheduled 'eod' report so
+    both produce the SAME rich workbook (was: the scheduled one emitted a plain grid).
+    partner falsy → all partners. Returns (bytes, filename)."""
     import datetime, openpyxl
     from openpyxl.styles import PatternFill, Font, Alignment
     from openpyxl.utils import get_column_letter
@@ -553,11 +545,13 @@ def export_eod_summary(
     except Exception:
         days_open = None
 
-    all_txns = db.query(Transaction).filter(
-        Transaction.partner.in_(_partner_slugs(partner) or [partner]),
+    q = db.query(Transaction).filter(
         Transaction.recon_date == recon_date,
-        Transaction.row_type == "txn"
-    ).all()
+        Transaction.row_type == "txn",
+    )
+    if partner:
+        q = q.filter(Transaction.partner.in_(_partner_slugs(partner) or [partner]))
+    all_txns = q.all()
 
     matched        = [t for t in all_txns if t.recon_status in ("matched", "manual_matched")]
     unmatched      = [t for t in all_txns if t.recon_status == "unmatched"]
@@ -584,7 +578,7 @@ def export_eod_summary(
     ws1.column_dimensions["B"].width = 20
 
     summary_rows = [
-        ("Partner",                  partner.upper()),
+        ("Partner",                  (partner or "ALL").upper()),
         ("Recon Date",               recon_date),
         ("Days Open",                days_open if days_open is not None else "—"),
         ("Generated At",             str(today)),
@@ -640,11 +634,20 @@ def export_eod_summary(
     ws3.column_dimensions["B"].width = 10
 
     wb.save(output)
-    output.seek(0)
+    return output.getvalue(), f"eod_summary_{partner or 'all'}_{recon_date}.xlsx"
 
-    fname = f"eod_summary_{partner}_{recon_date}.xlsx"
+
+@router.get("/eod-summary/export")
+def export_eod_summary(
+    partner: str,
+    recon_date: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("reports"))
+):
+    """EOD reconciliation summary — 3-sheet Excel (Summary / Open Items / SRC Breakdown)."""
+    data, fname = build_eod_summary_xlsx(db, partner, recon_date)
     return StreamingResponse(
-        output,
+        io.BytesIO(data),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={fname}"}
     )

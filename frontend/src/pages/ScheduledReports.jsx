@@ -16,6 +16,9 @@ const REPORT_TYPES = [
   { value: 'bbps_summary',      label: 'BBPS Summary'       },
   { value: 'bbps_exceptions',   label: 'BBPS Exceptions'    },
   { value: 'bbps_unmatched',    label: 'BBPS Unmatched'     },
+  { value: 'sbi_daily_pack',    label: 'SBI Kiosk — Daily Pack'   },
+  { value: 'sbi_summary',       label: 'SBI Kiosk — MIS Summary'  },
+  { value: 'sbi_exceptions',    label: 'SBI Kiosk — Exceptions'   },
   { value: 'funds_position',    label: 'Funds Position (EOD balances)' },
 ]
 

@@ -33,6 +33,9 @@ REPORT_LABELS = {
     "bbps_summary":       "BBPS Summary",
     "bbps_exceptions":    "BBPS Exceptions",
     "bbps_unmatched":     "BBPS Unmatched",
+    "sbi_daily_pack":     "SBI Kiosk Daily Pack",
+    "sbi_summary":        "SBI Kiosk MIS Summary",
+    "sbi_exceptions":     "SBI Kiosk Exceptions",
     "funds_position":     "Funds Position",
 }
 
@@ -224,6 +227,17 @@ def _generate_report(report_type: str, filters: dict, date_range: str, db) -> tu
     if report_type.startswith("bbps_"):
         return _generate_bbps_report(report_type, filters, from_date, to_date, db)
 
+    # ── SBI Kiosk scheduled reports (own process tables) ──────────────────────
+    # Shares the report-library builder with the on-demand /sbi/report route. The SBI
+    # type is the suffix (sbi_daily_pack -> daily_pack); date-scoped reports use to_date,
+    # range-scoped use from_date..to_date (the builder picks by the report's scope).
+    if report_type.startswith("sbi_"):
+        from routes.sbi_kiosk import build_sbi_report_xlsx
+        data, fname, _tag = build_sbi_report_xlsx(
+            db, report_type[len("sbi_"):], recon_date=to_date,
+            date_from=from_date, date_to=to_date)
+        return data, fname
+
     # ── Funds Position (EOD) — director/CFO daily balance email ───────────────
     if report_type == "funds_position":
         import io as _io
@@ -249,6 +263,13 @@ def _generate_report(report_type: str, filters: dict, date_range: str, db) -> tu
                     cell.font = XFont(color="FFFFFF", bold=True)
         out.seek(0)
         return out.read(), f"funds_position_{d}.xlsx"
+
+    # ── EOD summary — the rich 3-sheet workbook, shared with the on-demand export
+    # (previously the scheduled 'eod' emitted only a plain per-partner grid). A daily EOD
+    # is single-date: use the end of the resolved range; partner from filters (falsy => all).
+    if report_type == "eod":
+        from routes.reports import build_eod_summary_xlsx
+        return build_eod_summary_xlsx(db, filters.get("partner"), to_date)
 
     partner   = filters.get("partner") or None
     side      = filters.get("side")    or None
