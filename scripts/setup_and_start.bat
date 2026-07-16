@@ -8,7 +8,7 @@ echo  ==========================================
 echo.
 
 :: Get the directory of this batch file
-set "APP_DIR=%~dp0"
+set "APP_DIR=%~dp0..\"
 set "BACKEND_DIR=%APP_DIR%backend"
 set "FRONTEND_DIR=%APP_DIR%frontend"
 

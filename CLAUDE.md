@@ -32,7 +32,7 @@ npm run dev            # http://localhost:3000 ; Vite proxies /api → :8000
 npm run build          # production build into frontend/dist (CI gate; backend serves this in prod)
 ```
 
-**Both at once:** `./start.sh` (macOS/Linux) or `start.bat` (Windows); `start_backend.bat` for backend only. **Docker:** `docker compose up --build` builds the frontend and serves the whole app from one container at `http://localhost:8000`.
+**Both at once:** `./scripts/start.sh` (macOS/Linux) or `scripts\start.bat` (Windows); `scripts\start_backend.bat` for backend only (all launch scripts live in `scripts/`). **Docker:** `docker compose up --build` builds the frontend and serves the whole app from one container at `http://localhost:8000`.
 
 CI (`.github/workflows/ci.yml`) is the bar to clear: backend `compileall` + `pytest tests/ -q`, frontend `npm run build`. Note the test suite is currently thin (E-Value engine only) — most logic is unguarded, which is exactly why the behavior contract matters.
 

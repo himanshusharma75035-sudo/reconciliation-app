@@ -1,5 +1,6 @@
 #!/bin/bash
 set -e
+cd "$(dirname "$0")/.." || exit 1
 echo "======================================"
 echo "  EKO Reconciliation App - Setup"
 echo "======================================"
@@ -21,4 +22,4 @@ cd ..
 echo ""
 echo "✅ Setup complete!"
 echo ""
-echo "Run ./start.sh to launch the app"
+echo "Run ./scripts/start.sh to launch the app"
