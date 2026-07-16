@@ -100,6 +100,94 @@ def _audit_simple(db, user, action, detail):
                     entity_type="evalue_account", detail=json.dumps(detail, default=str)))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SHARED INGEST CORE — the SINGLE copy of the replace/upsert logic, used by BOTH
+#  the interactive upload routes AND the auto-pickup helpers, so the two ingest
+#  paths can never diverge again (behavior-contract item 10). Neither commits nor
+#  audits — the caller does.
+# ══════════════════════════════════════════════════════════════════════════════
+def _replace_bank_txns(db, acct, bank_name, reco_acc_no, rows, filename):
+    """Per-date, preserve-matched replace + insert of E-Value bank rows. Refuses (422)
+    if no row carries a transaction date instead of full-wiping the account. Keeps rows
+    with a preserved disposition (EVX-/EVIBT-/EVMAN-/src_assigned) and skips re-inserting
+    the file's copy of a kept row (Counter over a strong signature). Returns inserted."""
+    file_dates = {r["txn_date"] for r in rows if r.get("txn_date")}
+    if not file_dates:
+        raise HTTPException(
+            422,
+            f"[FORMAT] Parsed {len(rows)} rows from '{filename}' but none had a readable "
+            f"transaction date, so this file cannot safely replace prior data for {reco_acc_no}. "
+            f"Check the statement format/columns and re-upload.",
+        )
+    _PRESERVED_PREFIXES = ("EVX-", "EVIBT-", "EVMAN-")
+    def _preserved(b):
+        return b.recon_status == "src_assigned" or (b.match_id or "").startswith(_PRESERVED_PREFIXES)
+    existing = db.query(EvalueBankTxn).filter(
+        EvalueBankTxn.reco_acc_no == reco_acc_no,
+        EvalueBankTxn.txn_date.in_(file_dates)).all()
+    kept = [b for b in existing if _preserved(b)]
+    for b in existing:
+        if not _preserved(b):
+            db.delete(b)
+    from collections import Counter as _Counter
+    def _norm(s):
+        return (s or "").strip()
+    def _sig(txn_date, amount, dr_cr, ref_no, utr, atm_ref, description):
+        return (txn_date or "", round(float(amount or 0), 2), _norm(dr_cr),
+                _norm(ref_no), _norm(utr), _norm(atm_ref), _norm(description))
+    kept_sigs = _Counter(_sig(b.txn_date, b.amount, b.dr_cr, b.ref_no, b.utr, b.atm_ref, b.description) for b in kept)
+    upload_date = _TODAY()
+    inserted = 0
+    for r in rows:
+        _s = _sig(r["txn_date"], r["amount"], r["dr_cr"], r.get("ref_no"), r.get("utr"),
+                  r.get("atm_ref"), r.get("description"))
+        if kept_sigs.get(_s, 0) > 0:
+            kept_sigs[_s] -= 1
+            continue
+        db.add(EvalueBankTxn(
+            id=generate_id(), upload_date=upload_date, bank_name=bank_name.strip().upper(),
+            reco_acc_no=reco_acc_no, account_number=(acct.account_number if acct else ""),
+            txn_date=r["txn_date"], value_date=r["value_date"], description=r["description"],
+            dr_cr=r["dr_cr"], amount=r["amount"], balance=r.get("balance"),
+            ref_no=r.get("ref_no"), utr=r.get("utr"), atm_ref=r.get("atm_ref"),
+            branch=r.get("branch"), mobile=r.get("mobile"), channel=r.get("channel"),
+        ))
+        inserted += 1
+    return inserted
+
+
+def _upsert_wallet_loads(db, loads):
+    """Upsert-per-eko_trxn_id insert of E-Value wallet loads. Rows with a blank
+    eko_trxn_id are appended (they cannot be upserted) — both callers SHA-256-guard the
+    file first, so a re-applied file can't double-append them. Returns (inserted, replaced)."""
+    upload_date = _TODAY()
+    inserted, replaced = 0, 0
+    for l in loads:
+        eko = l.get("eko_trxn_id") or ""
+        if eko:
+            ex = db.query(EvalueWalletLoad).filter(EvalueWalletLoad.eko_trxn_id == eko).first()
+            if ex:
+                db.delete(ex); replaced += 1
+        db.add(EvalueWalletLoad(
+            id=generate_id(), upload_date=upload_date,
+            reco_acc_no=l["reco_acc_no"], eko_trxn_id=eko,
+            account_trxn_id=l.get("account_trxn_id"), csp_code=l.get("csp_code"),
+            merchant_name=l.get("merchant_name"), cell_number=l.get("cell_number"),
+            amount=l.get("amount", 0), transaction_date=l.get("transaction_date"),
+            value_date=l.get("value_date"), status=l.get("status"),
+            typename=l.get("typename"), dr_cr=l.get("dr_cr"), mode=l.get("mode"),
+            load_mode=EV.classify_load_mode(l),
+            utr_number=l.get("utr_number"), tid_chequeno=l.get("tid_chequeno"),
+            bank_ref=l.get("bank_ref"),
+            cdm_txn_number=l.get("cdm_txn_number"), cdm_branch=l.get("cdm_branch"),
+            branch_name=l.get("branch_name"), branch_code=l.get("branch_code"),
+            remarks=l.get("remarks"), comments=l.get("comments"),
+            provider_type=l.get("provider_type"),
+        ))
+        inserted += 1
+    return inserted, replaced
+
+
 # ─── Upload internal dump ─────────────────────────────────────────────────────
 @router.post("/upload-internal")
 async def upload_internal(
@@ -122,34 +210,7 @@ async def upload_internal(
     if not loads:
         raise HTTPException(400, "No wallet-load rows found in the dump.")
 
-    upload_date = _TODAY()
-    inserted, replaced = 0, 0
-    for l in loads:
-        eko = l.get("eko_trxn_id") or ""
-        existing = None
-        if eko:
-            existing = db.query(EvalueWalletLoad).filter(
-                EvalueWalletLoad.eko_trxn_id == eko).first()
-        if existing:
-            db.delete(existing)
-            replaced += 1
-        db.add(EvalueWalletLoad(
-            id=generate_id(), upload_date=upload_date,
-            reco_acc_no=l["reco_acc_no"], eko_trxn_id=eko,
-            account_trxn_id=l.get("account_trxn_id"), csp_code=l.get("csp_code"),
-            merchant_name=l.get("merchant_name"), cell_number=l.get("cell_number"),
-            amount=l.get("amount", 0), transaction_date=l.get("transaction_date"),
-            value_date=l.get("value_date"), status=l.get("status"),
-            typename=l.get("typename"), dr_cr=l.get("dr_cr"), mode=l.get("mode"),
-            load_mode=EV.classify_load_mode(l),
-            utr_number=l.get("utr_number"), tid_chequeno=l.get("tid_chequeno"),
-            bank_ref=l.get("bank_ref"),
-            cdm_txn_number=l.get("cdm_txn_number"), cdm_branch=l.get("cdm_branch"),
-            branch_name=l.get("branch_name"), branch_code=l.get("branch_code"),
-            remarks=l.get("remarks"), comments=l.get("comments"),
-            provider_type=l.get("provider_type"),
-        ))
-        inserted += 1
+    inserted, replaced = _upsert_wallet_loads(db, loads)
     db.add(AuditLog(id=generate_id(), user_id=getattr(user, "id", None),
                     username=getattr(user, "username", None), action="evalue_upload_internal",
                     action_type="human", entity_type="evalue_wallet_load",
@@ -187,74 +248,8 @@ async def upload_bank(
     if not rows:
         raise HTTPException(400, "No transactions found in the statement.")
 
-    # Replace prior bank txns for this account, but ONLY for the dates this file
-    # actually covers — so incremental daily uploads ACCUMULATE instead of wiping
-    # history, while a re-uploaded/corrected statement still supersedes its own
-    # dates. The old full-account wipe deleted every prior day on each upload, so
-    # operators uploading single-day files silently lost all earlier days from the
-    # recon tables (the funds snapshots survived via per-date upsert, which is why
-    # the EOD-balance email still showed amounts the recon report had lost).
-    file_dates = {r["txn_date"] for r in rows if r.get("txn_date")}
-    if not file_dates:
-        # Rows parsed but NONE carry a transaction date — that is a parse failure, not a
-        # real statement. The old code full-wiped the account here "to avoid dupes",
-        # which silently destroyed every prior day's rows on one bad parse (this is how
-        # the 8th's data vanished). Refuse instead: never delete history we can't key.
-        raise HTTPException(
-            422,
-            f"[FORMAT] Parsed {len(rows)} rows from '{file.filename}' but none had a readable "
-            f"transaction date, so this file cannot safely replace prior data for {reco_acc_no}. "
-            f"Check the statement format/columns and re-upload.",
-        )
-    # Replace only the dates this file covers (incremental daily uploads accumulate) —
-    # but NEVER delete a row carrying a preserved disposition: a cross-account match
-    # (EVX-), an interbank link into the core ledger (EVIBT-), a manual match (EVMAN-)
-    # or an SRC tag. Deleting the bank side of one of those orphans its counterpart —
-    # which stays marked matched (a load in another account, a core-ledger Transaction,
-    # or a human decision) — and auto-recon cannot re-pair it. Keep those; replace only
-    # the ordinary (auto-matched / unmatched) rows. Parity with _run_one's _PRESERVED
-    # filter, which likewise never re-feeds these to the matcher.
-    _PRESERVED_PREFIXES = ("EVX-", "EVIBT-", "EVMAN-")
-    def _preserved(b):
-        return b.recon_status == "src_assigned" or (b.match_id or "").startswith(_PRESERVED_PREFIXES)
-    existing = db.query(EvalueBankTxn).filter(
-        EvalueBankTxn.reco_acc_no == reco_acc_no,
-        EvalueBankTxn.txn_date.in_(file_dates)).all()
-    kept = [b for b in existing if _preserved(b)]
-    for b in existing:
-        if not _preserved(b):
-            db.delete(b)
-    # A surviving preserved row already represents its bank txn; skip re-inserting the
-    # file's copy of it so the re-upload doesn't create a duplicate bank row. Skip at
-    # most ONE file row per preserved row of the same signature (Counter, not set) — so
-    # a genuinely-additional same-day/same-amount txn is still ingested rather than
-    # swallowed. The signature includes atm_ref AND description because banks often leave
-    # ref_no/utr blank on cash/CDM credits, and those two fields are then the ONLY thing
-    # distinguishing two same-day same-amount deposits — omitting them could drop a real
-    # credit (or duplicate a matched row) on collision. Only rows identical across ALL of
-    # these (truly indistinguishable) collapse, which is the correct behaviour.
-    from collections import Counter as _Counter
-    def _norm(s):
-        return (s or "").strip()
-    def _sig(txn_date, amount, dr_cr, ref_no, utr, atm_ref, description):
-        return (txn_date or "", round(float(amount or 0), 2), _norm(dr_cr),
-                _norm(ref_no), _norm(utr), _norm(atm_ref), _norm(description))
-    kept_sigs = _Counter(_sig(b.txn_date, b.amount, b.dr_cr, b.ref_no, b.utr, b.atm_ref, b.description) for b in kept)
-    upload_date = _TODAY()
-    for r in rows:
-        _s = _sig(r["txn_date"], r["amount"], r["dr_cr"], r.get("ref_no"), r.get("utr"),
-                  r.get("atm_ref"), r.get("description"))
-        if kept_sigs.get(_s, 0) > 0:
-            kept_sigs[_s] -= 1
-            continue
-        db.add(EvalueBankTxn(
-            id=generate_id(), upload_date=upload_date, bank_name=bank_name.strip().upper(),
-            reco_acc_no=reco_acc_no, account_number=acct.account_number,
-            txn_date=r["txn_date"], value_date=r["value_date"], description=r["description"],
-            dr_cr=r["dr_cr"], amount=r["amount"], balance=r.get("balance"),
-            ref_no=r.get("ref_no"), utr=r.get("utr"), atm_ref=r.get("atm_ref"),
-            branch=r.get("branch"), mobile=r.get("mobile"), channel=r.get("channel"),
-        ))
+    # Per-date, preserve-matched replace — the SINGLE shared copy (see _replace_bank_txns).
+    _replace_bank_txns(db, acct, bank_name, reco_acc_no, rows, file.filename)
     db.add(AuditLog(id=generate_id(), user_id=getattr(user, "id", None),
                     username=getattr(user, "username", None), action="evalue_upload_bank",
                     action_type="human", entity_type="evalue_bank_txn",
@@ -1271,31 +1266,18 @@ def recovery_mark(body: RecoveryIn, db: Session = Depends(get_db), user=Depends(
 #  REUSABLE INGEST HELPERS (used by the upload routes AND the auto-upload job)
 # ══════════════════════════════════════════════════════════════════════════════
 def ingest_internal_bytes(raw: bytes, filename: str, db: Session, username=None) -> dict:
-    """Parse + upsert the SMB_BANK_LOADIN internal dump. Returns counts."""
+    """Parse + upsert the SMB_BANK_LOADIN internal dump (shared _upsert_wallet_loads).
+    SHA-256-guards the file first so a folder re-scan can't re-append eko-less rows — a
+    duplicate raises 409, which evalue_auto_pickup catches and records as skipped."""
     loads = EV.parse_internal_dump(raw, filename)
     if not loads:
         return {"rows": 0, "replaced": 0, "accounts": 0}
-    upload_date = _TODAY()
-    inserted, replaced = 0, 0
-    for l in loads:
-        eko = l.get("eko_trxn_id") or ""
-        if eko:
-            ex = db.query(EvalueWalletLoad).filter(EvalueWalletLoad.eko_trxn_id == eko).first()
-            if ex:
-                db.delete(ex); replaced += 1
-        db.add(EvalueWalletLoad(
-            id=generate_id(), upload_date=upload_date, reco_acc_no=l["reco_acc_no"], eko_trxn_id=eko,
-            account_trxn_id=l.get("account_trxn_id"), csp_code=l.get("csp_code"),
-            merchant_name=l.get("merchant_name"), cell_number=l.get("cell_number"),
-            amount=l.get("amount", 0), transaction_date=l.get("transaction_date"),
-            value_date=l.get("value_date"), status=l.get("status"), typename=l.get("typename"),
-            dr_cr=l.get("dr_cr"), mode=l.get("mode"), load_mode=EV.classify_load_mode(l),
-            utr_number=l.get("utr_number"), tid_chequeno=l.get("tid_chequeno"),
-            bank_ref=l.get("bank_ref"),
-            cdm_txn_number=l.get("cdm_txn_number"), cdm_branch=l.get("cdm_branch"),
-            branch_name=l.get("branch_name"), branch_code=l.get("branch_code"),
-            remarks=l.get("remarks"), comments=l.get("comments"), provider_type=l.get("provider_type")))
-        inserted += 1
+    # Guard AFTER the zero-row check so a file that parses to nothing records NO hash and
+    # stays retryable (a pending hash on a success-return would leak and later commit); a
+    # real duplicate still raises 409, caught by evalue_auto_pickup.
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "evalue", "internal", raw, filename, None)
+    inserted, replaced = _upsert_wallet_loads(db, loads)
     db.add(AuditLog(id=generate_id(), username=username, action="evalue_auto_internal",
                     action_type="app", entity_type="evalue_wallet_load",
                     detail=json.dumps({"file": filename, "rows": inserted, "replaced": replaced})))
@@ -1306,21 +1288,19 @@ def ingest_internal_bytes(raw: bytes, filename: str, db: Session, username=None)
 
 def ingest_bank_bytes(raw: bytes, filename: str, bank_name: str, reco_acc_no: str,
                       db: Session, username=None) -> dict:
-    """Parse + replace a bank statement for one account. Returns counts."""
+    """Parse + per-date preserve-matched replace of a bank statement for one account
+    (shared _replace_bank_txns — NOT the old full-account wipe). SHA-256-guards the file
+    first so a folder re-scan skips an already-ingested file; a date-less parse now
+    refuses (422) instead of wiping history. Both are caught by evalue_auto_pickup."""
     acct = db.query(EvalueAccount).filter(EvalueAccount.reco_acc_no == reco_acc_no).first()
     rows = EV.parse_bank_statement(bank_name, raw, filename)
     if not rows:
         return {"rows": 0, "credits": 0}
-    db.query(EvalueBankTxn).filter(EvalueBankTxn.reco_acc_no == reco_acc_no).delete()
-    upload_date = _TODAY()
-    for r in rows:
-        db.add(EvalueBankTxn(
-            id=generate_id(), upload_date=upload_date, bank_name=bank_name.strip().upper(),
-            reco_acc_no=reco_acc_no, account_number=acct.account_number if acct else "",
-            txn_date=r["txn_date"], value_date=r["value_date"], description=r["description"],
-            dr_cr=r["dr_cr"], amount=r["amount"], balance=r.get("balance"), ref_no=r.get("ref_no"),
-            utr=r.get("utr"), atm_ref=r.get("atm_ref"), branch=r.get("branch"),
-            mobile=r.get("mobile"), channel=r.get("channel")))
+    # Guard AFTER the zero-row check so a file that parses to nothing records NO hash and
+    # stays retryable; a real duplicate still raises 409, caught by evalue_auto_pickup.
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "evalue", f"bank:{reco_acc_no}", raw, filename, None)
+    _replace_bank_txns(db, acct, bank_name, reco_acc_no, rows, filename)
     db.add(AuditLog(id=generate_id(), username=username, action="evalue_auto_bank",
                     action_type="app", entity_type="evalue_bank_txn",
                     detail=json.dumps({"bank": bank_name, "account": reco_acc_no,
@@ -1360,6 +1340,13 @@ def evalue_auto_pickup(folder: str, db: Session, username="auto-upload", run: bo
                 else:
                     result["skipped"].append(fn)
         except Exception as e:
+            # A guard 409 (already ingested) or a 422 (date-less parse) lands here — skip
+            # the file, and roll back any pending rows/hash from the failed ingest so a
+            # partial state can't ride the next file's commit.
+            try:
+                db.rollback()
+            except Exception:
+                pass
             result["skipped"].append(f"{fn} (error: {e})")
     if run:
         for reco in sorted(affected):
