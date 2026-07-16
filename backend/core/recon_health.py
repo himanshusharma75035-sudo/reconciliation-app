@@ -17,6 +17,9 @@ caller. Severity ranks: critical > warn > ok; 'unknown' marks a check that error
 """
 import json
 import datetime
+import logging
+
+logger = logging.getLogger("eko_recon.recon_health")
 
 _RANK = {"ok": 0, "unknown": 1, "warn": 2, "critical": 3}
 
@@ -96,13 +99,47 @@ def compute_recon_health(db, days: int = 7) -> dict:
             Transaction.recon_date.like("____-__-__"),   # real dates only, skip 'auto'
             Transaction.recon_date >= cutoff,
         )
-        total = base.count()
+        core_total = base.count()
+        core_open = base.filter(Transaction.recon_status.in_(
+            [ReconStatus.unmatched, ReconStatus.src_assigned])).count()
+        # Assess EACH product separately, not one blended rate — the module products
+        # (E-Value / BBPS / SBI Kiosk) reconcile in their own tables, and lumping them
+        # into a single average lets a break in one hide behind another (e.g. SBI Kiosk's
+        # high-volume structural rate would swamp a core-ledger collapse, or vice-versa).
+        # build_analytics unions the module tables and buckets each product's vocabulary;
+        # its 'unmatched' bucket is the chase-worthy open count (parity with the core
+        # {unmatched, src_assigned}). Core semantics above are left untouched.
+        buckets = []   # (label, total, open) — one per product with data
+        if core_total:
+            buckets.append(("Core ledger", core_total, core_open))
+        try:
+            from core.analytics import build_analytics
+            agg = build_analytics(db, date_from=cutoff)
+            for g in agg.get("by_group", []):
+                if g.get("group") in ("evalue", "bbps", "kiosk"):
+                    t, op = g.get("transactions", 0) or 0, g.get("unmatched", 0) or 0
+                    if t:
+                        buckets.append((g.get("label") or g["group"], t, op))
+        except Exception:
+            logger.warning("recon_health: module aggregation skipped", exc_info=True)
+
+        total = sum(t for _, t, _ in buckets)
+        open_n = sum(o for _, _, o in buckets)
         if total < 50:   # volume guard — don't warn on a handful of rows
             return "ok", f"Too few recent txns to assess ({total})", {"total": total}
-        open_n = base.filter(Transaction.recon_status.in_(
-            [ReconStatus.unmatched, ReconStatus.src_assigned])).count()
         rate = round((total - open_n) / total, 4)
-        detail = {"total": total, "open": open_n, "resolved": total - open_n, "rate": rate}
+        # Per-product rates so the payload shows WHICH product is behind, not just a blend.
+        per = [{"product": lbl, "total": t, "open": o, "rate": round((t - o) / t, 4)}
+               for lbl, t, o in buckets if t]
+        detail = {"total": total, "open": open_n, "resolved": total - open_n,
+                  "rate": rate, "by_product": per}
+        # Warn on the worst single product with enough volume to judge (>=200 rows) —
+        # this catches a one-product break the blended rate would mask. Falls back to the
+        # blended rate when no single product qualifies.
+        low = [p for p in per if p["total"] >= 200 and p["rate"] < _MATCH_RATE_WARN]
+        if low:
+            w = min(low, key=lambda p: p["rate"])
+            return "warn", f"{w['product']} only {round(w['rate'] * 100)}% reconciled ({w['open']} open)", detail
         if rate < _MATCH_RATE_WARN:
             return "warn", f"Only {round(rate * 100)}% of recent txns reconciled ({open_n} open)", detail
         return "ok", f"{round(rate * 100)}% of recent txns reconciled", detail

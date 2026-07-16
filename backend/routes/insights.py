@@ -179,6 +179,22 @@ def escalation(partner: Optional[str] = None, db: Session = Depends(get_db),
         items.append({"id": t.id, "partner": t.partner, "recon_date": t.recon_date, "age_days": age,
                       "eko_tid": t.eko_tid, "tracking_number": t.tracking_number, "utr": t.utr_number,
                       "amount": t.amount})
+    # In the cross-product "All partners" view, also chase aged-open bank rows from the
+    # module products (E-Value / BBPS) that reconcile in their own tables — mirroring
+    # Open Items via the same adapter/status set. (SBI Kiosk is process-based P01–P04,
+    # not bank↔internal, so it stays out, exactly as Open Items excludes it.)
+    if not partner:
+        try:
+            from routes.recon import _module_rows
+            for _m in ("evalue", "bbps"):
+                for r in _module_rows(_m, db=db, side="bank", aging="d7"):
+                    items.append({"id": r["id"], "partner": _m, "recon_date": r.get("recon_date"),
+                                  "age_days": r.get("days_open"), "eko_tid": r.get("eko_tid"),
+                                  "tracking_number": r.get("tracking_number"), "utr": r.get("utr_number"),
+                                  "amount": r.get("amount")})
+        except Exception:
+            pass
+        items.sort(key=lambda i: str(i.get("recon_date") or ""))
     total_amt = round(sum(i["amount"] or 0 for i in items), 2)
     return {"count": len(items), "total_amount": total_amt, "items": items}
 

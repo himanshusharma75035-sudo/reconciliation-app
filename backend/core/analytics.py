@@ -22,6 +22,7 @@ _MATCHED = {
     "matched", "manual_matched", "interbank_matched",          # core ledger
     "matched_online", "matched_cash", "matched_manual",        # e-value
     "sbi_matched",                                             # (label form)
+    "failed_refunded",                                        # bbps: Failed+Refunded pair IS reconciled (bbps_engine.RECON_OK)
 }
 _UNMATCHED = {
     "unmatched", "unmatched_bank", "unmatched_load",

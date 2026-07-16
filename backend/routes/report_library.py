@@ -116,7 +116,9 @@ _CORE_MATCHED = ("matched", "manual_matched")
 _CORE_OPENISH = ("unmatched", "src_assigned", "amount_mismatch")
 
 _EV_MATCHED = ("matched_online", "matched_cash", "matched_manual", "interbank_matched")
-_BBPS_MATCHED = ("reconciled", "matched")
+# BBPS reconciled = matched OR failed_refunded (bbps_engine.RECON_OK). 'reconciled' is a
+# summary-only aggregate key, never a per-row status, so it matched zero rows before.
+_BBPS_MATCHED = ("matched", "failed_refunded")
 
 
 def _core_partner_slugs(db, product: str):
