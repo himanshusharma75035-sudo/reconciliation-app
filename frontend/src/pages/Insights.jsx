@@ -70,7 +70,7 @@ function Trend({ partners }) {
       {data && (
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">
-            <thead><tr className="border-b text-gray-500"><th className="table-th text-left">Partner</th>{data.periods.map(p => <th key={p} className="table-th text-right">{p}</th>)}</tr></thead>
+            <thead><tr className="border-b text-gray-500"><th className="table-th text-left">Product</th>{data.periods.map(p => <th key={p} className="table-th text-right">{p}</th>)}</tr></thead>
             <tbody>{data.partners.map(row => (
               <tr key={row.partner} className="border-b border-gray-50 hover:bg-gray-50">
                 <td className="table-td capitalize font-medium">{row.partner}</td>

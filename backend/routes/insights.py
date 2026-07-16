@@ -117,7 +117,8 @@ def run_carry_forward(partner: str = Query(...), recon_date: str = Query(...),
 @router.get("/trend")
 def trend(partner: Optional[str] = None, months: int = Query(3, ge=1, le=12),
           db: Session = Depends(get_db), user=Depends(get_current_user)):
-    """Per-partner match rate + open count for the last `months` calendar months."""
+    """Per-PRODUCT match rate + open count for the last `months` calendar months, across
+    EVERY product (core ledger + E-Value + BBPS + SBI Kiosk + AePS/QR)."""
     today = datetime.date.today()
     periods = []
     y, m = today.year, today.month
@@ -128,30 +129,33 @@ def trend(partner: Optional[str] = None, months: int = Query(3, ge=1, le=12),
             m = 12; y -= 1
     periods = list(reversed(periods))
 
-    q = db.query(Transaction).filter(Transaction.side == "bank", Transaction.row_type == "txn")
+    # Per-PRODUCT trend across ALL products (core ledger + E-Value + BBPS + SBI Kiosk +
+    # AePS/QR) via the same aggregator the analytics dashboard uses — so Insights covers
+    # every product, not just the core Transaction table. Called once per month.
+    from core.analytics import build_analytics
+    # The dropdown sends a core partner slug; map it to its product GROUP (build_analytics
+    # filters by group). None => all products.
+    prod_filter = None
     if partner:
-        q = q.filter(Transaction.partner == partner)
-    rows = q.all()
-    out = {}
-    for t in rows:
-        ym = (t.recon_date or "")[:7]
-        if ym not in periods:
-            continue
-        key = (t.partner, ym)
-        d = out.setdefault(key, {"total": 0, "matched": 0, "open": 0})
-        d["total"] += 1
-        if t.recon_status in _MATCHED:
-            d["matched"] += 1
-        elif t.recon_status in _OPEN:
-            d["open"] += 1
-    series = {}
-    for (p, ym), d in out.items():
-        series.setdefault(p, {})[ym] = {
-            "total": d["total"], "matched": d["matched"], "open": d["open"],
-            "match_rate": round(d["matched"] / (d["total"] or 1) * 100, 1)}
+        cfg = db.query(PartnerConfig).filter(PartnerConfig.slug == partner).first()
+        prod_filter = (cfg.product if cfg and cfg.product else partner)
+
+    series = {}   # product label -> { ym -> {total, matched, open, match_rate} }
+    for ym in periods:
+        a = build_analytics(db, f"{ym}-01", f"{ym}-31", product=prod_filter)
+        for g in a.get("by_group", []):
+            label = g.get("label") or g.get("group") or "—"
+            series.setdefault(label, {})[ym] = {
+                "total":      g.get("transactions", 0),
+                "matched":    g.get("matched", 0),
+                "open":       g.get("unmatched", 0) + g.get("mismatch", 0),
+                "match_rate": g.get("match_rate", 0),
+            }
     return {"periods": periods,
-            "partners": [{"partner": p, "by_month": [series[p].get(ym, {"total": 0, "matched": 0, "open": 0, "match_rate": 0}) for ym in periods]}
-                         for p in sorted(series)]}
+            "partners": [{"partner": label,
+                          "by_month": [series[label].get(ym, {"total": 0, "matched": 0, "open": 0, "match_rate": 0})
+                                       for ym in periods]}
+                         for label in sorted(series)]}
 
 
 # ── 4) Ageing escalation + raise-with-partner email draft ─────────────────────
