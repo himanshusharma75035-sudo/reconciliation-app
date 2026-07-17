@@ -9,6 +9,9 @@ This app reconciles **real money**. A large set of behaviors are deliberate and 
 - **`docs/behavior-contract.md` lists 25 invariants.** Before editing anything under `backend/core/` or `backend/routes/upload.py`, read it and `docs/architecture.md`. When a change touches matching, ingestion/parsing, row classification, status transitions, tolerances, or match-ID generation, call it out explicitly — these are not refactor-at-will code.
 - Deliberately-unfixed issues are catalogued in `docs/known-issues.md`. Don't "fix" something that's documented there without checking why it's intentional.
 - The two divergent ingest copies (see below) and a layering inversion are known warts kept on purpose; touch them only with characterization tests in place.
+- **`docs/skills.md` is the transferable playbook** — the domain model, the patterns, and the traps that have actually bitten this codebase (ID sequencing, replace-semantics, status-set drift, hidden "other" buckets, pair de-dup, deploy/asset pitfalls). Read it before designing anything new; it explains *why* the conventions below exist.
+
+**Keep `docs/skills.md` current — same PR, not later.** When you add a capability, hit a non-obvious bug, or learn something that would have saved you a day, add the lesson there. It ships to a **public** repo: no credentials, hostnames/IPs, account numbers, customer data, or personal names — patterns only.
 
 ## Commands
 
