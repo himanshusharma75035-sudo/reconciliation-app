@@ -136,6 +136,22 @@ or API), they will drift, and a fix in one silently misses the other. **Share on
 codebase carried two divergent copies for months; the dormant one still had the data-loss bug
 the interactive one had already been fixed for.
 
+**Formats change under you, without warning.** A bank that shipped tab-separated text for years
+(under a `.xls` extension, which was never a real workbook) will one day ship a genuine `.xlsx`
+— same columns, same order, now wrapped in a zip with a metadata block on top. The parser
+decodes the zip as text, finds no header, and the whole day is un-uploadable. **Detect the
+shape by magic bytes** (`PK` = xlsx zip, `\xd0\xcf\x11\xe0` = legacy OLE, else text), normalise
+every shape into ONE row structure, and keep a single row-building loop. Adding a format should
+be a new branch in the *reader*, never a second copy of the *parser*.
+
+**Beware guards that only worked by accident.** A trailing footer line ("*This is a computer
+generated statement…*") is dropped for free by a text parser: splitting it yields one field, so
+a `len(parts) < 6` check discards it. Read the same file as a workbook and every row is **padded
+to the full grid width** — the footer now has 8 cells, sails through that guard, and lands in
+the ledger as a fake transaction (in this case also feeding a bogus `0.0` balance into the
+funds-position snapshot). When you change how rows are produced, re-check every guard that
+depended on the old shape. Trimming trailing empty cells restored the old semantics exactly.
+
 ---
 
 ## 4. Application architecture
@@ -299,6 +315,9 @@ Concrete, reusable, and each one cost real time.
 | Full-account delete on upload | Single-day file wipes months of history | Replace only the file's dates |
 | File-hash guard with no override | Hash outlives its data → blocks legitimate re-upload | Deliberate force path |
 | Two ingest pipelines | One gets fixed, the other keeps the bug | Share one core |
+| Source silently changes export format | Text-shaped `.xls` becomes a real `.xlsx`; parser hard-fails, a whole day is un-uploadable | Detect by magic bytes, normalise to one row shape, one parser |
+| Guard that worked by accident | A footer line dropped by `len(parts)<6` in text survives when a workbook pads rows to full width → fake txn + poisoned balance | Re-check guards when row production changes; trim trailing empties |
+| Verifying a parser by row count alone | Counts can look right while amounts/dates are silently wrong | Reconcile the balance chain: opening + credits − debits = stated closing |
 | Status set copied into N files | Drifts; a matched status lands in "other" | One exported definition |
 | Half-applied business rule | Engine matches on one date, screens filter on another | Apply to every use of the concept |
 | Hidden "other" bucket | Columns don't sum; rate can read 100% while rows hide | Show count + composition |
