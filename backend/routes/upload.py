@@ -1960,27 +1960,91 @@ def list_templates(partner: Optional[str] = None, side: Optional[str] = None,
              "mapping": json.loads(t.mapping)} for t in templates]
 
 
-def _clear_module(module: str, db) -> int:
-    """Delete all data rows for a dedicated module (keeps config like accounts).
-    Also clears the file-hash guard so the same file can be re-uploaded afterwards."""
+def _module_tables(module: str):
+    """(model, date_expr, side) for every data table of a module.
+
+    date_expr → how a `recon_date` filter scopes THIS table (each has its own business-date
+                column); None = the table has no business date and can never be date-scoped.
+    side      → 'bank' | 'internal', or None for tables that aren't one side of a pair
+                (master/config/derived results).
+    """
     from models.database import (
         BbpsBankTxn, BbpsInternal, EvalueBankTxn, EvalueWalletLoad,
         SBIBankTransaction, SBITxnReport, SBIKOLimits, SBIKOCashHolding,
         SBILimitFailure, SBICSPMaster, SBIP01Result, SBIP02Result,
-        SBIP03Result, SBIP04Result, ModuleUploadHash,
+        SBIP03Result, SBIP04Result,
     )
-    tables = {
-        "bbps":   [BbpsBankTxn, BbpsInternal],
-        "evalue": [EvalueBankTxn, EvalueWalletLoad],   # EvalueAccount = config, kept
-        "sbi":    [SBIBankTransaction, SBITxnReport, SBIKOLimits, SBIKOCashHolding,
-                   SBILimitFailure, SBICSPMaster, SBIP01Result, SBIP02Result,
-                   SBIP03Result, SBIP04Result],
+    from sqlalchemy import func as _F
+
+    def col(name):
+        return lambda M: getattr(M, name)
+
+    # An E-Value load reconciles on its VALUE date (behavior-contract item 13).
+    def ev_load_date(M):
+        return _F.coalesce(_F.nullif(M.value_date, ""), M.transaction_date)
+
+    return {
+        "bbps": [
+            (BbpsBankTxn,        col("transaction_date"), "bank"),
+            (BbpsInternal,       col("transaction_date"), "internal"),
+        ],
+        "evalue": [                                        # EvalueAccount = config, kept
+            (EvalueBankTxn,      col("txn_date"),         "bank"),
+            (EvalueWalletLoad,   ev_load_date,            "internal"),
+        ],
+        "sbi": [
+            (SBIBankTransaction, col("txn_date"),         "bank"),
+            (SBITxnReport,       col("txn_date"),         "internal"),
+            (SBIKOLimits,        col("txn_date"),         None),
+            (SBIKOCashHolding,   col("report_date"),      None),
+            (SBILimitFailure,    col("txn_date"),         None),
+            (SBICSPMaster,       None,                    None),   # master data — no business date
+            (SBIP01Result,       col("recon_date"),       None),
+            (SBIP02Result,       col("recon_date"),       None),
+            (SBIP03Result,       col("recon_date"),       None),
+            (SBIP04Result,       col("recon_date"),       None),
+        ],
     }.get(module, [])
-    n = 0
-    for T in tables:
-        n += db.query(T).delete(synchronize_session=False)
-    db.query(ModuleUploadHash).filter(ModuleUploadHash.module == module).delete(synchronize_session=False)
-    return n
+
+
+def _clear_module(module: str, db, *, recon_date=None, side=None,
+                  user="system", filters=None, batch_id=None) -> dict:
+    """Delete a module's data rows, HONOURING the caller's filters, via the recycle bin.
+
+    This function previously ignored recon_date/side entirely and wiped every table of the
+    product. A user asking to clear ONE date on the bank side therefore lost the whole
+    product — bank rows, transaction reports, KO limits, cash holding, limit failures AND
+    the P01-P04 results (live incident, 2026-07-17). Now:
+      • recon_date scopes each table by its OWN business date;
+      • side restricts to that side's table;
+      • a table that cannot honour a supplied filter is SKIPPED, never wiped wholesale;
+      • every deleted row goes to the recycle bin first, so a mistake is recoverable.
+    """
+    from core import recycle_bin
+    batch_id = batch_id or generate_id()
+    deleted = {}
+    for model, date_expr, tside in _module_tables(module):
+        if side and tside != side:
+            continue                      # not this side's table → leave it alone
+        q = db.query(model)
+        if recon_date:
+            if date_expr is None:
+                continue                  # no business date → refuse to wipe it
+            q = q.filter(date_expr(model) == recon_date)
+        n = recycle_bin.soft_delete(db, q, model, module=module, user=user,
+                                    filters=filters, reason=f"clear {module}",
+                                    batch_id=batch_id)
+        if n:
+            deleted[model.__tablename__] = n
+
+    # The upload-hash guard only blocks re-uploading an identical FILE. Dropping it is
+    # correct ONLY for a full, unfiltered product clear.
+    if not recon_date and not side:
+        from models.database import ModuleUploadHash
+        db.query(ModuleUploadHash).filter(
+            ModuleUploadHash.module == module).delete(synchronize_session=False)
+
+    return {"deleted": deleted, "total": sum(deleted.values()), "batch_id": batch_id}
 
 
 # product slug → module key (kiosk and sbi both map to the SBI tables)
@@ -2002,15 +2066,32 @@ def clear_data(
 ):
     # ── Module products live in their own tables ──────────────────────────────
     if partner in _CLEAR_MODULE_OF:
-        n = _clear_module(_CLEAR_MODULE_OF[partner], db)
+        module = _CLEAR_MODULE_OF[partner]
+        # A status filter can't be honoured across a module's tables — each product has its
+        # own status vocabulary and the P0x results use match_status. REFUSE rather than
+        # silently ignore it and delete more than the user asked for.
+        if recon_status and recon_status != "all":
+            raise HTTPException(
+                status_code=400,
+                detail=(f"Clearing '{partner}' by status isn't supported — this product keeps "
+                        f"its own tables with their own status vocabulary. Clear by date "
+                        f"and/or side, or act on specific rows from the {partner} screen."))
+        _filters = {k: v for k, v in {"partner": partner, "recon_date": recon_date,
+                                      "side": side}.items() if v}
+        res = _clear_module(module, db, recon_date=recon_date, side=side,
+                            user=current_user.username, filters=_filters)
         try:
             db.add(AuditLog(user_id=current_user.id, username=current_user.username,
                             action="clear", action_type="human", entity_type="module",
-                            detail=json.dumps({"module": partner, "deleted_rows": n})))
+                            detail=json.dumps({"module": partner, "deleted_rows": res["total"],
+                                               "by_table": res["deleted"], "filters": _filters,
+                                               "recycle_batch_id": res["batch_id"]})))
         except Exception:
             pass
         db.commit()
-        return {"deleted_transactions": n, "deleted_sessions": 0, "module": partner}
+        return {"deleted_transactions": res["total"], "deleted_sessions": 0, "module": partner,
+                "by_table": res["deleted"], "recycle_batch_id": res["batch_id"],
+                "filters_applied": _filters}
     """
     Clear transactions (and orphaned upload sessions) with granular filters.
     All filters are optional and combinable:
@@ -2057,7 +2138,15 @@ def clear_data(
     else:
         counterparts_reset = 0
 
-    deleted_txn = q_txn.delete(synchronize_session=False)
+    # Capture into the recycle bin BEFORE deleting, so a mis-scoped core clear is
+    # recoverable too (not just module clears).
+    from core import recycle_bin
+    _batch = generate_id()
+    deleted_txn = recycle_bin.soft_delete(
+        db, q_txn, Transaction, module="core", user=current_user.username,
+        filters={k: v for k, v in {"partner": partner, "recon_date": recon_date,
+                                   "side": side, "recon_status": recon_status}.items() if v},
+        reason="clear core ledger", batch_id=_batch)
 
     # Clean up upload sessions that no longer have any transactions
     from sqlalchemy import text
@@ -2119,13 +2208,16 @@ def clear_data(
     module_deleted = 0
     if not partner and not recon_date and not side and recon_status in (None, "", "all"):
         for _m in ("bbps", "evalue", "sbi"):
-            module_deleted += _clear_module(_m, db)
+            module_deleted += _clear_module(_m, db, user=current_user.username,
+                                            filters={"clear_all": True},
+                                            batch_id=_batch)["total"]
         db.commit()
 
     return {
         "deleted_transactions": deleted_txn + module_deleted,
         "deleted_sessions": deleted_ses,
         "deleted_module_rows": module_deleted,
+        "recycle_batch_id": _batch,
         "filters_applied": {
             k: v for k, v in {"partner": partner, "recon_date": recon_date,
                                "side": side, "recon_status": recon_status}.items() if v

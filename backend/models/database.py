@@ -6,8 +6,13 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import (
     create_engine, Column, String, Float, DateTime, Boolean,
-    Integer, Text, ForeignKey, Index, UniqueConstraint, Numeric
+    Integer, Text, ForeignKey, Index, UniqueConstraint, Numeric, LargeBinary
 )
+from sqlalchemy.dialects.mysql import LONGBLOB
+
+# Recycle-bin payloads are gzipped JSON and routinely exceed MySQL's 64 KB BLOB cap,
+# so use LONGBLOB there while staying plain BLOB on SQLite (dual-DB by design).
+BIGBLOB = LargeBinary().with_variant(LONGBLOB, "mysql")
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 
@@ -1653,6 +1658,37 @@ class BuilderMessage(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow, index=True)
 
     __table_args__ = (Index("ix_builder_msg_task_ts", "task_id", "created_at"),)
+
+
+class RecycleBin(Base):
+    """Soft-delete store. Rows removed by a Clear action are serialised here BEFORE the
+    delete, so an accidental clear is recoverable instead of terminal.
+
+    One Clear action = one `batch_id`, split into one row per (table, chunk) so a huge
+    delete never builds a single oversized blob (max_allowed_packet) or a giant in-memory
+    list. `payload` is gzipped JSON: [{column: value, ...}, ...] with values stringified
+    for dates/decimals — restore feeds them straight back through the model constructor.
+
+    Retention is enforced by purge_expired() (see core/recycle_bin.py); rows are NOT
+    deleted implicitly by anything else.
+    """
+    __tablename__ = "recycle_bin"
+
+    id          = Column(String(36),  primary_key=True, default=generate_id)
+    batch_id    = Column(String(36),  index=True)       # groups every table/chunk of one Clear
+    module      = Column(String(20),  index=True)       # sbi | evalue | bbps | core
+    table_name  = Column(String(64),  index=True)
+    chunk_no    = Column(Integer,     default=0)
+    row_count   = Column(Integer,     default=0)
+    payload     = Column(BIGBLOB)                       # gzip(JSON rows)
+    filters     = Column(Text,        nullable=True)    # JSON of what the user asked for
+    reason      = Column(String(300), nullable=True)
+    deleted_by  = Column(String(100), index=True)
+    deleted_at  = Column(DateTime,    default=datetime.datetime.utcnow, index=True)
+    restored_at = Column(DateTime,    nullable=True)
+    restored_by = Column(String(100), nullable=True)
+
+    __table_args__ = (Index("ix_recycle_batch_tbl", "batch_id", "table_name"),)
 
 
 # ─── Bootstrap ────────────────────────────────────────────────────────────────

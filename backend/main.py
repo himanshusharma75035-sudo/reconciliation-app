@@ -58,6 +58,7 @@ from routes.bbps import router as bbps_router
 from routes.workflow import router as workflow_router
 from routes.ingestion import router as ingestion_router
 from routes.views import router as views_router
+from routes.recycle_bin import router as recycle_bin_router
 from routes.portal import router as portal_router
 from routes.public_dashboard import router as public_dashboard_router
 
@@ -113,6 +114,7 @@ app.include_router(bbps_router)
 app.include_router(workflow_router)
 app.include_router(ingestion_router)
 app.include_router(views_router)
+app.include_router(recycle_bin_router)
 app.include_router(portal_router)
 app.include_router(public_dashboard_router)
 
