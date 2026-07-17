@@ -154,15 +154,57 @@ async def upload_bank_statement(
     current_user=Depends(require_permission("upload")),
 ):
     """
-    Upload SBI Bank Statement (settlement account, tab-separated .xls).
+    Upload SBI Bank Statement (settlement account).
+
+    Accepts BOTH shapes SBI exports — same 8 columns, same order, in both:
+      • tab-separated TEXT carrying a .xls extension (the historical export), and
+      • a real .xlsx workbook (account/balance metadata block, then the 'Txn Date'
+        header row, then the transactions).
+    Both are normalised to rows-of-parts here so the row-building loop below stays a
+    SINGLE code path (behaviour for the text export is unchanged).
+
     Parses all transactions; auto-detects settlement rows via EKOSETTLEMENT keyword.
     Extracts KO ID and deduction date from settlement description.
     """
-    content = (await file.read()).decode('utf-8', errors='replace')
-    lines = content.splitlines()
+    raw = await file.read()
 
-    # Find header row
-    header_idx = next((i for i, l in enumerate(lines) if 'Txn Date' in l and 'Description' in l), None)
+    def _cell(v) -> str:
+        """Excel cell → the plain string the tab-separated path would have carried."""
+        if v is None: return ''
+        if isinstance(v, (datetime.datetime, datetime.date)): return v.strftime('%Y-%m-%d')
+        if isinstance(v, float) and v.is_integer(): return str(int(v))   # 10521.0 → "10521"
+        s = str(v).strip()
+        return '' if s.lower() in ('nan', 'nat', 'none') else s
+
+    # A real workbook starts with the zip magic (xlsx) or the OLE magic (legacy .xls);
+    # the historical "tab-separated .xls" is neither — it's plain text.
+    if raw[:2] == b'PK' or raw[:4] == b'\xd0\xcf\x11\xe0':
+        try:
+            df = pd.read_excel(io.BytesIO(raw), header=None, dtype=object)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not read the Excel workbook: {e}")
+        grid = [[_cell(v) for v in r] for r in df.values.tolist()]
+        header_idx = next((i for i, r in enumerate(grid)
+                           if any(c.strip().lower() == 'txn date' for c in r)
+                           and any(c.strip().lower() == 'description' for c in r)), None)
+
+        def _trim(r):
+            """Drop trailing empty cells so a workbook row looks exactly like a tab-split
+            line. Without this, pandas pads every row to the full grid width and the
+            trailing footer/legend line ("**This is a computer generated statement…")
+            survives the `len(parts) < 6` guard below and lands in the ledger as a bogus
+            transaction (also poisoning the funds-position balance with a 0.0 line)."""
+            r = list(r)
+            while r and r[-1] == '':
+                r.pop()
+            return r
+
+        rows = [_trim(r) for r in grid[header_idx + 1:]] if header_idx is not None else []
+    else:
+        lines = raw.decode('utf-8', errors='replace').splitlines()
+        header_idx = next((i for i, l in enumerate(lines) if 'Txn Date' in l and 'Description' in l), None)
+        rows = [l.strip().split('\t') for l in lines[header_idx + 1:]] if header_idx is not None else []
+
     if header_idx is None:
         raise HTTPException(status_code=400, detail="Cannot find bank statement header row. Expected 'Txn Date' column.")
 
@@ -171,8 +213,7 @@ async def upload_bank_statement(
     today = str(datetime.date.today())
     _fund_rows = []   # funds-position lines (file order; reporting only)
 
-    for line in lines[header_idx + 1:]:
-        parts = line.strip().split('\t')
+    for parts in rows:
         if len(parts) < 6: continue
         try:
             txn_date   = _nd(parts[0].strip()) if parts else ''
@@ -235,8 +276,8 @@ async def upload_bank_statement(
     if inserted < 10:
         validation_warning = (
             f"Only {inserted} rows were parsed. The file may have a different format "
-            f"than expected. Verify the file is a valid SBI bank statement "
-            f"(tab-separated with 'Txn Date' header row)."
+            f"than expected. Verify the file is a valid SBI bank statement — either the "
+            f"tab-separated export or an .xlsx workbook, each with a 'Txn Date' header row."
         )
         logger.warning(f"SBI bank statement: low row count ({inserted}) for {file.filename}")
 

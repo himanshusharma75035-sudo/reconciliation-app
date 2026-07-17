@@ -1177,7 +1177,7 @@ export default function SBIKiosk() {
               <span className="text-xs font-bold text-blue-700 bg-blue-100 px-2.5 py-1 rounded-full uppercase tracking-wide">P01 — Settlement Recon</span>
             </div>
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              <UploadCard label="Bank Statement" desc="SBI settlement account .xls (tab-separated)" endpoint="/sbi/upload/bank-statement" onDone={onUploadDone} color="blue" />
+              <UploadCard label="Bank Statement" desc="SBI settlement account — .xlsx or tab-separated .xls" endpoint="/sbi/upload/bank-statement" onDone={onUploadDone} color="blue" />
               <UploadCard label="KO Limits Config Report" desc="KO_Limits_Configuration_Report_*.xls" endpoint="/sbi/upload/ko-limits" onDone={onUploadDone} color="blue" />
             </div>
           </div>
