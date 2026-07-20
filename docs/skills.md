@@ -48,12 +48,18 @@ reclassifies live money** — never "tidy" them into one constant.
 **Dates are subtler than they look.** A transaction can carry several dates — initiation,
 transaction, value, posted. Reconciliation must key on **the date the money actually moved
 on the counterpart's books**, which is frequently the *value* date, not the transaction date.
-Two lessons, both learned here the hard way:
+Three lessons, all learned here the hard way:
 1. Ask finance ops which date is authoritative; don't infer it.
 2. When you switch, switch it **everywhere the date is used as the reconciliation date** —
    matching, filtering, ordering, ageing, grouping, reports — not just the match comparison.
    A half-applied date rule is worse than none: the engine matches on one date while every
    screen filters on another.
+3. **Reconcile by the transaction's *business* date — never by the upload time or the clock.**
+   One subsystem selected "which rows to reconcile" by *upload batch, defaulting to today*,
+   decoupled from the date the operator picked. Running on any other day then reconciled the
+   wrong data (or none), and — combined with delete-and-recreate — **wiped good results**.
+   "Recon date" must mean the business day being reconciled, and the run must load exactly that
+   day's rows. A bulk/back-dated upload should reconcile *each day it contains*, not "today".
 
 **Statuses are a vocabulary, and the vocabulary is the product.** You will need more than
 matched/unmatched. Real categories include: matched (auto), manually matched, matched across
@@ -336,6 +342,9 @@ Concrete, reusable, and each one cost real time.
 | Destructive endpoint with an early branch | A per-type shortcut `return`s before filters apply → "clear one day" wipes the whole product | Apply every accepted filter, or refuse; never silently ignore one |
 | Append-only ingest + a re-upload | Recovering from one mistake (re-uploading) causes another (doubled data) | Make ingest idempotent (per-date replace) + a duplicate-file guard |
 | Hard delete of financial rows | A mis-scoped clear is terminal; recovery means a DB dump | Soft-delete: serialise rows to a recycle bin first; idempotent restore |
+| Reconciling by upload/clock date, not business date | Running on the wrong day reconciles the wrong data (or none) and can wipe good results | recon_date = the transaction's business date; load exactly that day |
+| Delete-then-reload rebuild order | If the reload finds nothing, the delete already destroyed the prior good result | Load sources FIRST; if empty, skip — never delete what you can't rebuild |
+| Low match rate read as "recon broken" | It's usually a missing counterpart file, not bad matching | Show per-period file presence so missing-file ≠ real discrepancy |
 | Status set copied into N files | Drifts; a matched status lands in "other" | One exported definition |
 | Half-applied business rule | Engine matches on one date, screens filter on another | Apply to every use of the concept |
 | Hidden "other" bucket | Columns don't sum; rate can read 100% while rows hide | Show count + composition |

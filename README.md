@@ -126,7 +126,7 @@ backend/   FastAPI + SQLAlchemy
   instance/ deployment-specific data (gitignored)
 ```
 
-Deep dives: [docs/architecture.md](docs/architecture.md) · [docs/behavior-contract.md](docs/behavior-contract.md) · [docs/known-issues.md](docs/known-issues.md)
+Deep dives: [docs/architecture.md](docs/architecture.md) · [docs/behavior-contract.md](docs/behavior-contract.md) · [docs/known-issues.md](docs/known-issues.md) · [docs/sbi-kiosk.md](docs/sbi-kiosk.md)
 
 **Building something like this?** [docs/skills.md](docs/skills.md) is a transferable playbook — the reconciliation domain model, the engineering patterns, and the traps that actually bit this codebase (match-ID sequencing, upload replace-semantics, status-set drift, hidden "other" buckets, pair de-duplication, deploy/asset pitfalls). It's the *why* behind the conventions here.
 
