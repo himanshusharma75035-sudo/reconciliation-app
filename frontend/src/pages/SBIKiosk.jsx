@@ -452,8 +452,7 @@ function P01LinesView({ data }) {
   )
 }
 
-function P01Tab() {
-  const [reconDate, setReconDate] = useLatestSbiDate()
+function P01Tab({ reconDate, setReconDate }) {
   const [running, setRunning] = useState(false)
   const [data, setData] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
@@ -586,8 +585,7 @@ function P01Tab() {
 
 // ── P02 — Bank Statement ↔ Transaction Report (by 20-digit ref) ─────────────────
 
-function P02Tab() {
-  const [reconDate, setReconDate] = useLatestSbiDate()
+function P02Tab({ reconDate, setReconDate }) {
   const [running, setRunning] = useState(false)
   const [data, setData] = useState(null)
   const [filter, setFilter] = useState('')
@@ -741,8 +739,7 @@ function P02Tab() {
 
 // ── P03 — Money OUT (Txn Report) ↔ Money IN (Bank Credit) ────────────────────────
 
-function P03Tab() {
-  const [reconDate, setReconDate] = useLatestSbiDate()
+function P03Tab({ reconDate, setReconDate }) {
   const [running, setRunning] = useState(false)
   const [data, setData] = useState(null)
   const [filter, setFilter] = useState('')
@@ -863,8 +860,7 @@ function P03Tab() {
 
 // ── P04 — Wallet Balance (Limit Failure vs Cash Holding → action) ───────────────
 
-function P04Tab() {
-  const [reconDate, setReconDate] = useLatestSbiDate()
+function P04Tab({ reconDate, setReconDate }) {
   const [running, setRunning] = useState(false)
   const [data, setData] = useState(null)
   const [filter, setFilter] = useState('')
@@ -1008,8 +1004,7 @@ function UnifiedMatchModal({ entry, onClose, onDone }) {
   )
 }
 
-function UnifiedTab() {
-  const [reconDate, setReconDate] = useLatestSbiDate()
+function UnifiedTab({ reconDate, setReconDate }) {
   const [data, setData] = useState(null)
   const [side, setSide] = useState('')
   const [statusF, setStatusF] = useState('')
@@ -1242,14 +1237,14 @@ function MiniStat({ label, value, warn }) {
 
 // Data overview + per-business-date readiness (via a date dropdown instead of a wide table).
 // One /sbi/readiness call drives both. Replaces the old today-filtered "Upload Status".
-function ReadinessPanel({ refreshKey, onReconciled }) {
+function ReadinessPanel({ refreshKey, onReconciled, reconDate, setReconDate }) {
   const [data, setData] = useState(null)
-  const [sel, setSel] = useState('')
   const load = async () => {
     try {
       const { data } = await api.get('/sbi/readiness')
       setData(data)
-      setSel(s => (data.dates || []).some(r => r.date === s) ? s : (data.latest || ''))
+      // keep the shared date valid — if it isn't a day we have data for, snap to the latest
+      if (!(data.dates || []).some(r => r.date === reconDate)) setReconDate(data.latest || '')
     } catch { setData({ dates: [], totals: {} }) }
   }
   useEffect(() => { load() }, [refreshKey])
@@ -1258,7 +1253,7 @@ function ReadinessPanel({ refreshKey, onReconciled }) {
   const rows = data.dates || []
   const missing = rows.filter(r => r.bank && !r.txn_report)
   const hasData = (t.bank || 0) + (t.txn_report || 0) > 0
-  const day = rows.find(r => r.date === sel)
+  const day = rows.find(r => r.date === reconDate)
 
   return (
     <>
@@ -1296,9 +1291,10 @@ function ReadinessPanel({ refreshKey, onReconciled }) {
           )}
 
           {/* Pick a business date, see its detail */}
-          <div className="flex items-center gap-2 mb-4">
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
             <span className="text-xs text-gray-400">Business date</span>
-            <DateDropdown rows={rows} value={sel} onChange={setSel} />
+            <DateDropdown rows={rows} value={reconDate} onChange={setReconDate} />
+            <span className="text-[11px] text-gray-400">— also filters the P01–P04 tabs below</span>
           </div>
 
           {day && (
@@ -1331,6 +1327,9 @@ export default function SBIKiosk() {
   const [tab, setTab] = useState('upload')
   const [uploadKey, setUploadKey] = useState(0)
   const onUploadDone = () => setUploadKey(k => k + 1)
+  // Shared business date — the Readiness dropdown and the P01–P04 tabs all read/write it,
+  // so picking a date up top drills the whole page into that day (defaults to latest data).
+  const [reconDate, setReconDate] = useLatestSbiDate()
 
   return (
     <div>
@@ -1344,7 +1343,7 @@ export default function SBIKiosk() {
         <HeaderActions />
       </div>
 
-      <ReadinessPanel refreshKey={uploadKey} onReconciled={onUploadDone} />
+      <ReadinessPanel refreshKey={uploadKey} onReconciled={onUploadDone} reconDate={reconDate} setReconDate={setReconDate} />
 
       {/* Tab bar */}
       <div className="flex gap-0 mb-5 border-b border-gray-200 overflow-x-auto">
@@ -1407,11 +1406,11 @@ export default function SBIKiosk() {
         </div>
       )}
 
-      {tab === 'unified' && <UnifiedTab />}
-      {tab === 'p01' && <P01Tab />}
-      {tab === 'p02' && <P02Tab />}
-      {tab === 'p03' && <P03Tab />}
-      {tab === 'p04' && <P04Tab />}
+      {tab === 'unified' && <UnifiedTab reconDate={reconDate} setReconDate={setReconDate} />}
+      {tab === 'p01' && <P01Tab reconDate={reconDate} setReconDate={setReconDate} />}
+      {tab === 'p02' && <P02Tab reconDate={reconDate} setReconDate={setReconDate} />}
+      {tab === 'p03' && <P03Tab reconDate={reconDate} setReconDate={setReconDate} />}
+      {tab === 'p04' && <P04Tab reconDate={reconDate} setReconDate={setReconDate} />}
     </div>
   )
 }
