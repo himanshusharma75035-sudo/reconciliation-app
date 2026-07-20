@@ -257,8 +257,23 @@ read the real numbers.
 **Layout/visual bugs need rendering.** Reviewers reading code cannot see overlapping labels or
 a clipped chart. Render it and assert coordinates, or look at the output.
 
-**Never delete; reclassify or archive.** Deletion of financial rows destroys evidence. Prefer a
-status change with the prior state captured in an audit row — reversible and provable.
+**Never delete; reclassify, archive, or soft-delete.** Deletion of financial rows destroys
+evidence. Prefer a status change with the prior state captured in an audit row. Where a
+"delete" genuinely is the operation (clearing a bad upload), route it through a **recycle
+bin**: serialise the rows *before* deleting them, so a mistake is one restore away instead of
+a restore-from-backup. Make restore idempotent (skip rows whose primary key already exists) so
+a double-restore can't duplicate live data — and coerce serialised values back to their column
+types on the way in (JSON has no date type, so an ISO string handed to a DateTime column is
+rejected; convert it back first).
+
+**A filter that can be silently ignored is a wipe waiting to happen.** A destructive endpoint
+took an early branch for one class of input (module products) that `return`ed *before* the
+date/side/status filters were applied — so "clear one day on the bank side" truncated the
+entire product: bank rows, the other side, config tables, and derived results (a live
+incident). The rule: a destructive operation must **apply every filter it accepts, or refuse
+the request** — never accept a filter and then ignore it. If a particular filter can't be
+honoured for some target (a table with no business date, a status that doesn't map), return an
+error explaining why; do not fall through to deleting more than the user asked for.
 
 **Audit everything a human changes**, with the previous state, a mandatory reason, and who did
 it. Add dual-control (maker–checker) for sensitive actions — and make sure it covers **every**
@@ -318,6 +333,9 @@ Concrete, reusable, and each one cost real time.
 | Source silently changes export format | Text-shaped `.xls` becomes a real `.xlsx`; parser hard-fails, a whole day is un-uploadable | Detect by magic bytes, normalise to one row shape, one parser |
 | Guard that worked by accident | A footer line dropped by `len(parts)<6` in text survives when a workbook pads rows to full width → fake txn + poisoned balance | Re-check guards when row production changes; trim trailing empties |
 | Verifying a parser by row count alone | Counts can look right while amounts/dates are silently wrong | Reconcile the balance chain: opening + credits − debits = stated closing |
+| Destructive endpoint with an early branch | A per-type shortcut `return`s before filters apply → "clear one day" wipes the whole product | Apply every accepted filter, or refuse; never silently ignore one |
+| Append-only ingest + a re-upload | Recovering from one mistake (re-uploading) causes another (doubled data) | Make ingest idempotent (per-date replace) + a duplicate-file guard |
+| Hard delete of financial rows | A mis-scoped clear is terminal; recovery means a DB dump | Soft-delete: serialise rows to a recycle bin first; idempotent restore |
 | Status set copied into N files | Drifts; a matched status lands in "other" | One exported definition |
 | Half-applied business rule | Engine matches on one date, screens filter on another | Apply to every use of the concept |
 | Hidden "other" bucket | Columns don't sum; rate can read 100% while rows hide | Show count + composition |
