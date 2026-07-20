@@ -340,6 +340,7 @@ async def upload_bank_statement(
 @router.post("/upload/ko-limits")
 async def upload_ko_limits(
     file: UploadFile = File(...),
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
@@ -348,6 +349,8 @@ async def upload_ko_limits(
     Records every KO Deposit and KO Withdrawal.
     """
     content = await file.read()
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "sbi", "ko_limits", content, file.filename or "", current_user, force=force)
     try:
         df = pd.read_excel(io.BytesIO(content), engine='xlrd', header=None)
     except Exception:
@@ -473,6 +476,7 @@ async def upload_txn_report(
 @router.post("/upload/csp-master")
 async def upload_csp_master(
     file: UploadFile = File(...),
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
@@ -482,6 +486,8 @@ async def upload_csp_master(
     Electronic/CDM: each row is a unique transaction reference.
     """
     content = await file.read()
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "sbi", "csp_master", content, file.filename or "", current_user, force=force)
     try:
         df = pd.read_excel(io.BytesIO(content), header=None)
     except Exception as e:
@@ -518,11 +524,14 @@ async def upload_csp_master(
 async def upload_ko_cash_holding(
     file: UploadFile = File(...),
     report_date: str = "",
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
     """Upload KO Cash Holding Report (KO ID + opening/closing balances)."""
     content = await file.read()
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "sbi", "cash_holding", content, file.filename or "", current_user, force=force)
     try:
         df = pd.read_excel(io.BytesIO(content), engine='xlrd', header=None)
     except Exception:
@@ -562,11 +571,14 @@ async def upload_ko_cash_holding(
 @router.post("/upload/limit-failures")
 async def upload_limit_failures(
     file: UploadFile = File(...),
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
     """Upload Limit Update Failure Report (CSPs whose wallet limit update failed)."""
     content = await file.read()
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "sbi", "limit_failures", content, file.filename or "", current_user, force=force)
     try:
         import xlrd
         book = xlrd.open_workbook(file_contents=content)
