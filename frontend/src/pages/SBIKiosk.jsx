@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Upload, Play, RefreshCw, X, ChevronLeft, ChevronRight, ArrowLeftRight } from 'lucide-react'
+import { Upload, Play, RefreshCw, X, ChevronLeft, ChevronRight, ArrowLeftRight, ChevronDown, Check, AlertTriangle } from 'lucide-react'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
 
@@ -1185,21 +1185,72 @@ function OverviewTile({ icon, label, value }) {
   )
 }
 
-const RCell = ({ n, warn }) => (
-  <td className={`py-2 px-2 text-right tabular-nums ${warn ? 'text-red-500 font-semibold' : n ? 'text-gray-600' : 'text-gray-300'}`}>
-    {n ? Number(n).toLocaleString('en-IN') : '—'}
-  </td>
-)
-
 const rateColor = (r) => (r >= 85 ? '#059669' : r >= 50 ? '#d97706' : '#dc2626')
 
-// Data overview + per-business-date readiness. Replaces the old "Upload Status" (which was
-// filtered to today and always read 0). One /sbi/readiness call drives both.
+// Compact status for a day: match % / "report missing" / "not run".
+function DayStatus({ r, size = 'sm' }) {
+  const cls = size === 'lg' ? 'text-base font-bold' : 'text-xs font-semibold'
+  if (r.p02_rate != null) return <span className={`${cls} tabular-nums`} style={{ color: rateColor(r.p02_rate) }}>{r.p02_rate}%</span>
+  if (r.bank && !r.txn_report) return <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-100">report missing</span>
+  return <span className="text-[11px] text-gray-400">not run</span>
+}
+
+// Full dropdown of business dates — each option shows that day's status at a glance.
+function DateDropdown({ rows, value, onChange }) {
+  const [open, setOpen] = useState(false)
+  const ref = React.useRef()
+  useEffect(() => {
+    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [])
+  const sel = rows.find(r => r.date === value)
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={() => setOpen(o => !o)}
+        className="flex items-center justify-between gap-3 min-w-[260px] rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm hover:border-gray-300 transition-colors">
+        <span className="font-mono text-gray-800">{value || 'Select a date'}</span>
+        <span className="flex items-center gap-2">{sel && <DayStatus r={sel} />}<ChevronDown size={15} className={`text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} /></span>
+      </button>
+      {open && (
+        <div className="absolute z-30 mt-1 w-full max-h-[22rem] overflow-auto rounded-lg border border-gray-200 bg-white shadow-xl py-1">
+          {rows.map(r => (
+            <button key={r.date} onClick={() => { onChange(r.date); setOpen(false) }}
+              className={`w-full flex items-center justify-between gap-3 px-3 py-2 text-left hover:bg-gray-50 ${r.date === value ? 'bg-primary/5' : ''}`}>
+              <span className="flex items-center gap-2">
+                {r.date === value ? <Check size={13} className="text-primary" /> : <span className="w-[13px]" />}
+                <span className="font-mono text-xs text-gray-700">{r.date}</span>
+              </span>
+              <DayStatus r={r} />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MiniStat({ label, value, warn }) {
+  const ok = Number(value || 0) > 0
+  return (
+    <div className={`rounded-lg border p-2.5 text-center ${warn ? 'bg-red-50 border-red-100' : 'bg-gray-50/70 border-gray-100'}`}>
+      <div className={`text-base font-bold tabular-nums ${warn ? 'text-red-500' : ok ? 'text-gray-800' : 'text-gray-300'}`}>{ok ? Number(value).toLocaleString('en-IN') : '—'}</div>
+      <div className="text-[11px] text-gray-500 leading-tight mt-0.5">{label}{warn && ' · missing'}</div>
+    </div>
+  )
+}
+
+// Data overview + per-business-date readiness (via a date dropdown instead of a wide table).
+// One /sbi/readiness call drives both. Replaces the old today-filtered "Upload Status".
 function ReadinessPanel({ refreshKey, onReconciled }) {
   const [data, setData] = useState(null)
+  const [sel, setSel] = useState('')
   const load = async () => {
-    try { const { data } = await api.get('/sbi/readiness'); setData(data) }
-    catch { setData({ dates: [], totals: {} }) }
+    try {
+      const { data } = await api.get('/sbi/readiness')
+      setData(data)
+      setSel(s => (data.dates || []).some(r => r.date === s) ? s : (data.latest || ''))
+    } catch { setData({ dates: [], totals: {} }) }
   }
   useEffect(() => { load() }, [refreshKey])
   if (!data) return null
@@ -1207,6 +1258,7 @@ function ReadinessPanel({ refreshKey, onReconciled }) {
   const rows = data.dates || []
   const missing = rows.filter(r => r.bank && !r.txn_report)
   const hasData = (t.bank || 0) + (t.txn_report || 0) > 0
+  const day = rows.find(r => r.date === sel)
 
   return (
     <>
@@ -1224,7 +1276,7 @@ function ReadinessPanel({ refreshKey, onReconciled }) {
         <div className="card mb-5">
           <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
             <div>
-              <h3 className="font-semibold text-gray-800 text-sm">Reconciliation readiness — by business date</h3>
+              <h3 className="font-semibold text-gray-800 text-sm">Reconciliation readiness</h3>
               <p className="text-xs text-gray-400 mt-0.5">
                 {t.days_with_data || rows.length} day(s) of data
                 {t.p02_rate != null && <> · overall P02 match <b style={{ color: rateColor(t.p02_rate) }}>{t.p02_rate}%</b></>}
@@ -1235,47 +1287,40 @@ function ReadinessPanel({ refreshKey, onReconciled }) {
           </div>
 
           {missing.length > 0 && (
-            <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 leading-relaxed">
-              ⚠ <b>{missing.length} day(s)</b> have a bank statement but <b>no transaction report</b> uploaded
+            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 leading-relaxed flex gap-2">
+              <AlertTriangle size={14} className="mt-0.5 flex-shrink-0" />
+              <span><b>{missing.length} day(s)</b> have a bank statement but <b>no transaction report</b> uploaded
               ({missing.map(r => r.date).join(', ')}). Those days can’t be matched until their report file is
-              uploaded — that’s a <b>missing file, not a recon failure</b>.
+              uploaded — a <b>missing file, not a recon failure</b>.</span>
             </div>
           )}
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="text-gray-400 border-b border-gray-100 text-left">
-                  <th className="py-2 pr-3 font-medium">Date</th>
-                  <th className="py-2 px-2 text-right font-medium">Bank</th>
-                  <th className="py-2 px-2 text-right font-medium">Txn report</th>
-                  <th className="py-2 px-2 text-right font-medium">KO limits</th>
-                  <th className="py-2 px-2 text-right font-medium">Cash hold</th>
-                  <th className="py-2 px-2 text-right font-medium">Fails</th>
-                  <th className="py-2 px-2 font-medium">P02 match</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map(r => (
-                  <tr key={r.date} className="border-b border-gray-50 hover:bg-gray-50/60">
-                    <td className="py-2 pr-3 font-mono text-gray-700">{r.date}</td>
-                    <RCell n={r.bank} />
-                    <RCell n={r.txn_report} warn={r.bank && !r.txn_report} />
-                    <RCell n={r.ko_limits} />
-                    <RCell n={r.cash_holding} />
-                    <RCell n={r.limit_failures} />
-                    <td className="py-2 px-2">
-                      {r.p02_rate == null
-                        ? (r.bank && !r.txn_report
-                            ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-100">report missing</span>
-                            : <span className="text-gray-300">not run</span>)
-                        : <span className="font-semibold" style={{ color: rateColor(r.p02_rate) }}>{r.p02_rate}%</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          {/* Pick a business date, see its detail */}
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-xs text-gray-400">Business date</span>
+            <DateDropdown rows={rows} value={sel} onChange={setSel} />
           </div>
+
+          {day && (
+            <div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                <MiniStat label="Bank statement" value={day.bank} />
+                <MiniStat label="Txn report" value={day.txn_report} warn={day.bank && !day.txn_report} />
+                <MiniStat label="KO limits" value={day.ko_limits} />
+                <MiniStat label="Cash holding" value={day.cash_holding} />
+                <MiniStat label="Limit failures" value={day.limit_failures} />
+                <div className="rounded-lg border border-gray-100 bg-white p-2.5 text-center flex flex-col justify-center">
+                  <div className="leading-tight"><DayStatus r={day} size="lg" /></div>
+                  <div className="text-[11px] text-gray-500 mt-0.5">P02 match</div>
+                </div>
+              </div>
+              {day.p02_total > 0 && (
+                <p className="text-[11px] text-gray-400 mt-2">
+                  {Number(day.p02_matched).toLocaleString('en-IN')} of {Number(day.p02_total).toLocaleString('en-IN')} bank rows matched on {day.date}.
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
     </>
