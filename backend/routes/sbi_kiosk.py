@@ -393,6 +393,7 @@ async def upload_ko_limits(
 @router.post("/upload/txn-report")
 async def upload_txn_report(
     file: UploadFile = File(...),
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
@@ -400,8 +401,14 @@ async def upload_txn_report(
     Upload one of the 7 BC Transaction Report files.
     All files share the same column structure (3 metadata rows + header row 4).
     'Other Txn' file has extra REVERSAL_STATUS, SETTELMENT_ACCOUNT_, KO HOLDING columns.
+
+    This endpoint APPENDS (a day has several report files, so per-date replace can't be
+    used — it would delete the day's earlier files). A SHA-256 duplicate-file guard blocks
+    re-uploading the EXACT same file (which would double it); pass force=true to override.
     """
     content = await file.read()
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "sbi", "txn_report", content, file.filename or "", current_user, force=force)
     try:
         df = pd.read_excel(io.BytesIO(content), engine='xlrd', header=None)
     except Exception:
