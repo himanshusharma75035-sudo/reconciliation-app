@@ -244,6 +244,7 @@ function UploadCard({ label, desc, endpoint, extraFields = [], onDone, color = '
   const [file, setFile] = useState(null)
   const [uploading, setUploading] = useState(false)
   const [extra, setExtra] = useState({})
+  const [dup, setDup] = useState('')   // 409 duplicate-file message; enables force re-upload
   const fileRef = React.useRef()
   const colorMap = {
     blue:   { border: 'border-blue-300',   bg: 'bg-blue-50',   btn: '#1d4ed8' },
@@ -252,19 +253,26 @@ function UploadCard({ label, desc, endpoint, extraFields = [], onDone, color = '
     amber:  { border: 'border-amber-300',  bg: 'bg-amber-50',  btn: '#d97706' },
   }[color] || {}
 
-  const handleUpload = async () => {
+  const handleUpload = async (force = false) => {
     if (!file) return toast.error('Select a file first')
     setUploading(true)
     try {
       const fd = new FormData()
       fd.append('file', file)
       Object.entries(extra).forEach(([k, v]) => { if (v) fd.append(k, v) })
-      const { data } = await api.post(endpoint, fd)
+      const url = force ? `${endpoint}${endpoint.includes('?') ? '&' : '?'}force=true` : endpoint
+      const { data } = await api.post(url, fd)
       toast.success(`${label}: ${data.inserted} rows uploaded`)
-      setFile(null)
+      setFile(null); setDup('')
       if (onDone) onDone()
     } catch (err) {
-      toast.error(err.response?.data?.detail || `${label} upload failed`)
+      // 409 = this exact file was already uploaded. Don't clear the file — offer a
+      // deliberate replace instead of silently doubling the data.
+      if (err.response?.status === 409) {
+        setDup(err.response?.data?.detail || 'This file was already uploaded.')
+      } else {
+        toast.error(err.response?.data?.detail || `${label} upload failed`)
+      }
     } finally { setUploading(false) }
   }
 
@@ -291,10 +299,23 @@ function UploadCard({ label, desc, endpoint, extraFields = [], onDone, color = '
           : <div className="text-gray-400 text-xs"><Upload size={14} className="mx-auto mb-1" />Click to select</div>
         }
       </div>
-      <button onClick={handleUpload} disabled={!file || uploading}
+      <button onClick={() => handleUpload(false)} disabled={!file || uploading}
         className="btn-primary w-full text-sm" style={{ background: file ? colorMap.btn : undefined }}>
         {uploading ? 'Uploading…' : `Upload ${label} →`}
       </button>
+      {dup && (
+        <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs">
+          <div className="text-amber-800">{dup}</div>
+          <div className="flex items-center gap-2 mt-2">
+            <button onClick={() => handleUpload(true)} disabled={uploading}
+              className="px-2.5 py-1 rounded-md bg-amber-600 text-white font-medium hover:bg-amber-700 disabled:opacity-50">
+              {uploading ? 'Replacing…' : 'Re-upload anyway (replace)'}
+            </button>
+            <button onClick={() => { setDup(''); setFile(null) }} className="text-gray-500 hover:text-gray-700">Cancel</button>
+          </div>
+          <div className="text-[11px] text-amber-600 mt-1.5">Only do this if you meant to re-apply the same file (e.g. restoring removed rows). It will not create duplicates for rows that already exist.</div>
+        </div>
+      )}
     </div>
   )
 }

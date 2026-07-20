@@ -150,6 +150,7 @@ def _audit(db: Session, user, action: str, detail: dict, action_type: str = "hum
 async def upload_bank_statement(
     file: UploadFile = File(...),
     recon_date: str = "",
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
@@ -165,8 +166,17 @@ async def upload_bank_statement(
 
     Parses all transactions; auto-detects settlement rows via EKOSETTLEMENT keyword.
     Extracts KO ID and deduction date from settlement description.
+
+    This endpoint APPENDS (SBI statements are per-day and accumulate), so re-uploading the
+    same file would silently DOUBLE the data — which is exactly what happened on 2026-07-17
+    while recovering from an accidental clear. A SHA-256 duplicate-file guard now blocks the
+    identical bytes with a 409; pass force=true to re-apply on purpose (e.g. restoring rows
+    that were removed since).
     """
     raw = await file.read()
+
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "sbi", "bank", raw, file.filename or "", current_user, force=force)
 
     def _cell(v) -> str:
         """Excel cell → the plain string the tab-separated path would have carried."""
@@ -212,6 +222,19 @@ async def upload_bank_statement(
     errors = []
     today = str(datetime.date.today())
     _fund_rows = []   # funds-position lines (file order; reporting only)
+
+    # ── Per-date REPLACE (idempotent ingest) ──────────────────────────────────
+    # This endpoint used to pure-APPEND, so re-uploading a statement silently DOUBLED
+    # the day's rows (the 2026-07-17 incident). Now it replaces only the dates the file
+    # actually contains: delete existing bank rows for those txn_dates, then insert. A
+    # re-upload of the same day therefore supersedes it instead of duplicating, and an
+    # incremental (new-day) file leaves earlier days intact. Mirrors the E-Value bank fix
+    # (behavior-contract item 13 spirit). Combined with the SHA-256 guard above, an
+    # accidental same-file re-upload is blocked; a deliberate force re-upload is safe.
+    file_dates = {d for d in (_nd((p[0] or "").strip()) for p in rows if p) if d}
+    if file_dates:
+        db.query(SBIBankTransaction).filter(
+            SBIBankTransaction.txn_date.in_(file_dates)).delete(synchronize_session=False)
 
     for parts in rows:
         if len(parts) < 6: continue

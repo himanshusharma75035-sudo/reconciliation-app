@@ -26,6 +26,7 @@ import ProductReconPage from './pages/ProductReconPage'
 import Workflow from './pages/Workflow'
 import IngestionMonitor from './pages/IngestionMonitor'
 import DeveloperPortal from './pages/DeveloperPortal'
+import RecycleBin from './pages/RecycleBin'
 import ErrorBoundary from './components/ErrorBoundary'
 import { isViewer } from './utils/permissions'
 
@@ -73,6 +74,7 @@ export default function App() {
         <Route path="product/:slug"   element={<ProductReconPage />} />
         <Route path="workflow"        element={<Workflow />} />
         <Route path="ingestion-monitor" element={<IngestionMonitor />} />
+        <Route path="recycle-bin" element={<RecycleBin />} />
         <Route path="developer-portal" element={<DeveloperPortal />} />
       </Route>
       {/* Standalone full-screen executive dashboard (no sidebar). Public @eko.co.in

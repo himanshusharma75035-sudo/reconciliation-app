@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Play, AlertTriangle, GitMerge,
-  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2, PieChart
+  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2, PieChart, Trash2
 } from 'lucide-react'
 import { hasPermission, isAdmin } from '../utils/permissions'
 import EkoLogo from './EkoLogo'
@@ -26,6 +26,7 @@ const navItems = [
   { to: '/workflow',     icon: Scale,           label: 'Workflow' },
   { to: '/insights',     icon: TrendingUp,      label: 'Insights' },
   { to: '/developer-portal', icon: Code2,       label: 'Developer Portal', requiredPerm: 'portal_access' },
+  { to: '/recycle-bin',  icon: Trash2,          label: 'Recycle Bin',   requiredPerm: 'clear_data' },
   { to: '/audit-log',    icon: Shield,          label: 'Audit Log',     requiredPerm: 'audit_read' },
   { to: '/users',        icon: Users,           label: 'Users',         adminOnly: true },
   { to: '/admin',        icon: Settings,        label: 'Configuration', adminOnly: true },
