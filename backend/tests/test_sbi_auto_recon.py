@@ -1,12 +1,13 @@
 """
 SBI kiosk auto-recon on upload (parity with the core products' post-upload chain).
 
-Invariants:
-1. Every SBI upload endpoint triggers P01→P04 for today's recon_date and reports
-   the outcome under 'auto_recon' in its response.
-2. A failing process NEVER blocks the upload — errors are swallowed per-process
-   (missing counterpart files mid-day are normal; the next upload completes them).
-3. Results land under today's recon_date (upload_date≈recon_date, contract #17).
+Invariants (post 2026-07-20 date-fix):
+1. Every SBI upload endpoint triggers P01→P04 for the BUSINESS dates the file contains
+   and reports the outcome under 'auto_recon' in its response.
+2. A failing process NEVER blocks the upload — errors are swallowed per-process/date
+   (a missing counterpart file is a wipe-guarded no-op, not a failure).
+3. Results land under the transaction's BUSINESS date (recon_date == txn_date), NOT
+   'today' — so a bulk/back-dated upload reconciles the right days and never wipes them.
 """
 import asyncio
 import datetime
@@ -52,27 +53,31 @@ def _bank_stmt() -> bytes:
     return "\n".join(lines).encode()
 
 
+BIZ_DATE = "2026-07-01"   # the date in _bank_stmt()
+
+
 def test_upload_triggers_auto_recon_and_never_blocks(db):
     res = asyncio.run(upload_bank_statement(
         file=_UploadFileStub(_bank_stmt(), "stmt.xls"), recon_date="",
         db=db, current_user=USER))
     assert res["inserted"] == 2
-    # auto_recon key present with a per-process outcome for today's recon date
+    # auto_recon reconciles the file's BUSINESS dates, not 'today'
     ar = res["auto_recon"]
-    assert ar["recon_date"] == TODAY
-    assert set(ar) >= {"recon_date", "p01", "p02", "p03", "p04"}
-    # every process either ran or was skipped — none may raise out of the upload
-    for p in ("p01", "p02", "p03", "p04"):
-        assert ar[p] == "ok" or ar[p].startswith("skipped:")
-    # P02 ran against the uploaded statement → results exist for today's recon_date
-    if ar["p02"] == "ok":
-        assert db.query(SBIP02Result).filter(SBIP02Result.recon_date == TODAY).count() > 0
+    assert BIZ_DATE in ar["dates"]
+    assert "error" not in ar
+    # P02 ran against the statement → results land under the BUSINESS date, not today
+    assert db.query(SBIP02Result).filter(SBIP02Result.recon_date == BIZ_DATE).count() > 0
+    assert db.query(SBIP02Result).filter(SBIP02Result.recon_date == TODAY).count() == 0 or TODAY == BIZ_DATE
     # the upload itself is committed regardless of process outcomes
     assert db.query(SBIBankTransaction).count() == 2
 
 
 def test_auto_run_swallows_every_process_failure(db, monkeypatch):
     import routes.sbi_kiosk as SK
+    # a business date to iterate over, so the failure path is actually exercised
+    db.add(SBIBankTransaction(id="b1", upload_date=TODAY, txn_date=BIZ_DATE,
+                              credit=5000, debit=0, balance=100))
+    db.commit()
 
     def _boom(**kwargs):
         raise RuntimeError("engine exploded")
@@ -80,4 +85,5 @@ def test_auto_run_swallows_every_process_failure(db, monkeypatch):
     for p in ("run_p01", "run_p02", "run_p03", "run_p04"):
         monkeypatch.setattr(SK, p, _boom)
     out = _auto_run_after_upload(db, USER)     # must not raise
-    assert all(out[p].startswith("skipped:") for p in ("p01", "p02", "p03", "p04"))
+    assert isinstance(out, dict) and "error" not in out   # per-process errors swallowed inside
+    assert db.query(SBIP02Result).count() == 0            # nothing created despite all "running"

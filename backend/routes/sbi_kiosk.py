@@ -144,6 +144,18 @@ def _audit(db: Session, user, action: str, detail: dict, action_type: str = "hum
         db.rollback()
 
 
+def _sbi_business_dates(db):
+    """Every business (txn) date present across the SBI sources, sorted. Drives the
+    'reconcile all dates' orchestration so a single bulk upload reconciles each day it
+    contains — instead of everything collapsing under one upload-batch recon_date."""
+    dates = set()
+    for col in (SBIBankTransaction.txn_date, SBITxnReport.txn_date):
+        for (d,) in db.query(col).filter(col.isnot(None)).distinct().all():
+            if d and len(d) >= 10 and d[:4].isdigit():
+                dates.add(d[:10])
+    return sorted(dates)
+
+
 # ── P01: Bank Statement Upload ────────────────────────────────────────────────
 
 @router.post("/upload/bank-statement")
@@ -310,7 +322,9 @@ async def upload_bank_statement(
         SBIBankTransaction.upload_date == today,
         SBIBankTransaction.is_settlement == True
     ).count()
-    auto_recon = _auto_run_after_upload(db, current_user)
+    # Reconcile only the business dates this statement actually contains (efficient +
+    # correct); a re-upload re-reconciles just its own days.
+    auto_recon = _auto_run_after_upload(db, current_user, dates=sorted(file_dates))
     return {
         "inserted": inserted,
         "settlement_rows": settlement_count,
@@ -599,16 +613,13 @@ def run_p01(
     Match key: KO ID. Handles D+1 via deduction_date field.
     Statuses: CREDITED | PENDING | PARTIAL | EXCESS
     """
-    today = upload_date or str(datetime.date.today())
-
-    # Clear old P01 results for this recon_date
-    db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date).delete()
-    db.commit()
-
+    # Source by the transaction's BUSINESS date (recon_date) — NOT the upload batch. The
+    # old `upload_date or today()` default silently reconciled "today's upload" regardless
+    # of the date the operator picked, so running on the wrong day wiped good results.
     # Load KO Limits — KO Withdrawals (money leaving CSP wallet = settlement request)
     ko_wdl_q = db.query(SBIKOLimits).filter(
         SBIKOLimits.txn_type == 'KO Withdrawal',
-        SBIKOLimits.upload_date == today,
+        SBIKOLimits.txn_date == recon_date,
     )
     ko_withdrawals = {}  # ko_id → total amount withdrawn
     ko_dates = {}        # ko_id → txn_date
@@ -616,11 +627,10 @@ def run_p01(
         ko_withdrawals[r.ko_id] = ko_withdrawals.get(r.ko_id, 0) + (r.amount or 0)
         ko_dates[r.ko_id] = r.txn_date
 
-    # Load bank settlement transactions (EKOSETTLEMENT filter)
-    # Include D+1: deductions from yesterday may appear in today's bank statement
+    # Load bank settlement transactions (EKOSETTLEMENT filter) for this date
     bank_settle_q = db.query(SBIBankTransaction).filter(
         SBIBankTransaction.is_settlement == True,
-        SBIBankTransaction.upload_date == today,
+        SBIBankTransaction.txn_date == recon_date,
     )
     bank_by_ko = {}      # ko_id → total bank settlement debit
     bank_dates = {}      # ko_id → bank txn_date
@@ -631,6 +641,13 @@ def run_p01(
         bank_by_ko[ko] = bank_by_ko.get(ko, 0) + (r.debit or 0)
         bank_dates[ko] = r.txn_date
         bank_deduct[ko] = r.deduct_date
+
+    # WIPE-GUARD: nothing to reconcile for this date → do NOT delete existing results.
+    # (Running a date with no source data must never destroy a prior good reconciliation.)
+    if not ko_withdrawals and not bank_by_ko:
+        return {"recon_date": recon_date, "skipped": True,
+                "reason": "no P01 settlement source data for this date", "total_kos": 0}
+    db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date).delete()
 
     # All KOs that appear in either source
     all_kos = set(ko_withdrawals.keys()) | set(bank_by_ko.keys())
@@ -689,20 +706,22 @@ def run_p02(
     Reversal: same ref appears as both DR and CR → tagged as Reversal Debit / Credit.
     Statuses: Matched / Unmatched / Partial / Reversal
     """
-    today = upload_date or str(datetime.date.today())
-    db.query(SBIP02Result).filter(SBIP02Result.recon_date == recon_date).delete()
-    db.commit()
+    # Source by the transaction's BUSINESS date (recon_date), not the upload batch.
+    bank_txns = db.query(SBIBankTransaction).filter(
+        SBIBankTransaction.txn_date == recon_date
+    ).all()
 
-    # Build reference number index from all Transaction Reports
+    # WIPE-GUARD: no bank rows for this date → do NOT delete existing results.
+    if not bank_txns:
+        return {"recon_date": recon_date, "skipped": True,
+                "reason": "no bank statement rows for this date", "total": 0}
+    db.query(SBIP02Result).filter(SBIP02Result.recon_date == recon_date).delete()
+
+    # Reference-number index from the transaction reports for this date
     txn_by_ref = {}  # ref → list of SBITxnReport rows
-    for r in db.query(SBITxnReport).filter(SBITxnReport.upload_date == today).all():
+    for r in db.query(SBITxnReport).filter(SBITxnReport.txn_date == recon_date).all():
         if r.reference_number:
             txn_by_ref.setdefault(r.reference_number, []).append(r)
-
-    # Load all bank transactions
-    bank_txns = db.query(SBIBankTransaction).filter(
-        SBIBankTransaction.upload_date == today
-    ).all()
 
     # First pass: detect reversals (same ref, DR + CR pair)
     ref_bank_map = {}  # ref → list of (bank_txn, type)
@@ -796,30 +815,34 @@ def run_p03(
       P1: same-day | P2: D+1 bank→txn | P3: D+1 txn→bank | P4: D-1 txn→bank
     One-to-one matching (no duplicate assignment).
     """
-    today = upload_date or str(datetime.date.today())
-    db.query(SBIP03Result).filter(SBIP03Result.recon_date == recon_date).delete()
-    db.commit()
-
-    # Load CSP Master for mode lookup
+    # CSP Master is reference data (mode lookup) — not date-scoped.
     csp_modes = {}
-    for r in db.query(SBICSPMaster).filter(SBICSPMaster.upload_date == today).all():
+    for r in db.query(SBICSPMaster).all():
         if r.csp_code not in csp_modes:
             csp_modes[r.csp_code] = r.mode
 
-    # Load Transaction Report (money paid OUT to CSP = debits from settlement account)
+    # Source by BUSINESS date (recon_date). NOTE: Phase 1 matches same-day only — the
+    # cross-day D±1 shift window is a Phase-3 item (its ±2 window and cross-date one-to-one
+    # need finance sign-off); running per business date with a window would otherwise let a
+    # bank credit be reused across two dates' runs.
     txn_rows = []
-    for r in db.query(SBITxnReport).filter(SBITxnReport.upload_date == today).all():
+    for r in db.query(SBITxnReport).filter(SBITxnReport.txn_date == recon_date).all():
         if r.status and r.status.lower() == 'success' and r.amount and r.amount > 0:
             txn_rows.append(r)
 
-    # Load Bank Statement credits (money received FROM CSP)
     bank_credits = []
     for r in db.query(SBIBankTransaction).filter(
-        SBIBankTransaction.upload_date == today,
+        SBIBankTransaction.txn_date == recon_date,
         SBIBankTransaction.credit > 0,
         SBIBankTransaction.is_settlement == False,
     ).all():
         bank_credits.append(r)
+
+    # WIPE-GUARD: nothing to reconcile for this date → do NOT delete existing results.
+    if not txn_rows and not bank_credits:
+        return {"recon_date": recon_date, "skipped": True,
+                "reason": "no P03 (txn report / bank credit) source data for this date", "total": 0}
+    db.query(SBIP03Result).filter(SBIP03Result.recon_date == recon_date).delete()
 
     # Build bank lookup: (ko_id, amount, date) → bank row
     # Date offsets checked: 0, +1, -1
@@ -950,19 +973,22 @@ def run_p04(
       - Determine whether wallet needs DEPOSIT or WITHDRAWAL correction
     Action is flagged; team marks done after performing action in SBI portal.
     """
-    today = upload_date or str(datetime.date.today())
-    db.query(SBIP04Result).filter(SBIP04Result.recon_date == recon_date).delete()
-    db.commit()
-
-    # Load KO Cash Holding closing balances
+    # Source by BUSINESS date (recon_date), not the upload batch.
+    # KO Cash Holding closing balances for this report date.
     cash_holding = {}
-    for r in db.query(SBIKOCashHolding).filter(SBIKOCashHolding.upload_date == today).all():
+    for r in db.query(SBIKOCashHolding).filter(SBIKOCashHolding.report_date == recon_date).all():
         cash_holding[r.ko_id] = r.closing_balance or 0
 
-    # Load Limit Failures
+    # Limit Failures for this date (P04 is driven by the failure report)
     failures = db.query(SBILimitFailure).filter(
-        SBILimitFailure.upload_date == today
+        SBILimitFailure.txn_date == recon_date
     ).all()
+
+    # WIPE-GUARD: no failures for this date → nothing to reconcile → don't delete existing.
+    if not failures:
+        return {"recon_date": recon_date, "skipped": True,
+                "reason": "no limit-failure rows for this date", "total": 0}
+    db.query(SBIP04Result).filter(SBIP04Result.recon_date == recon_date).delete()
 
     results = []
     for f in failures:
@@ -1901,51 +1927,106 @@ def sbi_report(
 
 # ── Run all four processes in sequence (QoL orchestration — same code paths) ──
 
+def _run_all_dates(db, current_user, dates):
+    """Run P01→P04 for each business date in `dates`. Each process is wipe-guarded, so a
+    date missing its counterpart file is a no-op (never a wipe). A failure in one
+    process/date is recorded but never blocks the rest."""
+    per_date = {}
+    for d in dates:
+        r = {}
+        for name, fn in (("p01", run_p01), ("p02", run_p02), ("p03", run_p03), ("p04", run_p04)):
+            try:
+                r[name] = fn(recon_date=d, upload_date=None, db=db, current_user=current_user)
+            except Exception as e:
+                try: db.rollback()
+                except Exception: pass
+                r[name] = {"error": str(e)[:200]}
+        per_date[d] = r
+    return per_date
+
+
 @router.post("/run/all")
 def run_all(
-    recon_date: str,
+    recon_date: Optional[str] = None,
     upload_date: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("run_recon")),
 ):
-    """Run P01 → P02 → P03 → P04 for one recon_date, exactly as the four individual
-    buttons would (identical code paths — each keeps its own audit row). A failure in
-    one process is reported but does not block the others."""
-    results = {}
-    for name, fn in (("p01", run_p01), ("p02", run_p02), ("p03", run_p03), ("p04", run_p04)):
-        try:
-            results[name] = fn(recon_date=recon_date, upload_date=upload_date,
-                               db=db, current_user=current_user)
-        except Exception as e:
-            db.rollback()
-            results[name] = {"error": str(e)[:300]}
-    _audit(db, current_user, "sbi_run_all", {
-        "recon_date": recon_date,
-        "ok": [k for k, v in results.items() if "error" not in v],
-        "failed": [k for k, v in results.items() if "error" in v]})
-    return {"recon_date": recon_date, "results": results}
+    """Run P01 → P02 → P03 → P04. Pass `recon_date` for a single business date, or omit it
+    to reconcile EVERY business date present in the data (so one bulk upload reconciles
+    each day it contains). Each process is wipe-guarded — a date with no source data is
+    skipped, never wiped. A failure in one process/date is reported, not fatal."""
+    dates = [recon_date] if recon_date else _sbi_business_dates(db)
+    per_date = _run_all_dates(db, current_user, dates)
+    _audit(db, current_user, "sbi_run_all",
+           {"dates": dates, "count": len(dates), "single": bool(recon_date)})
+    return ({"recon_date": recon_date, "results": per_date.get(recon_date, {})}
+            if recon_date else {"dates": dates, "results": per_date})
 
 
-def _auto_run_after_upload(db, current_user):
-    """Auto-recon after every SBI upload — parity with the core products' post-upload
-    chain: P01→P04 run for today's recon_date and EVERY failure is swallowed, so an
-    upload is never blocked (a process missing its counterpart file mid-day is
-    normal; the next upload's auto-run completes it). Results land under today's
-    recon_date per the upload_date≈recon_date convention (behaviour-contract #17),
-    exactly as the Run All button would."""
-    d = str(datetime.date.today())
-    out = {}
-    for name, fn in (("p01", run_p01), ("p02", run_p02), ("p03", run_p03), ("p04", run_p04)):
-        try:
-            fn(recon_date=d, upload_date=None, db=db, current_user=current_user)
-            out[name] = "ok"
-        except Exception as e:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            out[name] = f"skipped: {str(e)[:120]}"
-    return {"recon_date": d, **out}
+@router.get("/readiness")
+def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Per business date: which of the source files are present + the current P02 match
+    rate. This makes the confusion visible — a low rate is almost always a MISSING FILE
+    (no transaction report uploaded that day), not broken reconciliation."""
+    from sqlalchemy import func as F
+
+    def by_date(model, col):
+        out = {}
+        for d, n in db.query(col, F.count(model.id)).filter(col.isnot(None)).group_by(col).all():
+            if d and len(d) >= 10:
+                out[d[:10]] = out.get(d[:10], 0) + n
+        return out
+
+    bank  = by_date(SBIBankTransaction, SBIBankTransaction.txn_date)
+    txn   = by_date(SBITxnReport, SBITxnReport.txn_date)
+    kolim = by_date(SBIKOLimits, SBIKOLimits.txn_date)
+    cash  = by_date(SBIKOCashHolding, SBIKOCashHolding.report_date)
+    fail  = by_date(SBILimitFailure, SBILimitFailure.txn_date)
+
+    p02 = {}
+    for d, st, n in db.query(SBIP02Result.recon_date, SBIP02Result.match_status,
+                             F.count(SBIP02Result.id)).group_by(
+                             SBIP02Result.recon_date, SBIP02Result.match_status).all():
+        if d:
+            p02.setdefault(d[:10], {})[st] = n
+
+    dates = sorted(set(bank) | set(txn) | set(kolim) | set(cash) | set(fail))
+    rows = []
+    for d in dates:
+        p = p02.get(d, {}); tot = sum(p.values()); m = p.get("Matched", 0)
+        rows.append({
+            "date": d,
+            "bank": bank.get(d, 0), "txn_report": txn.get(d, 0),
+            "ko_limits": kolim.get(d, 0), "cash_holding": cash.get(d, 0),
+            "limit_failures": fail.get(d, 0),
+            # P02 can only reconcile a day that has BOTH a bank statement and a txn report
+            "p02_ready": bool(bank.get(d) and txn.get(d)),
+            "p02_total": tot, "p02_matched": m,
+            "p02_rate": round(100 * m / tot, 1) if tot else None,
+            "missing": [name for name, present in (
+                ("Bank statement", bank.get(d)), ("Transaction report", txn.get(d)))
+                if not present],
+        })
+    return {"dates": rows, "latest": dates[-1] if dates else None}
+
+
+def _auto_run_after_upload(db, current_user, dates=None):
+    """Auto-recon after every SBI upload. Reconciles the business dates the upload touched
+    (or, if unknown, every date in the data) — NOT 'today', which never reconciled a bulk
+    or back-dated upload and could stamp results under the wrong day. Each process is
+    wipe-guarded, so a date still missing a counterpart file is a harmless no-op that the
+    next upload's auto-run completes. Every failure is swallowed so an upload never blocks."""
+    try:
+        ds = sorted({d[:10] for d in dates if d and len(d) >= 10}) if dates else _sbi_business_dates(db)
+        if not ds:
+            return {"dates": [], "note": "no business dates to reconcile"}
+        _run_all_dates(db, current_user, ds)
+        return {"dates": ds}
+    except Exception as e:
+        try: db.rollback()
+        except Exception: pass
+        return {"error": str(e)[:200]}
 
 
 # ── Manual match (persistent overlay across re-runs) ──────────────────────────

@@ -147,17 +147,39 @@ function ProcessHeader({ process, left, right, desc }) {
   )
 }
 
+// Run all business dates at once — reconciles every day in the data (wipe-guarded, so a
+// day missing its counterpart file is a harmless no-op). This is the safe, correct way to
+// run; the per-process/per-date buttons below are for re-running a single day.
+function RunAllDatesButton({ onDone }) {
+  const [busy, setBusy] = useState(false)
+  const run = async () => {
+    setBusy(true)
+    try {
+      const { data } = await api.post('/sbi/run/all')   // no recon_date → all business dates
+      toast.success(`Reconciled ${data.dates?.length || 0} date(s)`)
+      onDone && onDone()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Run failed') }
+    finally { setBusy(false) }
+  }
+  return (
+    <button onClick={run} disabled={busy}
+      className="btn-primary flex items-center gap-2 bg-rose-600 hover:bg-rose-700">
+      <Play size={14} />{busy ? 'Reconciling all dates…' : 'Reconcile all dates'}
+    </button>
+  )
+}
+
 // Run + filter control row, shared shape.
 function RunBar({ process, reconDate, setReconDate, onRun, running, children }) {
   const a = ACCENT[process] || ACCENT.p01
   return (
     <div className="flex items-end gap-3 mb-4 flex-wrap">
       <div>
-        <label className="text-xs text-gray-400 block mb-1">Recon Date <span className="text-gray-300">(run batch)</span></label>
+        <label className="text-xs text-gray-400 block mb-1">Business date <span className="text-gray-300">(the day being reconciled)</span></label>
         <input type="date" className="input" value={reconDate} onChange={e => setReconDate(e.target.value)} />
       </div>
       <button onClick={onRun} disabled={running} className="btn-primary flex items-center gap-2" style={{ background: a.btn }}>
-        <Play size={14} />{running ? 'Running…' : `Run ${process.toUpperCase()}`}
+        <Play size={14} />{running ? 'Running…' : `Run ${process.toUpperCase()} for this day`}
       </button>
       <div className="w-px h-9 bg-gray-200 mx-1" />
       {children}
@@ -1155,6 +1177,75 @@ function HeaderActions() {
   )
 }
 
+// Readiness / transparency panel — per business date, which source files are present and
+// the resulting P02 match rate. Makes it obvious that a low rate is a MISSING FILE, not a
+// broken reconciliation.
+const RCell = ({ n, warn }) => (
+  <td className={`py-1.5 px-2 text-right tabular-nums ${warn ? 'text-red-500 font-semibold' : n ? 'text-gray-600' : 'text-gray-300'}`}>
+    {n ? Number(n).toLocaleString() : '—'}
+  </td>
+)
+
+function ReadinessPanel({ refreshKey, onReconciled }) {
+  const [rows, setRows] = useState(null)
+  const load = async () => {
+    try { const { data } = await api.get('/sbi/readiness'); setRows(data.dates || []) }
+    catch { setRows([]) }
+  }
+  useEffect(() => { load() }, [refreshKey])
+  if (!rows || rows.length === 0) return null
+  const missing = rows.filter(r => r.bank && !r.txn_report)
+  return (
+    <div className="card mb-5">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <h3 className="font-semibold text-gray-700 text-sm">Reconciliation readiness — by business date</h3>
+        <RunAllDatesButton onDone={() => { load(); onReconciled && onReconciled() }} />
+      </div>
+      {missing.length > 0 && (
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800">
+          ⚠ <b>{missing.length} day(s)</b> have a bank statement but <b>no transaction report</b> uploaded
+          ({missing.map(r => r.date).join(', ')}). Those days can’t be matched until their report file is
+          uploaded — that’s why the match rate looks low. It’s a <b>missing file, not a recon failure</b>.
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-gray-400 border-b border-gray-100 text-left">
+              <th className="py-2 pr-3">Date</th>
+              <th className="py-2 px-2 text-right">Bank</th>
+              <th className="py-2 px-2 text-right">Txn report</th>
+              <th className="py-2 px-2 text-right">KO limits</th>
+              <th className="py-2 px-2 text-right">Cash hold</th>
+              <th className="py-2 px-2 text-right">Fails</th>
+              <th className="py-2 px-2">P02 match</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.date} className="border-b border-gray-50 hover:bg-gray-50/50">
+                <td className="py-1.5 pr-3 font-mono text-gray-700">{r.date}</td>
+                <RCell n={r.bank} />
+                <RCell n={r.txn_report} warn={r.bank && !r.txn_report} />
+                <RCell n={r.ko_limits} />
+                <RCell n={r.cash_holding} />
+                <RCell n={r.limit_failures} />
+                <td className="py-1.5 px-2">
+                  {r.p02_rate == null
+                    ? (r.bank && !r.txn_report
+                        ? <span className="text-amber-600">report missing</span>
+                        : <span className="text-gray-300">not run</span>)
+                    : <span className="font-semibold" style={{ color: r.p02_rate >= 85 ? '#059669' : r.p02_rate >= 50 ? '#d97706' : '#dc2626' }}>{r.p02_rate}%</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 export default function SBIKiosk() {
   const [tab, setTab] = useState('upload')
   const [uploadKey, setUploadKey] = useState(0)
@@ -1173,6 +1264,8 @@ export default function SBIKiosk() {
       </div>
 
       <UploadStatus key={uploadKey} />
+
+      <ReadinessPanel refreshKey={uploadKey} onReconciled={onUploadDone} />
 
       {/* Tab bar */}
       <div className="flex gap-0 mb-5 border-b border-gray-200 overflow-x-auto">
