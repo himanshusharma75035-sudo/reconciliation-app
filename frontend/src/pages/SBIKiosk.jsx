@@ -147,6 +147,18 @@ function ProcessHeader({ process, left, right, desc }) {
   )
 }
 
+// Default any SBI date picker to the LATEST day that actually has data (not today, which is
+// usually empty — the source of "everything shows 0"). Falls back to today.
+function useLatestSbiDate() {
+  const [d, setD] = useState(today())
+  useEffect(() => {
+    let alive = true
+    api.get('/sbi/readiness').then(({ data }) => { if (alive && data.latest) setD(data.latest) }).catch(() => {})
+    return () => { alive = false }
+  }, [])
+  return [d, setD]
+}
+
 // Run all business dates at once — reconciles every day in the data (wipe-guarded, so a
 // day missing its counterpart file is a harmless no-op). This is the safe, correct way to
 // run; the per-process/per-date buttons below are for re-running a single day.
@@ -441,7 +453,7 @@ function P01LinesView({ data }) {
 }
 
 function P01Tab() {
-  const [reconDate, setReconDate] = useState(today())
+  const [reconDate, setReconDate] = useLatestSbiDate()
   const [running, setRunning] = useState(false)
   const [data, setData] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
@@ -575,7 +587,7 @@ function P01Tab() {
 // ── P02 — Bank Statement ↔ Transaction Report (by 20-digit ref) ─────────────────
 
 function P02Tab() {
-  const [reconDate, setReconDate] = useState(today())
+  const [reconDate, setReconDate] = useLatestSbiDate()
   const [running, setRunning] = useState(false)
   const [data, setData] = useState(null)
   const [filter, setFilter] = useState('')
@@ -730,7 +742,7 @@ function P02Tab() {
 // ── P03 — Money OUT (Txn Report) ↔ Money IN (Bank Credit) ────────────────────────
 
 function P03Tab() {
-  const [reconDate, setReconDate] = useState(today())
+  const [reconDate, setReconDate] = useLatestSbiDate()
   const [running, setRunning] = useState(false)
   const [data, setData] = useState(null)
   const [filter, setFilter] = useState('')
@@ -852,7 +864,7 @@ function P03Tab() {
 // ── P04 — Wallet Balance (Limit Failure vs Cash Holding → action) ───────────────
 
 function P04Tab() {
-  const [reconDate, setReconDate] = useState(today())
+  const [reconDate, setReconDate] = useLatestSbiDate()
   const [running, setRunning] = useState(false)
   const [data, setData] = useState(null)
   const [filter, setFilter] = useState('')
@@ -997,7 +1009,7 @@ function UnifiedMatchModal({ entry, onClose, onDone }) {
 }
 
 function UnifiedTab() {
-  const [reconDate, setReconDate] = useState(today())
+  const [reconDate, setReconDate] = useLatestSbiDate()
   const [data, setData] = useState(null)
   const [side, setSide] = useState('')
   const [statusF, setStatusF] = useState('')
@@ -1134,24 +1146,12 @@ const PROCESSES = [
 // Header quick actions: run all four processes for one date, and pull the
 // Daily Recon Pack (overview + all processes + exceptions + logs) in one click.
 function HeaderActions() {
-  const [date, setDate] = useState(today())
-  const [running, setRunning] = useState(false)
-  const runAll = async () => {
-    setRunning(true)
-    try {
-      const { data } = await api.post('/sbi/run/all', null, { params: { recon_date: date } })
-      const ok  = Object.entries(data.results || {}).filter(([, v]) => !v.error).map(([k]) => k.toUpperCase())
-      const bad = Object.entries(data.results || {}).filter(([, v]) => v.error)
-      if (ok.length) toast.success(`Ran ${ok.join(' · ')} for ${date}`)
-      bad.forEach(([k, v]) => toast.error(`${k.toUpperCase()}: ${v.error}`))
-    } catch (e) { toast.error(e?.response?.data?.detail || 'Run failed') }
-    finally { setRunning(false) }
-  }
+  const [date, setDate] = useLatestSbiDate()   // the Daily Pack's date (defaults to latest data day)
   const dailyPack = async () => {
     try {
       const r = await api.get('/sbi/report', { params: { type: 'daily_pack', recon_date: date }, responseType: 'blob' })
       const used = r.headers['x-recon-date']
-      if (used === 'none') { toast('No SBI recon results yet — run P01–P04 first', { icon: 'ℹ️' }); return }
+      if (used === 'none') { toast('No SBI recon results yet — Reconcile all dates first', { icon: 'ℹ️' }); return }
       const url = URL.createObjectURL(r.data)
       const a = document.createElement('a'); a.href = url; a.download = `sbi_daily_pack_${used}.xlsx`; a.click()
       URL.revokeObjectURL(url)
@@ -1161,14 +1161,9 @@ function HeaderActions() {
   return (
     <div className="flex items-end gap-2">
       <div>
-        <label className="text-xs text-gray-400 block mb-1">Recon date</label>
+        <label className="text-xs text-gray-400 block mb-1">Daily Pack date</label>
         <input type="date" className="input" value={date} onChange={e => setDate(e.target.value)} />
       </div>
-      <button onClick={runAll} disabled={running}
-        className="btn-primary flex items-center gap-1.5 text-sm whitespace-nowrap">
-        <Play size={14} className={running ? 'animate-pulse' : ''} />
-        {running ? 'Running…' : 'Run all (P01→P04)'}
-      </button>
       <button onClick={dailyPack} title="Overview + all four processes + exceptions + logs, one workbook"
         className="btn-ghost flex items-center gap-1.5 text-sm whitespace-nowrap">
         ⬇ Daily Pack
@@ -1177,72 +1172,113 @@ function HeaderActions() {
   )
 }
 
-// Readiness / transparency panel — per business date, which source files are present and
-// the resulting P02 match rate. Makes it obvious that a low rate is a MISSING FILE, not a
-// broken reconciliation.
+// One "how much data do we have" stat tile. Totals are across ALL dates, so the data is
+// always visible — never hidden behind a single-day filter.
+function OverviewTile({ icon, label, value }) {
+  const ok = Number(value || 0) > 0
+  return (
+    <div className={`rounded-xl border p-3 text-center transition-colors ${ok ? 'bg-white border-gray-200 shadow-sm' : 'bg-gray-50/70 border-gray-100'}`}>
+      <div className="text-lg mb-0.5 opacity-80">{icon}</div>
+      <div className={`text-lg font-bold tabular-nums leading-tight ${ok ? 'text-gray-800' : 'text-gray-300'}`}>{Number(value || 0).toLocaleString('en-IN')}</div>
+      <div className="text-[11px] text-gray-500 leading-tight mt-0.5">{label}</div>
+    </div>
+  )
+}
+
 const RCell = ({ n, warn }) => (
-  <td className={`py-1.5 px-2 text-right tabular-nums ${warn ? 'text-red-500 font-semibold' : n ? 'text-gray-600' : 'text-gray-300'}`}>
-    {n ? Number(n).toLocaleString() : '—'}
+  <td className={`py-2 px-2 text-right tabular-nums ${warn ? 'text-red-500 font-semibold' : n ? 'text-gray-600' : 'text-gray-300'}`}>
+    {n ? Number(n).toLocaleString('en-IN') : '—'}
   </td>
 )
 
+const rateColor = (r) => (r >= 85 ? '#059669' : r >= 50 ? '#d97706' : '#dc2626')
+
+// Data overview + per-business-date readiness. Replaces the old "Upload Status" (which was
+// filtered to today and always read 0). One /sbi/readiness call drives both.
 function ReadinessPanel({ refreshKey, onReconciled }) {
-  const [rows, setRows] = useState(null)
+  const [data, setData] = useState(null)
   const load = async () => {
-    try { const { data } = await api.get('/sbi/readiness'); setRows(data.dates || []) }
-    catch { setRows([]) }
+    try { const { data } = await api.get('/sbi/readiness'); setData(data) }
+    catch { setData({ dates: [], totals: {} }) }
   }
   useEffect(() => { load() }, [refreshKey])
-  if (!rows || rows.length === 0) return null
+  if (!data) return null
+  const t = data.totals || {}
+  const rows = data.dates || []
   const missing = rows.filter(r => r.bank && !r.txn_report)
+  const hasData = (t.bank || 0) + (t.txn_report || 0) > 0
+
   return (
-    <div className="card mb-5">
-      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <h3 className="font-semibold text-gray-700 text-sm">Reconciliation readiness — by business date</h3>
-        <RunAllDatesButton onDone={() => { load(); onReconciled && onReconciled() }} />
+    <>
+      {/* Data overview — totals across every date */}
+      <div className="grid grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+        <OverviewTile icon="🏦" label="Bank statement rows" value={t.bank} />
+        <OverviewTile icon="📋" label="Transaction reports" value={t.txn_report} />
+        <OverviewTile icon="⚙️" label="KO limits" value={t.ko_limits} />
+        <OverviewTile icon="💰" label="KO cash holding" value={t.cash_holding} />
+        <OverviewTile icon="⚠️" label="Limit failures" value={t.limit_failures} />
+        <OverviewTile icon="📊" label="CSP master" value={t.csp_master} />
       </div>
-      {missing.length > 0 && (
-        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800">
-          ⚠ <b>{missing.length} day(s)</b> have a bank statement but <b>no transaction report</b> uploaded
-          ({missing.map(r => r.date).join(', ')}). Those days can’t be matched until their report file is
-          uploaded — that’s why the match rate looks low. It’s a <b>missing file, not a recon failure</b>.
+
+      {hasData && (
+        <div className="card mb-5">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
+            <div>
+              <h3 className="font-semibold text-gray-800 text-sm">Reconciliation readiness — by business date</h3>
+              <p className="text-xs text-gray-400 mt-0.5">
+                {t.days_with_data || rows.length} day(s) of data
+                {t.p02_rate != null && <> · overall P02 match <b style={{ color: rateColor(t.p02_rate) }}>{t.p02_rate}%</b></>}
+                {t.days_missing_report ? <> · <span className="text-amber-600">{t.days_missing_report} day(s) missing a report file</span></> : ''}
+              </p>
+            </div>
+            <RunAllDatesButton onDone={() => { load(); onReconciled && onReconciled() }} />
+          </div>
+
+          {missing.length > 0 && (
+            <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800 leading-relaxed">
+              ⚠ <b>{missing.length} day(s)</b> have a bank statement but <b>no transaction report</b> uploaded
+              ({missing.map(r => r.date).join(', ')}). Those days can’t be matched until their report file is
+              uploaded — that’s a <b>missing file, not a recon failure</b>.
+            </div>
+          )}
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-gray-400 border-b border-gray-100 text-left">
+                  <th className="py-2 pr-3 font-medium">Date</th>
+                  <th className="py-2 px-2 text-right font-medium">Bank</th>
+                  <th className="py-2 px-2 text-right font-medium">Txn report</th>
+                  <th className="py-2 px-2 text-right font-medium">KO limits</th>
+                  <th className="py-2 px-2 text-right font-medium">Cash hold</th>
+                  <th className="py-2 px-2 text-right font-medium">Fails</th>
+                  <th className="py-2 px-2 font-medium">P02 match</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => (
+                  <tr key={r.date} className="border-b border-gray-50 hover:bg-gray-50/60">
+                    <td className="py-2 pr-3 font-mono text-gray-700">{r.date}</td>
+                    <RCell n={r.bank} />
+                    <RCell n={r.txn_report} warn={r.bank && !r.txn_report} />
+                    <RCell n={r.ko_limits} />
+                    <RCell n={r.cash_holding} />
+                    <RCell n={r.limit_failures} />
+                    <td className="py-2 px-2">
+                      {r.p02_rate == null
+                        ? (r.bank && !r.txn_report
+                            ? <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-100">report missing</span>
+                            : <span className="text-gray-300">not run</span>)
+                        : <span className="font-semibold" style={{ color: rateColor(r.p02_rate) }}>{r.p02_rate}%</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs">
-          <thead>
-            <tr className="text-gray-400 border-b border-gray-100 text-left">
-              <th className="py-2 pr-3">Date</th>
-              <th className="py-2 px-2 text-right">Bank</th>
-              <th className="py-2 px-2 text-right">Txn report</th>
-              <th className="py-2 px-2 text-right">KO limits</th>
-              <th className="py-2 px-2 text-right">Cash hold</th>
-              <th className="py-2 px-2 text-right">Fails</th>
-              <th className="py-2 px-2">P02 match</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map(r => (
-              <tr key={r.date} className="border-b border-gray-50 hover:bg-gray-50/50">
-                <td className="py-1.5 pr-3 font-mono text-gray-700">{r.date}</td>
-                <RCell n={r.bank} />
-                <RCell n={r.txn_report} warn={r.bank && !r.txn_report} />
-                <RCell n={r.ko_limits} />
-                <RCell n={r.cash_holding} />
-                <RCell n={r.limit_failures} />
-                <td className="py-1.5 px-2">
-                  {r.p02_rate == null
-                    ? (r.bank && !r.txn_report
-                        ? <span className="text-amber-600">report missing</span>
-                        : <span className="text-gray-300">not run</span>)
-                    : <span className="font-semibold" style={{ color: r.p02_rate >= 85 ? '#059669' : r.p02_rate >= 50 ? '#d97706' : '#dc2626' }}>{r.p02_rate}%</span>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    </>
   )
 }
 
@@ -1257,13 +1293,11 @@ export default function SBIKiosk() {
         <div>
           <h1 className="text-xl font-bold text-gray-800">SBI Kiosk Banking Recon</h1>
           <p className="text-sm text-gray-400">
-            Upload the four process files in the <span className="font-medium">Upload</span> tab, then run P01–P04. Each result reads <span className="font-medium">left source ↔ right source</span>.
+            Upload the process files (<span className="font-medium">Upload</span> tab), then <span className="font-medium">Reconcile all dates</span>. Each day is reconciled on its own business date.
           </p>
         </div>
         <HeaderActions />
       </div>
-
-      <UploadStatus key={uploadKey} />
 
       <ReadinessPanel refreshKey={uploadKey} onReconciled={onUploadDone} />
 

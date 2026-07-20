@@ -2015,7 +2015,21 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
                 ("Bank statement", bank.get(d)), ("Transaction report", txn.get(d)))
                 if not present],
         })
-    return {"dates": rows, "latest": dates[-1] if dates else None}
+
+    from models.database import SBICSPMaster
+    p02_m = sum(p.get("Matched", 0) for p in p02.values())
+    p02_t = sum(sum(p.values()) for p in p02.values())
+    totals = {
+        "bank": sum(bank.values()), "txn_report": sum(txn.values()),
+        "ko_limits": sum(kolim.values()), "cash_holding": sum(cash.values()),
+        "limit_failures": sum(fail.values()),
+        "csp_master": db.query(F.count(SBICSPMaster.id)).scalar() or 0,
+        "days_with_data": len(dates),
+        "days_missing_report": sum(1 for r in rows if r["bank"] and not r["txn_report"]),
+        "p02_matched": p02_m, "p02_total": p02_t,
+        "p02_rate": round(100 * p02_m / p02_t, 1) if p02_t else None,
+    }
+    return {"dates": rows, "latest": dates[-1] if dates else None, "totals": totals}
 
 
 def _auto_run_after_upload(db, current_user, dates=None):
