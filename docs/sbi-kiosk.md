@@ -7,7 +7,7 @@ does **not** use the core matching engine. This doc is the written contract that
 
 > **Status.** Phase 1 (watertight + business-date runs) and Phase 2 (readiness panel) are
 > implemented. Phase 3 below — the matching-logic correctness questions — is **open and needs
-> finance-ops (Rajendra) sign-off** before any change. Do not "fix" a Phase-3 item without it.
+> finance-ops sign-off** before any change. Do not "fix" a Phase-3 item without it.
 
 ## The five source files (per business day)
 
@@ -48,7 +48,7 @@ and the real match rate, so this is visible at a glance (days with complete file
 
 ---
 
-## Phase 3 — open correctness questions (need Rajendra / SOP sign-off)
+## Phase 3 — open correctness questions (need finance-ops / SOP sign-off)
 
 Each of these changes how money reconciles, so none should be changed without confirmation.
 
