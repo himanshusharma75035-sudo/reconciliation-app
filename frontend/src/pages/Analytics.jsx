@@ -227,7 +227,7 @@ export default function Analytics({ standalone = false }) {
           {/* Daily trend + status */}
           <div className="grid lg:grid-cols-2 gap-4">
             <ChartCard title="Daily reconciliation" subtitle="Matched vs unmatched per day"
-              types={['bar', 'stacked', 'line']} defaultType="bar"
+              types={['line', 'stacked', 'bar']} defaultType="line"
               legend={[{ name: 'Matched', color: C.matched }, { name: 'Unmatched', color: C.unmatched }]}>
               {type => daily.length === 0 ? <Empty />
                 : type === 'line' ? <LineChart categories={dailyCats} series={dailySeries} />
@@ -246,12 +246,13 @@ export default function Analytics({ standalone = false }) {
 
           {/* Per-product + bank vs internal */}
           <div className="grid lg:grid-cols-2 gap-4">
-            <ChartCard title="By product" subtitle="Matched vs unmatched per product (DMT groups its banks)"
-              types={['barh', 'stacked']} defaultType="barh"
+            <ChartCard title="By product" subtitle="Each product's matched vs unmatched share — toggle for raw volume"
+              types={['share', 'barh', 'stacked']} defaultType="share"
               legend={[{ name: 'Matched', color: C.matched }, { name: 'Unmatched', color: C.unmatched }]}>
               {type => byGroup.length === 0 ? <Empty />
-                : <BarChart categories={prodCats} series={prodSeries} horizontal stacked={type === 'stacked'}
-                    height={Math.max(200, prodCats.length * 40 + 40)} />}
+                : <BarChart categories={prodCats} series={prodSeries} horizontal
+                    stacked={type === 'stacked'} normalize={type === 'share'}
+                    height={Math.max(180, prodCats.length * 34 + 28)} />}
             </ChartCard>
 
             <ChartCard title="Both sides — bank vs internal" subtitle="How many records matched on each side · darker = Bank, lighter = Internal"

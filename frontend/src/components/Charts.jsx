@@ -16,66 +16,70 @@ const short = n => {
   return String(n)
 }
 
-// ── Vertical / horizontal bar (grouped or stacked) ────────────────────────────
-export function BarChart({ categories, series, height = 280, horizontal = false, stacked = false, valueFmt = fmtN }) {
+// ── Vertical / horizontal bar (grouped · stacked · 100%-normalized share) ──────
+export function BarChart({ categories, series, height = 240, horizontal = false, stacked = false, normalize = false, valueFmt = fmtN }) {
+  const isStacked = stacked || normalize        // normalize implies a single stacked bar per category
   const H = height
-  const padL = horizontal ? 118 : 48, padR = 14, padT = 12, padB = horizontal ? 14 : 46
+  const padL = horizontal ? 118 : 46, padR = 16, padT = 10, padB = horizontal ? 24 : 46
   const plotW = W - padL - padR, plotH = H - padT - padB
   const n = categories.length || 1
-  const maxVal = stacked
+  const catTotal = i => Math.max(1, series.reduce((s, se) => s + (se.values[i] || 0), 0))
+  const maxVal = isStacked
     ? Math.max(1, ...categories.map((_, i) => series.reduce((s, se) => s + (se.values[i] || 0), 0)))
     : Math.max(1, ...series.flatMap(se => se.values))
   const band = (horizontal ? plotH : plotW) / n
-  const inner = band * 0.72
-  const groupW = stacked ? inner : inner / series.length
-
+  const inner = band * (horizontal ? 0.6 : 0.66)   // slimmer bars → more whitespace, less bulk
+  const groupW = isStacked ? inner : inner / series.length
+  const dim = horizontal ? plotW : plotH
+  const lenOf = (val, i) => normalize ? (dim / catTotal(i)) * val : (dim / maxVal) * val
   const ticks = 4
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img">
-      {/* gridlines + axis labels */}
+      {/* gridlines + axis labels (percentages in normalized mode) */}
       {Array.from({ length: ticks + 1 }).map((_, t) => {
-        const v = (maxVal / ticks) * t
+        const frac = t / ticks
+        const lbl = normalize ? `${t * 25}%` : short((maxVal / ticks) * t)
         if (horizontal) {
-          const x = padL + (plotW / maxVal) * v
+          const x = padL + plotW * frac
           return <g key={t}>
-            <line x1={x} y1={padT} x2={x} y2={padT + plotH} stroke="#eef2f7" />
-            <text x={x} y={padT + plotH + 11} fontSize="10" fill="#94a3b8" textAnchor="middle">{short(v)}</text>
+            <line x1={x} y1={padT} x2={x} y2={padT + plotH} stroke="#f1f5f9" />
+            <text x={x} y={padT + plotH + 12} fontSize="9.5" fill="#a3adba" textAnchor="middle">{lbl}</text>
           </g>
         }
-        const y = padT + plotH - (plotH / maxVal) * v
+        const y = padT + plotH - plotH * frac
         return <g key={t}>
-          <line x1={padL} y1={y} x2={padL + plotW} y2={y} stroke="#eef2f7" />
-          <text x={padL - 6} y={y + 3} fontSize="10" fill="#94a3b8" textAnchor="end">{short(v)}</text>
+          <line x1={padL} y1={y} x2={padL + plotW} y2={y} stroke="#f1f5f9" />
+          <text x={padL - 6} y={y + 3} fontSize="9.5" fill="#a3adba" textAnchor="end">{lbl}</text>
         </g>
       })}
       {categories.map((cat, i) => {
         const base = (horizontal ? padT : padL) + band * i + (band - inner) / 2
-        let stackAcc = 0
+        let acc = 0
         return <g key={i}>
           {series.map((se, si) => {
             const val = se.values[i] || 0
+            const len = lenOf(val, i)
+            const pct = normalize ? ` (${Math.round(val / catTotal(i) * 100)}%)` : ''
             if (horizontal) {
-              const len = (plotW / maxVal) * val
-              const y = base + (stacked ? 0 : groupW * si)
-              const x = padL + (stacked ? (plotW / maxVal) * stackAcc : 0)
-              stacked && (stackAcc += val)
-              return <rect key={si} x={x} y={y} width={Math.max(0, len)} height={stacked ? inner : groupW - 2}
-                rx="2" fill={se.colors ? se.colors[i] : se.color} className="bar-h"
-                style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{`${cat} · ${se.name}: ${valueFmt(val)}`}</title></rect>
+              const y = base + (isStacked ? 0 : groupW * si)
+              const x = padL + (isStacked ? lenOf(acc, i) : 0)
+              isStacked && (acc += val)
+              return <rect key={si} x={x} y={y} width={Math.max(0, len)} height={isStacked ? inner : Math.max(1, groupW - 2)}
+                rx="2.5" fill={se.colors ? se.colors[i] : se.color} className="bar-h"
+                style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{`${cat} · ${se.name}: ${valueFmt(val)}${pct}`}</title></rect>
             }
-            const len = (plotH / maxVal) * val
-            const x = base + (stacked ? 0 : groupW * si)
-            const y = padT + plotH - len - (stacked ? (plotH / maxVal) * stackAcc : 0)
-            stacked && (stackAcc += val)
-            return <rect key={si} x={x} y={y} width={stacked ? inner : groupW - 2} height={Math.max(0, len)}
-              rx="2" fill={se.colors ? se.colors[i] : se.color} className="bar-v"
-              style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{`${cat} · ${se.name}: ${valueFmt(val)}`}</title></rect>
+            const x = base + (isStacked ? 0 : groupW * si)
+            const y = padT + plotH - len - (isStacked ? lenOf(acc, i) : 0)
+            isStacked && (acc += val)
+            return <rect key={si} x={x} y={y} width={isStacked ? inner : Math.max(1, groupW - 2)} height={Math.max(0, len)}
+              rx="2.5" fill={se.colors ? se.colors[i] : se.color} className="bar-v"
+              style={{ animationDelay: `${Math.min(i, 24) * 0.03}s` }}><title>{`${cat} · ${se.name}: ${valueFmt(val)}${pct}`}</title></rect>
           })}
           {horizontal
             ? <text x={padL - 6} y={base + inner / 2 + 3} fontSize="10" fill="#475569" textAnchor="end">{cat}</text>
-            : <text x={base + inner / 2} y={padT + plotH + 14} fontSize="10" fill="#475569" textAnchor="middle"
-                transform={n > 8 ? `rotate(35 ${base + inner / 2} ${padT + plotH + 14})` : undefined}
-                style={{ textAnchor: n > 8 ? 'start' : 'middle' }}>{cat}</text>}
+            : <text x={base + inner / 2} y={padT + plotH + 14} fontSize="9.5" fill="#475569"
+                textAnchor={n > 8 ? 'start' : 'middle'}
+                transform={n > 8 ? `rotate(35 ${base + inner / 2} ${padT + plotH + 14})` : undefined}>{cat}</text>}
         </g>
       })}
     </svg>
@@ -83,8 +87,8 @@ export function BarChart({ categories, series, height = 280, horizontal = false,
 }
 
 // ── Multi-series line ─────────────────────────────────────────────────────────
-export function LineChart({ categories, series, height = 280, valueFmt = fmtN }) {
-  const H = height, padL = 48, padR = 14, padT = 12, padB = 46
+export function LineChart({ categories, series, height = 240, valueFmt = fmtN }) {
+  const H = height, padL = 46, padR = 16, padT = 10, padB = 46
   const plotW = W - padL - padR, plotH = H - padT - padB
   const n = categories.length || 1
   const maxVal = Math.max(1, ...series.flatMap(se => se.values))
@@ -164,7 +168,7 @@ export function PieChart({ slices, donut = false, height = 280, valueFmt = fmtN 
 }
 
 // ── Card wrapper with a chart-type toggle ─────────────────────────────────────
-const TYPE_LABEL = { bar: 'Bar', barh: 'Bar (H)', stacked: 'Stacked', line: 'Line', pie: 'Pie', donut: 'Donut' }
+const TYPE_LABEL = { bar: 'Bar', barh: 'Bar (H)', stacked: 'Stacked', share: '% Share', line: 'Line', pie: 'Pie', donut: 'Donut' }
 export function ChartCard({ title, subtitle, types, defaultType, legend, children }) {
   const [type, setType] = useState(defaultType || types[0])
   return (
