@@ -214,14 +214,22 @@ export default function ScheduledReports({ partners = [] }) {
                   <span className="flex items-center gap-1"><Clock size={12} /> {scheduleText(s)}</span>
                   <span>Window: <strong className="text-gray-600">{labelOf(DATE_RANGES, s.date_range)}</strong></span>
                   {s.filters?.partner && <span>Partner: <strong className="text-gray-600 capitalize">{s.filters.partner}</strong></span>}
-                  {s.email_to && <span className="flex items-center gap-1"><Mail size={12} /> {s.email_to}</span>}
+                  {s.email_to && (() => {
+                    const list = s.email_to.split(',').map(e => e.trim()).filter(Boolean)
+                    return (
+                      <span className="flex items-center gap-1" title={list.join('\n')}>
+                        <Mail size={12} /> {list.length} recipient{list.length !== 1 ? 's' : ''}
+                      </span>
+                    )
+                  })()}
                 </div>
                 {s.last_run_at && (
-                  <div className="text-[11px] mt-1.5 flex items-center gap-1">
+                  <div className="text-[11px] mt-1.5 flex items-center gap-1 min-w-0">
                     {s.last_run_status === 'success'
-                      ? <CheckCircle2 size={12} className="text-green-500" />
-                      : <AlertCircle size={12} className="text-amber-500" />}
-                    <span className="text-gray-400">
+                      ? <CheckCircle2 size={12} className="text-green-500 shrink-0" />
+                      : <AlertCircle size={12} className="text-amber-500 shrink-0" />}
+                    <span className="text-gray-400 truncate"
+                      title={`Last run ${new Date(s.last_run_at + 'Z').toLocaleString('en-IN')} — ${s.last_run_message || s.last_run_status}`}>
                       Last run {new Date(s.last_run_at + 'Z').toLocaleString('en-IN')} — {s.last_run_message || s.last_run_status}
                     </span>
                   </div>
