@@ -1114,11 +1114,9 @@ def get_p01_lines(
     """
     P01 line-level (bank <-> data) drill — the P02-style view for P01: the individual
     EKOSETTLEMENT bank lines and KO-withdrawal lines that make up each KO's P01 totals.
-    Source rows are keyed by upload_date (defaults to recon_date — the common same-day
-    case; override if the run used a different upload_date; see behaviour-contract #17
-    on the SBI upload_date coupling).
+    Source rows are keyed by the transaction's BUSINESS date (recon_date == txn_date),
+    matching the runs.
     """
-    ud = upload_date or recon_date
     p01q = db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date)
     if ko_id:  p01q = p01q.filter(SBIP01Result.ko_id.like(f"%{ko_id}%"))
     if status: p01q = p01q.filter(SBIP01Result.status == status)
@@ -1142,14 +1140,14 @@ def get_p01_lines(
         return groups[ko]
 
     for w in db.query(SBIKOLimits).filter(
-            SBIKOLimits.txn_type == "KO Withdrawal", SBIKOLimits.upload_date == ud).all():
+            SBIKOLimits.txn_type == "KO Withdrawal", SBIKOLimits.txn_date == recon_date).all():
         if wanted and w.ko_id not in wanted:
             continue
         _g(w.ko_id)["withdrawals"].append({
             "amount": w.amount, "txn_date": w.txn_date, "datetime": w.txn_datetime,
             "configured_by": w.limit_configured_by})
     for s in db.query(SBIBankTransaction).filter(
-            SBIBankTransaction.is_settlement == True, SBIBankTransaction.upload_date == ud).all():
+            SBIBankTransaction.is_settlement == True, SBIBankTransaction.txn_date == recon_date).all():
         if not s.ko_id or (wanted and s.ko_id not in wanted):
             continue
         _g(s.ko_id)["settlements"].append({
@@ -1161,7 +1159,7 @@ def get_p01_lines(
 
     rows = sorted(groups.values(), key=lambda x: x["ko_id"] or "")
     rows = _apply_src_assignments(db, "p01", recon_date, rows)   # KO-level SRC overlay
-    return {"recon_date": recon_date, "upload_date": ud, "kos": rows, "count": len(rows)}
+    return {"recon_date": recon_date, "upload_date": upload_date, "kos": rows, "count": len(rows)}
 
 
 @router.get("/p02/results")
@@ -1325,8 +1323,8 @@ def get_unified(
     result row via the existing endpoints (result_id + result_process on each row).
     Scoped to one date (sources by upload_date≈recon_date; behaviour-contract #17).
     P03 has no source FK, so P03 links are best-effort on CSP+amount.
+    Sources by the transaction's BUSINESS date (recon_date == txn_date), matching the runs.
     """
-    ud = upload_date or recon_date
 
     p01_by_ko = {x.ko_id: x for x in db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date).all()}
     p02_by_bank, p02_by_report = {}, {}
@@ -1357,7 +1355,7 @@ def get_unified(
                 "_result": None}
 
     # ---- bank side ----
-    for b in db.query(SBIBankTransaction).filter(SBIBankTransaction.upload_date == ud).all():
+    for b in db.query(SBIBankTransaction).filter(SBIBankTransaction.txn_date == recon_date).all():
         drcr = "DR" if (b.debit or 0) > 0 else ("CR" if (b.credit or 0) > 0 else "")
         amt = (b.debit or 0) if (b.debit or 0) > 0 else (b.credit or 0)
         if b.is_settlement:
@@ -1382,7 +1380,7 @@ def get_unified(
         entries.append(e)
 
     # ---- data side: transaction reports ----
-    for t in db.query(SBITxnReport).filter(SBITxnReport.upload_date == ud).all():
+    for t in db.query(SBITxnReport).filter(SBITxnReport.txn_date == recon_date).all():
         amt = t.amount or 0
         e = _new("data", "Txn Report", t.id, t.reference_number, t.ko_id, amt, t.txn_date, "", t.txn_type)
         e["status"] = "Unmatched"
@@ -1401,7 +1399,7 @@ def get_unified(
 
     # ---- data side: KO withdrawals ----
     for w in db.query(SBIKOLimits).filter(SBIKOLimits.txn_type == "KO Withdrawal",
-                                          SBIKOLimits.upload_date == ud).all():
+                                          SBIKOLimits.txn_date == recon_date).all():
         e = _new("data", "KO Withdrawal", w.id, "", w.ko_id, w.amount or 0, w.txn_date, "", "KO Withdrawal")
         r = p01_by_ko.get(w.ko_id)
         if r:
@@ -1442,7 +1440,7 @@ def get_unified(
 
     return {"rows": page_rows, "total": total, "page": page, "page_size": page_size,
             "status_counts": status_counts, "side_counts": side_counts,
-            "recon_date": recon_date, "upload_date": ud}
+            "recon_date": recon_date, "upload_date": upload_date}
 
 
 # ── Export ─────────────────────────────────────────────────────────────────────
