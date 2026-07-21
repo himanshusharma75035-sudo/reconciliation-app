@@ -88,6 +88,54 @@ def _pretty(product: str) -> str:
         product, product.replace("_", " ").title())
 
 
+def _kiosk_processes(db, date_from=None, date_to=None):
+    """Per-process summary for the 4 SBI Kiosk reconciliations (P01–P04), for the expandable
+    breakdown under SBI Kiosk on the analytics dashboard.
+
+    ADDITIVE and isolated: it is NOT folded into `totals`/`by_group` (kiosk there stays P02,
+    the primary bank↔txn recon) — so the exec + main dashboards stay in sync and no other
+    product/process is affected. Read-only over the P0x result tables."""
+    from sqlalchemy import func as F
+    from models.database import SBIP01Result, SBIP02Result, SBIP03Result, SBIP04Result
+    # (label, model, status column, amount column, status→bucket map)
+    specs = [
+        ("P01 · Settlement",     SBIP01Result, SBIP01Result.status,         SBIP01Result.bank_settled,
+         {"credited": "matched", "pending": "unmatched", "partial": "mismatch", "excess": "other"}),
+        ("P02 · Bank ↔ Txn",     SBIP02Result, SBIP02Result.match_status,    SBIP02Result.bank_amount,
+         {"matched": "matched", "unmatched": "unmatched", "partial": "mismatch", "reversal": "other"}),
+        ("P03 · Money out ↔ in", SBIP03Result, SBIP03Result.match_status,    SBIP03Result.txn_amount,
+         {"matched": "matched", "unmatched_txnreport": "unmatched", "unmatched_bank": "unmatched"}),
+        ("P04 · Wallet balance", SBIP04Result, SBIP04Result.action_required, SBIP04Result.action_amount,
+         {"none": "matched", "deposit": "other", "withdrawal": "other"}),
+    ]
+    out = []
+    for label, model, statuscol, amtcol, bmap in specs:
+        q = db.query(statuscol, F.count(model.id), F.sum(amtcol))
+        if date_from:
+            q = q.filter(model.recon_date >= date_from)
+        if date_to:
+            q = q.filter(model.recon_date <= date_to)
+        v = _blank()
+        other_st = {}
+        for st, n, amt in q.group_by(statuscol).all():
+            b = bmap.get(str(st or "").strip().lower(), "other")
+            v[b] += (n or 0)
+            av = float(amt or 0)
+            if b == "matched":
+                v["matched_volume"] = round(v["matched_volume"] + av, 2)
+            elif b == "unmatched":
+                v["open_volume"] = round(v["open_volume"] + av, 2)
+            if b == "other":
+                lbl = _status_label(st)
+                other_st[lbl] = other_st.get(lbl, 0) + (n or 0)
+        denom = v["matched"] + v["unmatched"] + v["mismatch"]
+        out.append({"process": label, **v,
+                    "transactions": v["matched"] + v["unmatched"] + v["mismatch"] + v["other"],
+                    "match_rate": round(v["matched"] / denom * 100, 1) if denom else 0.0,
+                    "other_statuses": other_st})
+    return out
+
+
 def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     from sqlalchemy import func as F
     from models.database import (Transaction, EvalueBankTxn, EvalueWalletLoad,
@@ -298,6 +346,9 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         "by_side": by_side_list,
         "daily": daily_list,
         "products": prod_options,
+        # Additive: the 4 SBI Kiosk process recons (P01–P04) for the expandable breakdown.
+        # NOT part of totals/by_group, so headline numbers are unchanged.
+        "kiosk_processes": _kiosk_processes(db, date_from, date_to) if product in (None, "", "kiosk") else [],
     }
 
 

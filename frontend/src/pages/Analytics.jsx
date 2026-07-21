@@ -31,6 +31,45 @@ const withBase = p => (import.meta.env.BASE_URL + p).replace(/\/{2,}/g, '/')
 
 // `standalone` renders a chrome-free, full-screen view (the /exec route) — same
 // data, no app sidebar — for sharing with management or putting on a display.
+// "Other" cell — a clickable count that opens a breakdown of WHAT those non-reconcilable rows
+// are (Failed / Duplicate / Fee / Reversal …), each with its count and share, so "42 other"
+// becomes legible ("30 Failed · 12 Duplicate").
+function OtherCell({ count, statuses }) {
+  const [open, setOpen] = useState(false)
+  const ref = React.useRef()
+  useEffect(() => {
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [])
+  const n = Number(count || 0)
+  if (!n) return <span className="text-gray-300">0</span>
+  const entries = Object.entries(statuses || {}).sort((a, b) => Number(b[1]) - Number(a[1]))
+  const total = entries.reduce((s, [, v]) => s + Number(v), 0) || n
+  return (
+    <span className="relative inline-block" ref={ref}>
+      <button onClick={() => setOpen(o => !o)} disabled={!entries.length}
+        className="tabular-nums text-gray-500 hover:text-primary underline decoration-dotted decoration-gray-300 underline-offset-2 cursor-pointer disabled:no-underline disabled:cursor-default">
+        {n.toLocaleString('en-IN')}
+      </button>
+      {open && entries.length > 0 && (
+        <div className="absolute right-0 z-40 mt-1 w-60 rounded-lg border border-gray-200 bg-white shadow-xl p-3 text-left font-normal">
+          <div className="text-[10px] uppercase tracking-wide text-gray-400 mb-2">No reconciliation needed — {n.toLocaleString('en-IN')} rows</div>
+          {entries.map(([k, v]) => {
+            const pct = Math.round(Number(v) / total * 100)
+            return (
+              <div key={k} className="mb-2 last:mb-0">
+                <div className="flex justify-between text-[11px] text-gray-600 mb-0.5"><span>{k}</span><span className="tabular-nums text-gray-500">{Number(v).toLocaleString('en-IN')} · {pct}%</span></div>
+                <div className="h-1.5 rounded-full bg-gray-100"><div className="h-1.5 rounded-full bg-gray-400" style={{ width: pct + '%' }} /></div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </span>
+  )
+}
+
 export default function Analytics({ standalone = false }) {
   // Filters live in the URL query string so any view is shareable / bookmarkable
   // exactly as filtered (from / to / product / side).
@@ -80,6 +119,7 @@ export default function Analytics({ standalone = false }) {
   const daily = data?.daily || []
   const byProduct = data?.by_product || []
   const byGroup = data?.by_group || []
+  const kioskProcs = data?.kiosk_processes || []
   const byStatus = data?.by_status || []
   const bySide = data?.by_side || []
 
@@ -246,44 +286,53 @@ export default function Analytics({ standalone = false }) {
                   <th className="text-right py-2 px-3">Mismatch</th>
                   <th className="text-right py-2 px-3" title="Rows that need no reconciliation — failed, duplicate, fees, reversals, bank debits. Hover a value for the reason breakdown. Excluded from the match rate.">Other</th>
                   <th className="text-right py-2 px-3">Match rate</th>
-                  <th className="text-right py-2 px-4">Matched volume</th>
+                  <th className="text-right py-2 px-3 text-emerald-600/70">Matched volume</th>
+                  <th className="text-right py-2 px-4 text-red-400/80">Unmatched volume</th>
                 </tr></thead>
                 <tbody>
                   {byGroup.map(g => {
                     const banks = byProduct.filter(p => p.group === g.group)
-                    const multi = banks.length > 1
+                    // SBI Kiosk expands into its 4 process recons (P01–P04); DMT into its banks.
+                    const isKiosk = g.group === 'kiosk'
+                    const subRows = isKiosk
+                      ? kioskProcs.map(p => ({ ...p, label: p.process }))
+                      : (banks.length > 1 ? banks : [])
+                    const subLabel = isKiosk ? '4 processes' : (banks.length > 1 ? `${banks.length} banks` : '')
+                    const rateColor = r => (r >= 85 ? '#059669' : r >= 50 ? '#d97706' : '#dc2626')
                     return (
                       <React.Fragment key={g.group}>
                         {/* product-level row (bold) */}
                         <tr className="border-b border-gray-100 bg-gray-50/40">
                           <td className="py-2 px-4 font-bold text-gray-800">{g.label}</td>
-                          <td className="py-2 px-3 text-gray-400">{multi ? `${banks.length} banks` : ''}</td>
+                          <td className="py-2 px-3 text-gray-400">{subLabel}</td>
                           <td className="py-2 px-3 text-right tabular-nums font-semibold text-gray-700">{g.transactions.toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-emerald-600 font-bold">{g.matched.toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-red-500 font-semibold">{g.unmatched.toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-amber-500">{g.mismatch.toLocaleString('en-IN')}</td>
-                          <td className="py-2 px-3 text-right tabular-nums text-gray-400" title={Object.entries(g.other_statuses || {}).map(([k, v]) => `${k}: ${Number(v).toLocaleString('en-IN')}`).join(' · ') || 'no non-reconcilable rows'}>{Number(g.other || 0).toLocaleString('en-IN')}</td>
-                          <td className="py-2 px-3 text-right tabular-nums font-bold" style={{ color: g.match_rate >= 85 ? '#059669' : g.match_rate >= 50 ? '#d97706' : '#dc2626' }}>{g.match_rate}%</td>
-                          <td className="py-2 px-4 text-right tabular-nums font-semibold text-gray-700">{cr(g.matched_volume)}</td>
+                          <td className="py-2 px-3 text-right"><OtherCell count={g.other} statuses={g.other_statuses} /></td>
+                          <td className="py-2 px-3 text-right tabular-nums font-bold" style={{ color: rateColor(g.match_rate) }}>{g.match_rate}%</td>
+                          <td className="py-2 px-3 text-right tabular-nums font-semibold text-emerald-700">{cr(g.matched_volume)}</td>
+                          <td className="py-2 px-4 text-right tabular-nums font-semibold text-red-500/90">{cr(g.open_volume)}</td>
                         </tr>
-                        {/* per-bank rows only when a product spans multiple banks (DMT) */}
-                        {multi && banks.map(p => (
-                          <tr key={p.product} className="border-b border-gray-50 hover:bg-emerald-50/40">
+                        {/* sub-rows: DMT banks OR the 4 SBI Kiosk process recons */}
+                        {subRows.map((p, i) => (
+                          <tr key={(p.product || p.process || i)} className="border-b border-gray-50 hover:bg-emerald-50/40">
                             <td className="py-1.5 px-4"></td>
                             <td className="py-1.5 px-3 text-gray-600 pl-6">↳ {p.label}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-gray-500">{p.transactions.toLocaleString('en-IN')}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-emerald-600">{p.matched.toLocaleString('en-IN')}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-red-400">{p.unmatched.toLocaleString('en-IN')}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-amber-400">{p.mismatch.toLocaleString('en-IN')}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-gray-400" title={Object.entries(p.other_statuses || {}).map(([k, v]) => `${k}: ${Number(v).toLocaleString('en-IN')}`).join(' · ') || 'no non-reconcilable rows'}>{Number(p.other || 0).toLocaleString('en-IN')}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: p.match_rate >= 85 ? '#059669' : p.match_rate >= 50 ? '#d97706' : '#dc2626' }}>{p.match_rate}%</td>
-                            <td className="py-1.5 px-4 text-right tabular-nums text-gray-500">{cr(p.matched_volume)}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-gray-500">{Number(p.transactions).toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-emerald-600">{Number(p.matched).toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-red-400">{Number(p.unmatched).toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-amber-400">{Number(p.mismatch).toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right"><OtherCell count={p.other} statuses={p.other_statuses} /></td>
+                            <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: rateColor(p.match_rate) }}>{p.match_rate}%</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-emerald-700/80">{cr(p.matched_volume)}</td>
+                            <td className="py-1.5 px-4 text-right tabular-nums text-red-500/80">{cr(p.open_volume)}</td>
                           </tr>
                         ))}
                       </React.Fragment>
                     )
                   })}
-                  {byGroup.length === 0 && <tr><td colSpan="9" className="py-6 text-center text-gray-400 italic">No data for this range.</td></tr>}
+                  {byGroup.length === 0 && <tr><td colSpan="10" className="py-6 text-center text-gray-400 italic">No data for this range.</td></tr>}
                 </tbody>
               </table>
             </div>
