@@ -136,6 +136,62 @@ def _kiosk_processes(db, date_from=None, date_to=None):
     return out
 
 
+def _open_ageing(db, date_from=None, date_to=None):
+    """Ageing of OPEN (unmatched) items by how long they've been open — count + ₹ value per
+    bucket (Current / 1–2d / 3–6d / 7+ days), across the core ledger + E-Value + SBI Kiosk.
+    Answers 'how much money is stuck, and for how long'. Read-only, additive."""
+    import datetime as _dt
+    from sqlalchemy import func as F
+    from models.database import (Transaction, EvalueBankTxn, EvalueWalletLoad, SBIP02Result)
+    today = _dt.date.today()
+    order = ["current", "d1", "d3", "d7"]
+    labels = {"current": "Current", "d1": "1–2 days", "d3": "3–6 days", "d7": "7+ days"}
+    buckets = {k: {"count": 0, "value": 0.0} for k in order}
+
+    def _bucket(d):
+        try:
+            age = (today - _dt.date.fromisoformat((d or "")[:10])).days
+        except Exception:
+            return None
+        return "current" if age <= 0 else "d1" if age <= 2 else "d3" if age <= 6 else "d7"
+
+    def _add(rows):
+        for d, c, amt in rows:
+            b = _bucket(d)
+            if b:
+                buckets[b]["count"] += int(c or 0)
+                buckets[b]["value"] = round(buckets[b]["value"] + float(amt or 0), 2)
+
+    def _rng(q, col):
+        if date_from:
+            q = q.filter(col >= date_from)
+        if date_to:
+            q = q.filter(col <= date_to)
+        return q
+
+    # core ledger — the Open-Items default open set {unmatched, src_assigned}
+    _add(_rng(db.query(Transaction.recon_date, F.count(Transaction.id), F.sum(Transaction.amount)).filter(
+        Transaction.row_type == "txn", Transaction.recon_date.like("20%"),
+        Transaction.recon_status.in_(["unmatched", "src_assigned"])), Transaction.recon_date)
+        .group_by(Transaction.recon_date).all())
+    # E-Value open bank credits + wallet loads
+    _add(_rng(db.query(EvalueBankTxn.txn_date, F.count(EvalueBankTxn.id), F.sum(EvalueBankTxn.amount)).filter(
+        EvalueBankTxn.recon_status.in_(["unmatched_bank", "src_assigned", "wrong_amount"])), EvalueBankTxn.txn_date)
+        .group_by(EvalueBankTxn.txn_date).all())
+    _add(_rng(db.query(EvalueWalletLoad.transaction_date, F.count(EvalueWalletLoad.id), F.sum(EvalueWalletLoad.amount)).filter(
+        EvalueWalletLoad.recon_status.in_(["unmatched_load", "src_assigned"])), EvalueWalletLoad.transaction_date)
+        .group_by(EvalueWalletLoad.transaction_date).all())
+    # SBI Kiosk P02 unmatched bank rows
+    _add(_rng(db.query(SBIP02Result.recon_date, F.count(SBIP02Result.id), F.sum(SBIP02Result.bank_amount)).filter(
+        SBIP02Result.match_status == "Unmatched"), SBIP02Result.recon_date)
+        .group_by(SBIP02Result.recon_date).all())
+
+    total = sum(b["count"] for b in buckets.values())
+    total_val = round(sum(b["value"] for b in buckets.values()), 2)
+    return {"buckets": [{"bucket": k, "label": labels[k], **buckets[k]} for k in order],
+            "total_count": total, "total_value": total_val}
+
+
 def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     from sqlalchemy import func as F
     from models.database import (Transaction, EvalueBankTxn, EvalueWalletLoad,
@@ -349,6 +405,8 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         # Additive: the 4 SBI Kiosk process recons (P01–P04) for the expandable breakdown.
         # NOT part of totals/by_group, so headline numbers are unchanged.
         "kiosk_processes": _kiosk_processes(db, date_from, date_to) if product in (None, "", "kiosk") else [],
+        # Additive: ageing of open (unmatched) items — count + ₹ per age bucket.
+        "open_ageing": _open_ageing(db, date_from, date_to),
     }
 
 

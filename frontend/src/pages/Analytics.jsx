@@ -5,7 +5,7 @@ import React, { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
-import { BarChart3, CheckCircle2, XCircle, Percent, Wallet, RefreshCw, Link2, Maximize2, Scale, LogOut } from 'lucide-react'
+import { BarChart3, CheckCircle2, XCircle, Percent, Wallet, RefreshCw, Link2, Maximize2, Scale, LogOut, AlertTriangle, Clock } from 'lucide-react'
 import { BarChart, LineChart, PieChart, ChartCard, PALETTE } from '../components/Charts'
 import { isViewer } from '../utils/permissions'
 
@@ -142,6 +142,17 @@ export default function Analytics({ standalone = false }) {
     { name: 'Matched', color: C.matched, values: bySide.map(s => s.matched) },
     { name: 'Unmatched', color: C.unmatched, values: bySide.map(s => s.unmatched) },
   ]
+  // ── Money (₹) view: matched vs still-open rupee volume per product ──
+  const prodVolSeries = [
+    { name: 'Matched ₹', color: C.matched, values: byGroup.map(g => g.matched_volume) },
+    { name: 'Open ₹', color: C.unmatched, values: byGroup.map(g => g.open_volume) },
+  ]
+  // ── Needs-attention: products below 85% match, worst first ──
+  const attention = byGroup
+    .filter(g => g.transactions > 0 && g.match_rate < 85)
+    .sort((a, b) => a.match_rate - b.match_rate)
+  // ── Open-items ageing ──
+  const openAgeing = data?.open_ageing || { buckets: [], total_count: 0, total_value: 0 }
 
   const Kpi = ({ icon: Icon, label, value, sub, tint }) => (
     <div className="card p-4">
@@ -222,6 +233,30 @@ export default function Analytics({ standalone = false }) {
         <Kpi icon={Wallet} tint="bg-amber-100 text-amber-600" label="Matched volume" value={cr(t.matched_volume)} sub={`open ${cr(t.open_volume)}`} />
       </div>
 
+      {/* Needs attention — products below 85% match, with the open ₹ at risk */}
+      {attention.length > 0 && (
+        <div className="card p-4 border-l-4 border-amber-400">
+          <div className="flex items-center gap-2 mb-2.5">
+            <AlertTriangle size={15} className="text-amber-500" />
+            <h3 className="font-bold text-gray-800 text-sm">Needs attention</h3>
+            <span className="text-xs text-gray-400">— products below 85% match rate</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {attention.map(g => (
+              <div key={g.group} className="rounded-lg border border-gray-100 bg-gray-50/60 px-3 py-2 min-w-[160px]">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-semibold text-gray-700">{g.label}</span>
+                  <span className="text-sm font-bold tabular-nums" style={{ color: g.match_rate >= 50 ? '#d97706' : '#dc2626' }}>{g.match_rate}%</span>
+                </div>
+                <div className="text-[11px] text-gray-500 mt-0.5">
+                  {Number(g.unmatched).toLocaleString('en-IN')} open · <span className="text-red-500/90 font-medium">{cr(g.open_volume)}</span> at risk
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {loading && !data ? <div className="card p-10 text-center text-gray-400 text-sm">Loading…</div> : (
         <>
           {/* Daily trend + status */}
@@ -271,6 +306,50 @@ export default function Analytics({ standalone = false }) {
                     })} donut />
                   : <BarChart categories={sideCats} series={sideSeries} />}
             </ChartCard>
+          </div>
+
+          {/* Money (₹) at stake + open-items ageing */}
+          <div className="grid lg:grid-cols-2 gap-4">
+            <ChartCard title="Value at stake (₹) by product" subtitle="Matched vs still-open rupee volume per product"
+              types={['stacked', 'share']} defaultType="stacked"
+              legend={[{ name: 'Matched ₹', color: C.matched }, { name: 'Open ₹', color: C.unmatched }]}>
+              {type => byGroup.length === 0 ? <Empty />
+                : <BarChart categories={prodCats} series={prodVolSeries} horizontal
+                    stacked={type === 'stacked'} normalize={type === 'share'} valueFmt={cr}
+                    height={Math.max(180, prodCats.length * 34 + 28)} />}
+            </ChartCard>
+
+            <div className="card p-0 overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-100 bg-gray-50/50 flex items-center gap-2">
+                <Clock size={15} className="text-gray-400" />
+                <div>
+                  <h3 className="font-bold text-gray-800 text-sm">Open items ageing</h3>
+                  <p className="text-[11px] text-gray-400">
+                    How long unmatched items have been open · {Number(openAgeing.total_count).toLocaleString('en-IN')} open · {cr(openAgeing.total_value)}
+                  </p>
+                </div>
+              </div>
+              <div className="p-4 space-y-3">
+                {openAgeing.buckets.map(b => {
+                  const pct = openAgeing.total_value ? Math.round(b.value / openAgeing.total_value * 100) : 0
+                  const isOld = b.bucket === 'd7'
+                  const barC = isOld ? '#dc2626' : b.bucket === 'd3' ? '#f59e0b' : b.bucket === 'd1' ? '#84cc16' : '#10b981'
+                  return (
+                    <div key={b.bucket}>
+                      <div className="flex justify-between text-xs mb-1">
+                        <span className={isOld ? 'font-semibold text-red-600' : 'text-gray-600'}>{b.label}</span>
+                        <span className="tabular-nums text-gray-500">{Number(b.count).toLocaleString('en-IN')} · {cr(b.value)}</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-gray-100"><div className="h-2 rounded-full" style={{ width: pct + '%', background: barC }} /></div>
+                    </div>
+                  )
+                })}
+                {openAgeing.total_count === 0 && <div className="text-center text-gray-400 text-sm py-8">No open items 🎉</div>}
+                {openAgeing.total_count > 0 && (
+                  <p className="text-[11px] text-gray-400 pt-1">7+ day items are the priority to chase — that money has been open a full week.</p>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Per-product table — grouped by product, banks shown within */}
