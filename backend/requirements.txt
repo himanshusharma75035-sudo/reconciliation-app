@@ -18,7 +18,7 @@ apscheduler>=3.10.0
 slowapi>=0.1.9
 python-dateutil>=2.8.0
 
-bcrypt>=4.0.0
+bcrypt>=4.0.0,<4.1   # passlib 1.7.4 can't drive bcrypt >=4.1 (removed __about__); pin keeps auth + CI tests working
 reportlab>=4.0
 
 # Developer Portal AI agent (Phase 2) — read-only Claude assistant
