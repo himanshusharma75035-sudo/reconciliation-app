@@ -1345,6 +1345,21 @@ function ReadinessPanel({ refreshKey, onReconciled, reconDate, setReconDate }) {
                   <div className="text-[11px] text-gray-500 mt-0.5">P02 match</div>
                 </div>
               </div>
+              {day.source_files_total > 0 && (
+                <div className="mt-3 flex items-center gap-2 flex-wrap text-[11px]">
+                  <span className="text-gray-400">Source files:</span>
+                  <span className={`font-semibold ${day.source_files_have === day.source_files_total ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    {day.source_files_have}/{day.source_files_total} present
+                  </span>
+                  {(day.source_files_missing || []).length > 0 && <>
+                    <span className="text-gray-300">·</span>
+                    <span className="text-red-500">missing:</span>
+                    {day.source_files_missing.map(p => (
+                      <span key={p} className="px-2 py-0.5 rounded-full bg-red-50 text-red-600 border border-red-100">{p}</span>
+                    ))}
+                  </>}
+                </div>
+              )}
               {day.p02_total > 0 && (
                 <p className="text-[11px] text-gray-400 mt-2">
                   {Number(day.p02_matched).toLocaleString('en-IN')} of {Number(day.p02_total).toLocaleString('en-IN')} bank rows matched on {day.date}.

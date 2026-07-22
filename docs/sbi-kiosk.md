@@ -93,8 +93,21 @@ Each of these changes how money reconciles, so none should be changed without co
      (16,204 rows)** have different full KO ids sharing the same 7-char prefix + day + amount, so a
      prefix-normalizing match would **misattribute money between different KOs**. Reference is the
      only collision-free key.
-   - Use the SBI tolerance (₹0.01), not the ₹1 used during the audit. **Needs finance-ops sign-off
-     to change P03 classification (2,244 rows flip unmatched → matched).**
+   - Use the SBI tolerance (₹0.01), not the ₹1 used during the audit.
+   - **Implementation finding (2026-07-22) — the fix is real but incomplete in P03 alone, so it
+     was TRIED AND REVERTED on the live engine.** P03 only matches against bank **credits**
+     (money-in). Switching its key to reference is *more precise* — but it then also removed
+     ~1,760 matches/day that the old `(ko,amount)` key had made **falsely**: money-IN txns
+     (Money Transfer, all Deposit types) matched to unrelated credits by coincidence. Those
+     txns' real counterpart is a bank **debit**, which P03's credit-only scope never sees, so
+     they read as Unmatched. Net effect on the live P03 was matched **34,321 → 26,619** — the
+     *opposite* of the audit's expected +2,244. Completing it correctly = matching txns against
+     **all** non-settlement bank rows (debits for deposits, credits for withdrawals), which is
+     the **P02/P03 merge** (Still-open item 1) and needs finance-ops confirmation. **Until then,
+     the fully-correct reference reconciliation is the report layer** (`core/sbi_reports.py`,
+     verified against the manual cloud reports), and live P03 keeps its `(ko,amount)` behaviour.
+   - The **P02 tolerance ₹1 → ₹0.01** part of this item *was* shipped (safe: 0 reclassification
+     across the live data).
 3. **P03 date window.** The code accepted ±2 days (the docstring/SOP says D+1 / D-1 = ±1); Phase
    1 reduced P03 to **same-day only** to avoid a bank credit being reused across two days' runs.
    **What is the correct window (same-day only, ±1, ±2), and how should a D+1 credit be

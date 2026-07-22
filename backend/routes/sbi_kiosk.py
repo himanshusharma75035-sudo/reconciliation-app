@@ -780,9 +780,10 @@ def run_p02(
             match_status = 'Reversal'
             success = 'Success' if matched_txn else 'Fail'
         elif matched_txn:
-            # Validate amount
+            # Validate amount — SBI paisa tolerance (₹0.01, finance-ops-approved; was ₹1,
+            # unsupported by the data: 0 amount mismatches across 27,187 validated matches).
             amt_diff = abs(bank_amount - (matched_txn.amount or 0))
-            match_status = 'Matched' if amt_diff < 1.0 else 'Partial'
+            match_status = 'Matched' if amt_diff <= 0.01 else 'Partial'
             success = matched_txn.status or 'Success'
         elif not ref:
             match_status = 'Unmatched'
@@ -865,6 +866,14 @@ def run_p03(
 
     # Build bank lookup: (ko_id, amount, date) → bank row
     # Date offsets checked: 0, +1, -1
+    #
+    # NOTE (2026-07-22): a reference-number match was tried here (docs/sbi-kiosk.md §Resolved
+    # item 1) and REVERTED. It is more *precise* (the (ko,amount) key makes ~1,760 false
+    # matches/day — money-IN txns, deposits/transfers, matched to unrelated credits), but P03
+    # only looks at bank CREDITS, so those money-in txns (whose real counterpart is a bank
+    # DEBIT) then read as Unmatched. Completing that fix = matching against ALL bank rows,
+    # which is the P02/P03 MERGE that is still open and needs finance-ops confirmation. Until
+    # then the fully-correct reconciliation is the reference-based report (core/sbi_reports.py).
     bank_by_ko_amt = {}
     for b in bank_credits:
         key = (b.ko_id, round(b.credit, 2))
@@ -2055,6 +2064,20 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
     cash  = by_date(SBIKOCashHolding, SBIKOCashHolding.report_date)
     fail  = by_date(SBILimitFailure, SBILimitFailure.txn_date)
 
+    # Which of the SIX source files are present per business date. Finance ops upload them
+    # separately, and it's common for one (often the small Deposit file) to be missing while
+    # the rest are in — a partial-report day that reconciles low for a benign reason.
+    from core.sbi_reports import canonical_product, PRODUCTS
+    src_files = {}   # date -> {product: count}
+    for d, sf, n in db.query(SBITxnReport.txn_date, SBITxnReport.source_file,
+                             F.count(SBITxnReport.id)).filter(
+                             SBITxnReport.txn_date.isnot(None)).group_by(
+                             SBITxnReport.txn_date, SBITxnReport.source_file).all():
+        if d and len(d) >= 10:
+            src_files.setdefault(d[:10], {})
+            prod = canonical_product(sf)
+            src_files[d[:10]][prod] = src_files[d[:10]].get(prod, 0) + n
+
     p02 = {}
     for d, st, n in db.query(SBIP02Result.recon_date, SBIP02Result.match_status,
                              F.count(SBIP02Result.id)).group_by(
@@ -2066,18 +2089,24 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
     rows = []
     for d in dates:
         p = p02.get(d, {}); tot = sum(p.values()); m = p.get("Matched", 0)
+        sf = src_files.get(d, {})
+        present = [pr for pr in PRODUCTS if sf.get(pr)]
+        missing_files = [pr for pr in PRODUCTS if not sf.get(pr)]
         rows.append({
             "date": d,
             "bank": bank.get(d, 0), "txn_report": txn.get(d, 0),
             "ko_limits": kolim.get(d, 0), "cash_holding": cash.get(d, 0),
             "limit_failures": fail.get(d, 0),
+            # the six source files: present / missing (a partial-report day reconciles low benignly)
+            "source_files_present": present, "source_files_missing": missing_files,
+            "source_files_have": len(present), "source_files_total": len(PRODUCTS),
             # P02 can only reconcile a day that has BOTH a bank statement and a txn report
             "p02_ready": bool(bank.get(d) and txn.get(d)),
             "p02_total": tot, "p02_matched": m,
             "p02_rate": round(100 * m / tot, 1) if tot else None,
-            "missing": [name for name, present in (
+            "missing": [name for name, avail in (
                 ("Bank statement", bank.get(d)), ("Transaction report", txn.get(d)))
-                if not present],
+                if not avail],
         })
 
     from models.database import SBICSPMaster
