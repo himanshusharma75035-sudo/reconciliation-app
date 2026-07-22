@@ -91,6 +91,40 @@ def _nd(v) -> str:
     except Exception:
         return s
 
+def _read_xls_rows(content: bytes) -> list:
+    """Read the first sheet of an uploaded workbook into a list of row-lists (cells as
+    stripped strings). Tries three readers so a source-format change can't hard-block a
+    day's upload (see docs/skills.md):
+      1. xlrd      — classic BIFF .xls (what most SBI exports are)
+      2. calamine  — robust reader for Java/jExcelApi-written .xls that xlrd rejects with
+                     'BOF not workbook/worksheet' (the Limit Update Failure Report is one)
+      3. openpyxl  — a genuine .xlsx that arrived with an .xls name
+    Returns [] for a validly-parsed but empty sheet; raises only when no reader can open it."""
+    import io
+    errs = []
+    try:
+        import xlrd
+        sh = xlrd.open_workbook(file_contents=content).sheet_by_index(0)
+        return [[str(sh.cell_value(r, c)).strip() for c in range(sh.ncols)]
+                for r in range(sh.nrows)]
+    except Exception as e:
+        errs.append(f"xlrd: {str(e)[:80]}")
+    try:
+        from python_calamine import CalamineWorkbook
+        rows = CalamineWorkbook.from_filelike(io.BytesIO(content)).get_sheet_by_index(0).to_python()
+        return [[("" if c is None else str(c)).strip() for c in row] for row in rows]
+    except Exception as e:
+        errs.append(f"calamine: {str(e)[:80]}")
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        ws = wb[wb.sheetnames[0]]
+        return [[("" if c is None else str(c)).strip() for c in row]
+                for row in ws.iter_rows(values_only=True)]
+    except Exception as e:
+        errs.append(f"openpyxl: {str(e)[:80]}")
+    raise ValueError("no reader could open the file — " + " | ".join(errs))
+
 def _extract_bank_ref(desc: str) -> str:
     """Extract 20-digit reference number from bank description."""
     m = re.search(r'(?:TO|BY)\s+TRANSFER-(\d{20})', desc)
@@ -580,17 +614,13 @@ async def upload_limit_failures(
     from core.file_hash_guard import guard_duplicate_file
     guard_duplicate_file(db, "sbi", "limit_failures", content, file.filename or "", current_user, force=force)
     try:
-        import xlrd
-        book = xlrd.open_workbook(file_contents=content)
-        sh = book.sheet_by_index(0)
-        rows = [[str(sh.cell_value(r, c)).strip() for c in range(sh.ncols)] for r in range(sh.nrows)]
+        rows = _read_xls_rows(content)   # xlrd → calamine (handles the JXL .xls) → openpyxl
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot parse Limit Fail file: {e}")
 
-    # Header is row 3 (0-indexed)
-    if len(rows) < 4:
-        raise HTTPException(status_code=400, detail="File has too few rows")
-
+    # A Limit Update Failure Report with no failures that day is a VALID empty file — the
+    # data rows start at row 4 (rows 0-2 metadata, row 3 header), so an empty/short file
+    # simply inserts nothing rather than erroring.
     today = str(datetime.date.today())
     inserted = 0
 

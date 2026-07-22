@@ -337,6 +337,7 @@ Concrete, reusable, and each one cost real time.
 | File-hash guard with no override | Hash outlives its data → blocks legitimate re-upload | Deliberate force path |
 | Two ingest pipelines | One gets fixed, the other keeps the bug | Share one core |
 | Source silently changes export format | Text-shaped `.xls` becomes a real `.xlsx`; parser hard-fails, a whole day is un-uploadable | Detect by magic bytes, normalise to one row shape, one parser |
+| A single `.xls` reader that a Java-written file defeats | The SBI Limit Fail report is a jExcelApi BIFF8 (`build=4307 year=1996`) that xlrd 2.0.1 rejects with "BOF not workbook/worksheet"; it's real OLE2, so magic-byte sniffing won't catch it | Chain readers: xlrd → **python-calamine** (opens JXL/odd BIFF xlrd can't) → openpyxl; verify a genuinely-empty file (0 BIFF cell records) reads as 0 rows, not an error |
 | Guard that worked by accident | A footer line dropped by `len(parts)<6` in text survives when a workbook pads rows to full width → fake txn + poisoned balance | Re-check guards when row production changes; trim trailing empties |
 | Verifying a parser by row count alone | Counts can look right while amounts/dates are silently wrong | Reconcile the balance chain: opening + credits − debits = stated closing |
 | Destructive endpoint with an early branch | A per-type shortcut `return`s before filters apply → "clear one day" wipes the whole product | Apply every accepted filter, or refuse; never silently ignore one |
