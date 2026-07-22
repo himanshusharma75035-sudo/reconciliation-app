@@ -148,15 +148,29 @@ def reconcile(db, recon_date: str) -> dict:
                 if len(rows) >= 2 and any((x.debit or 0) > 0 for x in rows)
                 and any((x.credit or 0) > 0 for x in rows)}
 
+    # KO-Limits "KO Withdrawal" entries for the date, for SETTLEMENT matching. An EKO
+    # DEDUCTION bank debit (is_settlement, no 20-digit ref) reconciles against a KO
+    # Withdrawal by (KO id, amount) — the finance-ops rule (date already scoped by
+    # recon_date; KO id + deduct_date are parsed from the description at ingestion). Keyed
+    # for one-to-one consumption so two equal withdrawals can't both claim one debit.
+    ko_wdl = defaultdict(list)   # (ko_id, amount) -> [SBIKOLimits rows]
+    for k in db.query(SBIKOLimits).filter(SBIKOLimits.txn_date == recon_date,
+                                          SBIKOLimits.txn_type == "KO Withdrawal").all():
+        ko_wdl[((k.ko_id or "").strip(), round(k.amount or 0, 2))].append(k)
+    used_kw = set()
+
     bank_recs = []
     used_src = set()
     n_with_ref = n_matched = n_ref_not_found = n_no_ref = n_amt_mismatch = n_reversal = 0
+    n_settle = n_settle_matched = n_settle_open = 0
 
     for i, b in enumerate(bank, start=1):
         ref = _extract_bank_ref(b)
         amt = _bank_amount(b)
         matched = None
         amount_match = ""
+        settle = None                                # matched KO Withdrawal (settlement)
+        is_settle_debit = bool(b.is_settlement) and (b.debit or 0) > 0
         if ref:
             n_with_ref += 1
             cands = [s for s in src_by_ref.get(ref, []) if id(s) not in used_src]
@@ -178,12 +192,29 @@ def reconcile(db, recon_date: str) -> dict:
                 n_reversal += 1            # sibling leg of a DR+CR reversal — explained, not a gap
             else:
                 n_ref_not_found += 1
+        elif is_settle_debit:
+            n_settle += 1
+            cands = [k for k in ko_wdl.get(((b.ko_id or "").strip(), round(b.debit or 0, 2)), [])
+                     if id(k) not in used_kw]
+            if cands:
+                settle = cands[0]; used_kw.add(id(settle)); n_settle_matched += 1
+            else:
+                n_settle_open += 1        # settlement debit with no matching KO Withdrawal (review)
         else:
             n_no_ref += 1
 
-        status = ("Matched" if matched is not None
-                  else ("Reversal" if ref in dup_refs
-                        else ("Unmatched" if ref else "No Txn Number")))
+        if matched is not None:
+            status = "Matched"
+        elif settle is not None:
+            status = "Matched (Settlement)"
+        elif is_settle_debit:
+            status = "Unmatched Settlement"
+        elif ref in dup_refs:
+            status = "Reversal"
+        elif ref:
+            status = "Unmatched"
+        else:
+            status = "No Txn Number"
         bank_recs.append({
             "Bank Stmt Row": i,
             "Txn Date": b.txn_date,
@@ -194,10 +225,12 @@ def reconcile(db, recon_date: str) -> dict:
             "Credit": b.credit or 0,
             "Balance": b.balance if b.balance is not None else "",
             "Extracted Txn No. (20-digit)": ref,
-            "Matched Source File": canonical_product(matched.source_file) if matched else "",
-            "Matched Transaction Type": (matched.txn_type or "") if matched else "",
-            "Source Amount": (matched.amount or 0) if matched else "",
-            "Amount Match": amount_match,
+            "Matched Source File": ("KO Limits" if settle else
+                                    (canonical_product(matched.source_file) if matched else "")),
+            "Matched Transaction Type": ("KO Withdrawal" if settle else
+                                         ((matched.txn_type or "") if matched else "")),
+            "Source Amount": (settle.amount if settle else ((matched.amount or 0) if matched else "")),
+            "Amount Match": ("Yes" if settle else amount_match),
             "Match Status": status,
             "_is_dup": ref in dup_refs,
         })
@@ -254,6 +287,9 @@ def reconcile(db, recon_date: str) -> dict:
         "bank_matched": n_matched,
         "bank_ref_not_found": n_ref_not_found,
         "bank_reversal_legs": n_reversal,
+        "bank_settlement_debits": n_settle,
+        "bank_settlement_matched": n_settle_matched,
+        "bank_settlement_open": n_settle_open,
         "bank_no_ref": n_no_ref,
         "amount_mismatches": n_amt_mismatch,
         "source_total": sum(pp["total"] for pp in per_product.values()),
@@ -268,8 +304,10 @@ def reconcile(db, recon_date: str) -> dict:
     unmatched_source = [r for r in source_recs if r["Match Status"] == "Unmatched"]
     unmatched_source.sort(key=lambda r: (0 if (r["Status"] or "").lower() == "success" else 1,
                                          r["product"], r["Sr. No."]))
-    # unmatched bank rows (had a ref but no source match)
-    unmatched_bank = [r for r in bank_recs if r["Match Status"] == "Unmatched"]
+    # unmatched bank rows needing review: a ref with no source match, OR a settlement debit
+    # with no matching KO Withdrawal
+    unmatched_bank = [r for r in bank_recs
+                      if r["Match Status"] in ("Unmatched", "Unmatched Settlement")]
 
     # duplicate groups for the bank sheet
     dup_rows = []
@@ -341,10 +379,12 @@ def _highlight_by_match(ws, rows, match_col_idx, status_col_idx):
         ms = r.get("Match Status", "")
         st = (r.get("Status", "") or "").lower()
         key = None
-        if ms == "Matched":
+        if ms in ("Matched", "Matched (Settlement)"):
             key = "g"
         elif ms == "Not Applicable":
             key = "x"
+        elif ms == "Unmatched Settlement":
+            key = "o"                       # settlement debit with no KO Withdrawal — review
         elif ms == "Unmatched":
             key = "o" if st == "success" else "r"
         if key:
@@ -365,7 +405,9 @@ def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
             {"Metric": "Bank Rows Matched to a Source File", "Value": t["bank_matched"]},
             {"Metric": "Bank Rows with Txn No. but NOT Found in Any Source File", "Value": t["bank_ref_not_found"]},
             {"Metric": "Bank Reversal Legs (DR+CR, same txn no.)", "Value": t["bank_reversal_legs"]},
-            {"Metric": "Bank Rows with No Txn Number (cash / bank-only entries)", "Value": t["bank_no_ref"]},
+            {"Metric": "Settlement Debits (EKO DEDUCTION) Matched to a KO Withdrawal", "Value": t["bank_settlement_matched"]},
+            {"Metric": "  — Settlement Debits with NO matching KO Withdrawal (review)", "Value": t["bank_settlement_open"]},
+            {"Metric": "Bank Rows with No Txn Number (cash / bank-only, mostly credits)", "Value": t["bank_no_ref"]},
             {"Metric": "Amount Mismatches Among Matched Rows", "Value": t["amount_mismatches"]},
             {"Metric": "", "Value": ""},
             {"Metric": "Total Records Across All 6 Source Files (excl. Not Applicable)", "Value": t["source_total"]},
@@ -405,7 +447,9 @@ def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
                        "Debit": r["Debit"], "Credit": r["Credit"], "Balance": r["Balance"],
                        "Extracted Txn No.": r["Extracted Txn No. (20-digit)"],
                        "Description": r["Description"],
-                       "Remarks": "Has a 20-digit txn no. but no matching source record"}
+                       "Remarks": ("Settlement debit (EKO DEDUCTION) with no matching KO Withdrawal"
+                                   if r["Match Status"] == "Unmatched Settlement"
+                                   else "Has a 20-digit txn no. but no matching source record")}
                       for r in R["unmatched_bank"]],
                      ["Bank Stmt Row", "Txn Date", "Debit", "Credit", "Balance",
                       "Extracted Txn No.", "Description", "Remarks"])

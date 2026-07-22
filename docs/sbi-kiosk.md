@@ -51,11 +51,20 @@ reconciles every business date present; auto-run after an upload reconciles that
 
 `core/sbi_reports.py` reproduces the two files finance ops reconcile against by hand,
 generated read-only from our own data (it does **not** touch the P01–P04 result tables).
-The engine is the finance-ops-approved rule: match the bank statement's 20-digit `61…`
+The engine is the finance-ops-approved rule: match the bank statement's 20-digit
 transaction number against the pooled six source files' Reference Number, one-to-one,
 ₹0.01 tolerance; non-20-digit / placeholder refs are tagged `Not Applicable`; unmatched
 source rows split by Status (Failure = expected, Success = real gap). Download buttons sit
 on the SBI page's Readiness panel, scoped to the selected business date.
+
+**Settlement matching (finance-ops rule).** A bank *debit* that is an `EKO DEDUCTION`
+(`is_settlement`, no 20-digit ref) is NOT a reference transaction — it reconciles against a
+**KO-Limits "KO Withdrawal"** by (business date, KO id, amount within ₹0.01), one-to-one.
+Matched → `Matched (Settlement)`; a settlement debit with no matching withdrawal →
+`Unmatched Settlement` (surfaced in Unmatched Bank Entries for review — genuine amount
+mismatch or a missing KO-Limits upload). After this pass, `No Txn Number` is only the
+genuine cash / bank-only rows — essentially the still-open **credit** side (validated on
+21-Jul: 154 settlement debits → 125 matched / 29 review, leaving 32 open credits, 0 debits).
 
 - **`GET /api/sbi/reports/reconciliation`** → `Reconciliation_Report_<date>.xlsx` (bank-centric,
   5 sheets): Summary · Bank Statement (Reconciled, with the **Matched Source File** product
