@@ -10,7 +10,7 @@ It is **read-only** over `sbi_bank_transactions` + `sbi_txn_reports`. It does NO
 the P01-P04 result tables or any matching-engine state — it is an additive reporting
 layer. The matching rule is the finance-ops-approved one (see docs/sbi-kiosk.md § Resolved):
 
-  Match the bank statement's 20-digit '61…' transaction number (extracted from the
+  Match the bank statement's 20-digit transaction number (extracted from the
   Description) against the pooled six source files' Reference Number, one-to-one,
   amount agreeing within ₹0.01. Non-20-digit / placeholder references are tagged
   Not Applicable (never Unmatched). Unmatched source rows are split by their source
@@ -26,8 +26,11 @@ from models.database import SBIBankTransaction, SBITxnReport, SBIKOLimits, SBIP0
 
 # ── matching constants ────────────────────────────────────────────────────────
 TOL = 0.01                                   # SBI paisa tolerance (contract-wide)
-_REF_RE = re.compile(r"^61\d{18}$")          # a valid SBI txn number: 20 digits, starts 61
-_REF_SCAN = re.compile(r"61\d{18}")          # find one inside a bank Description
+# A valid SBI txn number is a 20-digit number. Its leading digits encode the date, so the
+# prefix is NOT fixed — 15 Jul refs are 6196…, 20 Jul refs are 6201/6202…. (An earlier
+# 61-only regex silently rejected every non-61 date; do not reintroduce it.)
+_REF_RE = re.compile(r"^\d{20}$")            # a valid SBI txn number: exactly 20 digits
+_REF_SCAN = re.compile(r"\d{20}")            # find one inside a bank Description
 _PLACEHOLDER = {"", "-", "- / -", "-/-", "- /-", "-/ -", "n/a", "na"}
 
 # canonical product names — these are the six source files + the labels the manual
@@ -190,7 +193,7 @@ def reconcile(db, recon_date: str) -> dict:
             "Debit": b.debit or 0,
             "Credit": b.credit or 0,
             "Balance": b.balance if b.balance is not None else "",
-            "Extracted Txn No. (20-digit, starts 61)": ref,
+            "Extracted Txn No. (20-digit)": ref,
             "Matched Source File": canonical_product(matched.source_file) if matched else "",
             "Matched Transaction Type": (matched.txn_type or "") if matched else "",
             "Source Amount": (matched.amount or 0) if matched else "",
@@ -273,7 +276,7 @@ def reconcile(db, recon_date: str) -> dict:
     for gno, (r, rows) in enumerate(sorted(dup_refs.items()), start=1):
         for b in rows:
             seq = next((br["Bank Stmt Row"] for br in bank_recs
-                        if br["Extracted Txn No. (20-digit, starts 61)"] == r
+                        if br["Extracted Txn No. (20-digit)"] == r
                         and br["Description"] == (b.description or "")), "")
             dup_rows.append({
                 "Group No.": gno,
@@ -358,7 +361,7 @@ def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
         # Summary
         summ = [
             {"Metric": "Total Bank Statement Transactions", "Value": t["bank_total"]},
-            {"Metric": "Bank Rows with a 20-digit '61..' Txn Number", "Value": t["bank_with_ref"]},
+            {"Metric": "Bank Rows with a 20-digit Txn Number", "Value": t["bank_with_ref"]},
             {"Metric": "Bank Rows Matched to a Source File", "Value": t["bank_matched"]},
             {"Metric": "Bank Rows with Txn No. but NOT Found in Any Source File", "Value": t["bank_ref_not_found"]},
             {"Metric": "Bank Reversal Legs (DR+CR, same txn no.)", "Value": t["bank_reversal_legs"]},
@@ -390,7 +393,7 @@ def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
 
         # Bank Statement (Reconciled)
         bank_cols = ["Bank Stmt Row", "Txn Date", "Value Date", "Description", "Branch Code",
-                     "Debit", "Credit", "Balance", "Extracted Txn No. (20-digit, starts 61)",
+                     "Debit", "Credit", "Balance", "Extracted Txn No. (20-digit)",
                      "Matched Source File", "Matched Transaction Type", "Source Amount",
                      "Amount Match", "Match Status"]
         wsb = _write_sheet(writer, "Bank Statement (Reconciled)", R["bank_recs"], bank_cols)
@@ -400,7 +403,7 @@ def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
         _write_sheet(writer, "Unmatched Bank Entries",
                      [{"Bank Stmt Row": r["Bank Stmt Row"], "Txn Date": r["Txn Date"],
                        "Debit": r["Debit"], "Credit": r["Credit"], "Balance": r["Balance"],
-                       "Extracted Txn No.": r["Extracted Txn No. (20-digit, starts 61)"],
+                       "Extracted Txn No.": r["Extracted Txn No. (20-digit)"],
                        "Description": r["Description"],
                        "Remarks": "Has a 20-digit txn no. but no matching source record"}
                       for r in R["unmatched_bank"]],

@@ -1362,7 +1362,9 @@ function ReadinessPanel({ refreshKey, onReconciled, reconDate, setReconDate }) {
               )}
               {day.p02_total > 0 && (
                 <p className="text-[11px] text-gray-400 mt-2">
-                  {Number(day.p02_matched).toLocaleString('en-IN')} of {Number(day.p02_total).toLocaleString('en-IN')} bank rows matched on {day.date}.
+                  {Number(day.p02_matched).toLocaleString('en-IN')} matched
+                  {day.p02_reversal > 0 && <> + {Number(day.p02_reversal).toLocaleString('en-IN')} reversal <span className="text-gray-300">(net-zero, reconciled)</span></>}
+                  {' '}of {Number(day.p02_total).toLocaleString('en-IN')} bank rows on {day.date}.
                 </p>
               )}
             </div>

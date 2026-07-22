@@ -742,10 +742,14 @@ def run_p02(
         if r.reference_number:
             txn_by_ref.setdefault(r.reference_number, []).append(r)
 
-    # First pass: detect reversals (same ref, DR + CR pair)
+    # First pass: detect reversals (same ref, DR + CR pair). Only real 20-digit references
+    # count — the "no reference" placeholder ('- / -') must NOT group here, or every no-ref
+    # cash/settlement row (which naturally spans debits and credits) gets lumped into one
+    # bogus "reversal" (it was inflating Reversal by ~977 rows across the data).
+    from core.sbi_reports import _valid_ref
     ref_bank_map = {}  # ref → list of (bank_txn, type)
     for bt in bank_txns:
-        if not bt.ref_number: continue
+        if not _valid_ref((bt.ref_number or "").strip()): continue
         ref_bank_map.setdefault(bt.ref_number, []).append(bt)
 
     reversal_refs = {
@@ -2088,7 +2092,9 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
     dates = sorted(set(bank) | set(txn) | set(kolim) | set(cash) | set(fail))
     rows = []
     for d in dates:
-        p = p02.get(d, {}); tot = sum(p.values()); m = p.get("Matched", 0)
+        p = p02.get(d, {}); tot = sum(p.values())
+        m = p.get("Matched", 0); rev = p.get("Reversal", 0)
+        reconciled = m + rev   # a reversal is a net-zero DR+CR pair — reconciled, not open
         sf = src_files.get(d, {})
         present = [pr for pr in PRODUCTS if sf.get(pr)]
         missing_files = [pr for pr in PRODUCTS if not sf.get(pr)]
@@ -2102,8 +2108,10 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
             "source_files_have": len(present), "source_files_total": len(PRODUCTS),
             # P02 can only reconcile a day that has BOTH a bank statement and a txn report
             "p02_ready": bool(bank.get(d) and txn.get(d)),
-            "p02_total": tot, "p02_matched": m,
-            "p02_rate": round(100 * m / tot, 1) if tot else None,
+            "p02_total": tot, "p02_matched": m, "p02_reversal": rev,
+            "p02_reconciled": reconciled,
+            # rate counts reversals as reconciled (they net to zero) — they no longer drag it
+            "p02_rate": round(100 * reconciled / tot, 1) if tot else None,
             "missing": [name for name, avail in (
                 ("Bank statement", bank.get(d)), ("Transaction report", txn.get(d)))
                 if not avail],
@@ -2111,6 +2119,8 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
 
     from models.database import SBICSPMaster
     p02_m = sum(p.get("Matched", 0) for p in p02.values())
+    p02_rev = sum(p.get("Reversal", 0) for p in p02.values())
+    p02_recon = p02_m + p02_rev
     p02_t = sum(sum(p.values()) for p in p02.values())
     totals = {
         "bank": sum(bank.values()), "txn_report": sum(txn.values()),
@@ -2119,8 +2129,9 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
         "csp_master": db.query(F.count(SBICSPMaster.id)).scalar() or 0,
         "days_with_data": len(dates),
         "days_missing_report": sum(1 for r in rows if r["bank"] and not r["txn_report"]),
-        "p02_matched": p02_m, "p02_total": p02_t,
-        "p02_rate": round(100 * p02_m / p02_t, 1) if p02_t else None,
+        "p02_matched": p02_m, "p02_reversal": p02_rev, "p02_reconciled": p02_recon,
+        "p02_total": p02_t,
+        "p02_rate": round(100 * p02_recon / p02_t, 1) if p02_t else None,
     }
     return {"dates": rows, "latest": dates[-1] if dates else None, "totals": totals}
 

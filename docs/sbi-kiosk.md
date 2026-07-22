@@ -32,7 +32,15 @@ reconciles every business date present; auto-run after an upload reconciles that
   `PARTIAL` (amounts differ). Tolerance ₹0.01.
 - **P02 — Bank ↔ Transaction report.** Matches each bank row's 20-digit reference against the
   transaction report's reference (first-match-wins). Same ref appearing as both DR and CR = a
-  `Reversal`. Amount within ₹1 → `Matched`, else `Partial`; no ref/report → `Unmatched`.
+  `Reversal`. Amount within **₹0.01** → `Matched`, else `Partial`; no ref/report → `Unmatched`.
+  - **A reference is any 20-digit number, not just `61…`** — the leading digits encode the date
+    (15 Jul = `6196…`, 20 Jul = `6201/6202…`); a `61`-only check silently mis-classifies later dates.
+  - **Reversal detection ignores the `'- / -'` placeholder** (only real 20-digit refs group), else
+    every no-ref cash row lumps into one bogus reversal (~977 phantom rows removed).
+  - **Reversal = reconciled (Kiosk).** A reversal is a net-zero DR+CR pair (a failed txn posted
+    then reversed). It stays a **distinct, visible** status but counts as **reconciled, not open**:
+    the readiness rate is `(Matched+Reversal)/total`, analytics buckets it as matched, and
+    `p02_reversal` is surfaced per day so a spike (e.g. 471/day) stays obvious.
 - **P03 — Money out ↔ money in.** Matches transaction-report debits (money paid to CSP) against
   bank credits (money received) by **(KO code, amount)**. One-to-one within the run.
 - **P04 — Wallet-balance / limit-failure.** For each limit failure, decides whether the wallet

@@ -102,7 +102,8 @@ def _kiosk_processes(db, date_from=None, date_to=None):
         ("P01 · Settlement",     SBIP01Result, SBIP01Result.status,         SBIP01Result.bank_settled,
          {"credited": "matched", "pending": "unmatched", "partial": "mismatch", "excess": "other"}),
         ("P02 · Bank ↔ Txn",     SBIP02Result, SBIP02Result.match_status,    SBIP02Result.bank_amount,
-         {"matched": "matched", "unmatched": "unmatched", "partial": "mismatch", "reversal": "other"}),
+         # a reversal is a net-zero DR+CR pair → reconciled, counted as matched (Kiosk decision)
+         {"matched": "matched", "unmatched": "unmatched", "partial": "mismatch", "reversal": "matched"}),
         ("P03 · Money out ↔ in", SBIP03Result, SBIP03Result.match_status,    SBIP03Result.txn_amount,
          {"matched": "matched", "unmatched_txnreport": "unmatched", "unmatched_bank": "unmatched"}),
         ("P04 · Wallet balance", SBIP04Result, SBIP04Result.action_required, SBIP04Result.action_amount,
