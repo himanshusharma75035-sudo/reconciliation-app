@@ -56,9 +56,22 @@ Each of these changes how money reconciles, so none should be changed without co
    independently by P02 (by reference) **and** P03 (by KO + amount), with no mutual exclusion —
    so the same credit is counted as reconciled in both. **Is that intended (two independent
    checks), or should a credit be reconciled once?**
-2. **P03 match key.** P03 matches on **KO code + amount only** and ignores the reference number.
-   Two different transactions with the same KO and amount can be mis-paired. **Should P03 also
-   key on the reference number?**
+2. **P03 match key — CONFIRMED gap, highest-priority.** P03 matches on **KO code + amount only**
+   and ignores the reference number. An audit of the live unmatched pool found **~2,244 money-out
+   transactions (~₹74 lakh) that are wrongly left unmatched**: the bank statement carries the
+   KO/CSP id **truncated to 7 characters** while the transaction report carries the **full 8–10
+   character** id, so `(KO, amount)` never matches even though the **reference number and amount
+   agree exactly**. Independently verified four ways: 2,244/2,244 are exact 7-char prefixes;
+   2,244/2,244 are a clean 1:1 on `(date, reference)`; and **2,244/2,244 (100%) already match in
+   P02 by reference** — proving each is a single real transaction P03 split in two.
+   - **Safe fix: add reference-number matching to P03** (as P02 already does), excluding the
+     placeholder ref `'- / -'` (the only source of non-1:1 rows).
+   - **Do NOT "normalize"/truncate the KO id to fix this.** It is unsafe: **3,383 collision groups
+     (16,204 rows)** have different full KO ids sharing the same 7-char prefix + day + amount, so a
+     prefix-normalizing match would **misattribute money between different KOs**. Reference is the
+     only collision-free key.
+   - Use the SBI tolerance (₹0.01), not the ₹1 used during the audit. **Needs finance-ops sign-off
+     to change P03 classification (2,244 rows flip unmatched → matched).**
 3. **P03 date window.** The code accepted ±2 days (the docstring/SOP says D+1 / D-1 = ±1); Phase
    1 reduced P03 to **same-day only** to avoid a bank credit being reused across two days' runs.
    **What is the correct window (same-day only, ±1, ±2), and how should a D+1 credit be

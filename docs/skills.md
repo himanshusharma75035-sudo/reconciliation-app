@@ -359,6 +359,9 @@ Concrete, reusable, and each one cost real time.
 | Non-sargable filter (`COALESCE(a,b)`) | Correct but drops the index | Fine at small scale — know you traded it |
 | Trusting the left-most forwarded-IP header | Client-controlled → rate limits trivially bypassed | Use the value your proxy sets |
 | Assuming a code path is dead | "Dormant" paths run later, with the old bug | Fix or delete, don't leave landmines |
+| Auditing "should-match" by a composite/heuristic key | Keying on `(id, amount)` both **invents** false pairs (values coincide across unrelated rows — an adjacent-day audit found 7,638 "candidates", all coincidences) and **hides** real ones (one component differs) | Probe by the row's **unique** identifier (reference no.); a unique-key join is collision-free, and cross-checking a second process that already matches on it corroborates |
+| An identifier truncated on one side of a join | One system emits the id truncated to a 7-char prefix, the other the full 8–10 chars → a key on that id **silently never matches** (here: ~2,244 real txns, ~₹74 L, split in two) | Test prefix relationships to spot it; fix by keying on the shared **unique** field — never "normalise" by truncating, because prefixes collide (3,383 groups mapped to different real ids) |
+| Long remote job run inline over SSH | The client timeout backgrounds the local ssh, then a connection reset SIGHUPs the remote job **mid-write** | `nohup … & disown` + a logfile, poll the log; take a pre-run backup first — per-step commits mean a mid-run kill can leave a partial state |
 
 ---
 
