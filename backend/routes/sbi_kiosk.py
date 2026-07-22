@@ -1942,6 +1942,60 @@ def sbi_report(
     )
 
 
+# ── Operator output workbooks (reference-based bank↔source reconciliation) ──────
+# These are the two files finance ops reconcile against by hand, reproduced from our
+# data by core/sbi_reports.py (read-only; does NOT touch P01-P04 results).
+
+def _resolve_bank_date(db, recon_date):
+    """Use the requested date if it has bank rows; else fall back to the latest date
+    that does (so a download never silently returns an empty workbook)."""
+    if recon_date and db.query(SBIBankTransaction.id).filter(
+            SBIBankTransaction.txn_date == recon_date).first():
+        return recon_date
+    return db.query(func.max(SBIBankTransaction.txn_date)).filter(
+        SBIBankTransaction.txn_date.like("20%")).scalar()
+
+
+@router.get("/reports/reconciliation")
+def sbi_reconciliation_report(
+    recon_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Bank-statement-centric reconciliation workbook: every bank row annotated with the
+    source product/type it matched (by 20-digit reference), plus unmatched (both sides,
+    Success-first) and duplicate/reversal sheets."""
+    from core.sbi_reports import build_reconciliation_report
+    d = _resolve_bank_date(db, recon_date)
+    if not d:
+        raise HTTPException(status_code=404, detail="No SBI bank statement data to report on")
+    out = build_reconciliation_report(db, d)
+    return StreamingResponse(
+        out, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="Reconciliation_Report_{d}.xlsx"',
+                 "X-Recon-Date": str(d), "Access-Control-Expose-Headers": "X-Recon-Date"})
+
+
+@router.get("/reports/source-match")
+def sbi_source_match_report(
+    recon_date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Source-file-centric match-status workbook: a Summary split by Success/Failure, a
+    Limit & Settlement sheet, and one sheet per source product with each row's match status
+    highlighted (green matched / orange Success-unmatched / red Failure)."""
+    from core.sbi_reports import build_source_match_report
+    d = _resolve_bank_date(db, recon_date)
+    if not d:
+        raise HTTPException(status_code=404, detail="No SBI data to report on")
+    out = build_source_match_report(db, d)
+    return StreamingResponse(
+        out, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="Source_Files_Match_Status_{d}.xlsx"',
+                 "X-Recon-Date": str(d), "Access-Control-Expose-Headers": "X-Recon-Date"})
+
+
 # ── Run all four processes in sequence (QoL orchestration — same code paths) ──
 
 def _run_all_dates(db, current_user, dates):

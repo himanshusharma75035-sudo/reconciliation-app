@@ -39,6 +39,29 @@ reconciles every business date present; auto-run after an upload reconciles that
   needs a `DEPOSIT` or `WITHDRAWAL` correction; `action_done` is toggled manually after the
   operator performs it in the SBI portal.
 
+## The two operator output workbooks (reference-based recon)
+
+`core/sbi_reports.py` reproduces the two files finance ops reconcile against by hand,
+generated read-only from our own data (it does **not** touch the P01–P04 result tables).
+The engine is the finance-ops-approved rule: match the bank statement's 20-digit `61…`
+transaction number against the pooled six source files' Reference Number, one-to-one,
+₹0.01 tolerance; non-20-digit / placeholder refs are tagged `Not Applicable`; unmatched
+source rows split by Status (Failure = expected, Success = real gap). Download buttons sit
+on the SBI page's Readiness panel, scoped to the selected business date.
+
+- **`GET /api/sbi/reports/reconciliation`** → `Reconciliation_Report_<date>.xlsx` (bank-centric,
+  5 sheets): Summary · Bank Statement (Reconciled, with the **Matched Source File** product
+  per row) · Unmatched Bank Entries · Unmatched Source Records (Success first) · Duplicate Txn.
+- **`GET /api/sbi/reports/source-match`** → `Source_Files_Match_Status_<date>.xlsx` (source-centric,
+  8 sheets): Summary (split by Success/Failure) · Limit & Settlement · one sheet per source
+  product with each row's match status highlighted.
+
+Validated against the manual cloud reports for 15 Jul 2026: **all six products, the bank
+totals, and the Unmatched-Success count (37) match exactly**; product attribution agrees on
+13,773/13,777 bank rows (99.97%) — the only 4 differing are reversal legs, correctly tagged.
+A defensive exact-duplicate dedup at read time keeps a double-uploaded file (e.g. AePS Onus
+Deposit, seen doubled on 15 Jul) from flooding the report with phantom Unmatched-Success rows.
+
 ## Why a low match rate is usually NOT a bug
 
 P02 can only match a day that has **both** a bank statement and a transaction report. When the

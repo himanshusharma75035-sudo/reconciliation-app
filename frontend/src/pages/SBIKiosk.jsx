@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Upload, Play, RefreshCw, X, ChevronLeft, ChevronRight, ArrowLeftRight, ChevronDown, Check, AlertTriangle } from 'lucide-react'
+import { Upload, Play, RefreshCw, X, ChevronLeft, ChevronRight, ArrowLeftRight, ChevronDown, Check, AlertTriangle, Download } from 'lucide-react'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
 
@@ -178,6 +178,40 @@ function RunAllDatesButton({ onDone }) {
       className="btn-primary flex items-center gap-2 bg-rose-600 hover:bg-rose-700">
       <Play size={14} />{busy ? 'Reconciling all dates…' : 'Reconcile all dates'}
     </button>
+  )
+}
+
+// Download the two operator reconciliation workbooks for the selected business date.
+// These reproduce the files finance ops reconcile against by hand — bank statement fully
+// annotated with the source product each row matched, plus the per-source match-status view.
+function DownloadReports({ reconDate }) {
+  const [busy, setBusy] = useState('')
+  const dl = async (kind, path, label) => {
+    setBusy(kind)
+    try {
+      const r = await api.get(path, { params: { recon_date: reconDate }, responseType: 'blob' })
+      const used = r.headers['x-recon-date'] || reconDate || 'latest'
+      const u = URL.createObjectURL(r.data)
+      const a = document.createElement('a')
+      a.href = u; a.download = `${label}_${used}.xlsx`; a.click(); URL.revokeObjectURL(u)
+      toast.success(`Downloaded ${label.replace(/_/g, ' ')} for ${used}`)
+    } catch (e) {
+      toast.error(e.response?.status === 404 ? 'No SBI data to report on yet' : 'Download failed')
+    } finally { setBusy('') }
+  }
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <button onClick={() => dl('recon', '/sbi/reports/reconciliation', 'Reconciliation_Report')}
+        disabled={!!busy} title="Bank statement annotated with the source product each row matched, + unmatched & duplicates"
+        className="btn-ghost flex items-center gap-1.5 !px-3 !py-1.5 text-xs">
+        <Download size={13} />{busy === 'recon' ? 'Building…' : 'Reconciliation Report'}
+      </button>
+      <button onClick={() => dl('src', '/sbi/reports/source-match', 'Source_Files_Match_Status')}
+        disabled={!!busy} title="Per source file: matched / unmatched split by Success vs Failure"
+        className="btn-ghost flex items-center gap-1.5 !px-3 !py-1.5 text-xs">
+        <Download size={13} />{busy === 'src' ? 'Building…' : 'Source Match Report'}
+      </button>
+    </div>
   )
 }
 
@@ -1295,6 +1329,7 @@ function ReadinessPanel({ refreshKey, onReconciled, reconDate, setReconDate }) {
             <span className="text-xs text-gray-400">Business date</span>
             <DateDropdown rows={rows} value={reconDate} onChange={setReconDate} />
             <span className="text-[11px] text-gray-400">— also filters the P01–P04 tabs below</span>
+            <div className="ml-auto"><DownloadReports reconDate={reconDate} /></div>
           </div>
 
           {day && (
