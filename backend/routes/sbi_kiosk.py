@@ -399,17 +399,20 @@ async def upload_ko_limits(
     data.columns = h
     today = str(datetime.date.today())
     inserted = 0
+    file_dates = set()
 
     for _, row in data.iterrows():
         txn_type = _clean(row.get('Type of Transaction', ''))
         if txn_type not in ('KO Deposit', 'KO Withdrawal'): continue
         try:
             raw_dt = _clean(row.get('Date of Transaction', ''))
+            _td = _nd(raw_dt[:10] if raw_dt else '')
+            if _td: file_dates.add(_td)
             db.add(SBIKOLimits(
                 id                  = generate_id(),
                 upload_date         = today,
                 txn_datetime        = _clip(raw_dt, 30),
-                txn_date            = _clip(_nd(raw_dt[:10] if raw_dt else ''), 10),
+                txn_date            = _clip(_td, 10),
                 limit_configured_by = _clip(_clean(row.get('Limit Configured By', '')), 20),
                 ko_id               = _clip(_clean(row.get('KO ID', '')), 20),
                 opening_limit       = _sf(row.get('Opening Limit')),
@@ -422,7 +425,7 @@ async def upload_ko_limits(
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
     _audit(db, current_user, "sbi_upload_ko_limits", {"filename": file.filename, "inserted": inserted})
     return {"inserted": inserted, "filename": file.filename,
-            "auto_recon": _auto_run_after_upload(db, current_user)}
+            "auto_recon": _auto_run_after_upload(db, current_user, dates=sorted(file_dates))}
 
 
 # ── P02: Transaction Report Upload ────────────────────────────────────────────
@@ -468,6 +471,7 @@ async def upload_txn_report(
     today = str(datetime.date.today())
     source = file.filename
     inserted = 0
+    file_dates = set()   # only reconcile the business dates THIS file touches (see below)
 
     for _, row in data.iterrows():
         # Skip metadata/empty rows
@@ -476,6 +480,7 @@ async def upload_txn_report(
 
         raw_dt = gv(row, 'transaction_date_&_time') or gv(row, 'transaction_date')
         txn_date = _nd(raw_dt[:10]) if raw_dt else ''
+        if txn_date: file_dates.add(txn_date)
 
         try:
             db.add(SBITxnReport(
@@ -501,8 +506,11 @@ async def upload_txn_report(
         except Exception as _e:
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
     _audit(db, current_user, "sbi_upload_txn_report", {"filename": source, "inserted": inserted})
+    # Reconcile ONLY the dates this file touched — not every business date. A full re-run
+    # (22 dates × P01-P04) took minutes and blocked the single worker, freezing the app on
+    # every upload. `dates=[]` (a file with no parseable dates) → skip, don't fall back to all.
     return {"inserted": inserted, "filename": source,
-            "auto_recon": _auto_run_after_upload(db, current_user)}
+            "auto_recon": _auto_run_after_upload(db, current_user, dates=sorted(file_dates))}
 
 
 # ── P03: CSP Master Sheet Upload ──────────────────────────────────────────────
@@ -548,8 +556,11 @@ async def upload_csp_master(
 
     db.commit()
     _audit(db, current_user, "sbi_upload_csp_master", {"filename": file.filename, "inserted": inserted})
+    # CSP Master is reference data (no business date). It feeds P03's mode lookup across ALL
+    # dates, so auto-reconciling it would mean a full re-run that freezes the worker — and
+    # it changes rarely. Skip auto-recon; use "Reconcile all dates" to propagate a change.
     return {"inserted": inserted, "filename": file.filename,
-            "auto_recon": _auto_run_after_upload(db, current_user)}
+            "auto_recon": _auto_run_after_upload(db, current_user, dates=[])}
 
 
 # ── P04: KO Cash Holding Upload ───────────────────────────────────────────────
@@ -599,7 +610,7 @@ async def upload_ko_cash_holding(
     db.commit()
     _audit(db, current_user, "sbi_upload_ko_cash_holding", {"filename": file.filename, "inserted": inserted})
     return {"inserted": inserted, "filename": file.filename,
-            "auto_recon": _auto_run_after_upload(db, current_user)}
+            "auto_recon": _auto_run_after_upload(db, current_user, dates=[r_date] if r_date else [])}
 
 
 @router.post("/upload/limit-failures")
@@ -623,16 +634,19 @@ async def upload_limit_failures(
     # simply inserts nothing rather than erroring.
     today = str(datetime.date.today())
     inserted = 0
+    file_dates = set()
 
     for row in rows[4:]:  # data starts at row 4
         if len(row) < 5: continue
         sr = row[0].replace('.', '').strip()
         if not sr or not sr.isdigit(): continue
         try:
+            _td = _nd(row[1])
+            if _td: file_dates.add(_td)
             db.add(SBILimitFailure(
                 id          = generate_id(),
                 upload_date = today,
-                txn_date    = _clip(_nd(row[1]), 10),
+                txn_date    = _clip(_td, 10),
                 csp_code    = _clip(row[2].strip(), 20),
                 bc_id       = _clip(row[3].strip(), 20),
                 amount      = _sf(row[4]),
@@ -643,7 +657,7 @@ async def upload_limit_failures(
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
     _audit(db, current_user, "sbi_upload_limit_failures", {"filename": file.filename, "inserted": inserted})
     return {"inserted": inserted, "filename": file.filename,
-            "auto_recon": _auto_run_after_upload(db, current_user)}
+            "auto_recon": _auto_run_after_upload(db, current_user, dates=sorted(file_dates))}
 
 
 # ── P01: Run Settlement Reconciliation ────────────────────────────────────────
@@ -2167,13 +2181,18 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
 
 
 def _auto_run_after_upload(db, current_user, dates=None):
-    """Auto-recon after every SBI upload. Reconciles the business dates the upload touched
-    (or, if unknown, every date in the data) — NOT 'today', which never reconciled a bulk
-    or back-dated upload and could stamp results under the wrong day. Each process is
-    wipe-guarded, so a date still missing a counterpart file is a harmless no-op that the
-    next upload's auto-run completes. Every failure is swallowed so an upload never blocks."""
+    """Auto-recon after every SBI upload. Reconciles ONLY the business dates the upload
+    touched — NOT every date, which (at 22 dates × P01-P04) took minutes and froze the
+    single worker on each upload. `dates=None` means "unknown → reconcile all" (kept for
+    callers that can't scope, e.g. reference-data uploads); an EMPTY list means "this file
+    had no dates → reconcile nothing" (must NOT fall through to all). Each process is
+    wipe-guarded, so a date missing a counterpart file is a harmless no-op the next upload
+    completes. Every failure is swallowed so an upload never blocks."""
     try:
-        ds = sorted({d[:10] for d in dates if d and len(d) >= 10}) if dates else _sbi_business_dates(db)
+        if dates is None:
+            ds = _sbi_business_dates(db)
+        else:
+            ds = sorted({d[:10] for d in dates if d and len(d) >= 10})
         if not ds:
             return {"dates": [], "note": "no business dates to reconcile"}
         _run_all_dates(db, current_user, ds)
