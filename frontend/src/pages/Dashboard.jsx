@@ -860,19 +860,33 @@ function PGSettlementPanel({ dateRange }) {
 // ── Clear Modal ────────────────────────────────────────────────────────────────
 
 function ClearModal({ onClose, onDone, partnerSlugs }) {
-  const [filters, setFilters]   = useState({ partner: '', recon_date: '', side: '', recon_status: '' })
+  const [filters, setFilters]   = useState({ partner: '', recon_date: '', date_from: '', date_to: '', side: '', recon_status: '' })
   const [step, setStep]         = useState(1)
   const [clearing, setClearing] = useState(false)
+  const [preview, setPreview]   = useState(null)   // dry-run result for step 2
   const active = Object.entries(filters).filter(([, v]) => v)
+  const isModule = ['evalue', 'bbps', 'sbi', 'kiosk'].includes(filters.partner)
+
+  const review = async () => {
+    // Server-verified dry run: exact counts of what THIS filter set would delete.
+    setPreview(null); setStep(2)
+    try {
+      const params = new URLSearchParams({ ...Object.fromEntries(active), dry_run: 'true' })
+      const { data } = await api.delete(`/upload/clear?${params}`)
+      setPreview(data)
+    } catch (e) { setPreview({ error: e.response?.data?.detail || 'Preview failed' }) }
+  }
 
   const handleClear = async () => {
     setClearing(true)
     try {
       const params = new URLSearchParams(Object.fromEntries(active))
       const { data } = await api.delete(`/upload/clear?${params}`)
-      toast.success(`Cleared ${data.deleted_transactions} transactions`)
+      const n = data.deleted_transactions ?? data.total ?? 0
+      toast.success(`Cleared ${n} rows — recoverable from the Recycle Bin${data.counterparts_unmatched ? ` · ${data.counterparts_unmatched} matched counterpart(s) reverted to unmatched` : ''}`,
+        { duration: 6000 })
       onDone(); onClose()
-    } catch { toast.error('Failed to clear data') } finally { setClearing(false) }
+    } catch (e) { toast.error(e.response?.data?.detail || 'Failed to clear data') } finally { setClearing(false) }
   }
 
   return (
@@ -884,22 +898,39 @@ function ClearModal({ onClose, onDone, partnerSlugs }) {
         </div>
         {step === 1 && (
           <>
-            <p className="text-sm text-gray-500 mb-4">Apply filters to delete a specific subset, or leave all blank to clear everything.</p>
+            <p className="text-sm text-gray-500 mb-4">Filter what to delete — single date or a date range, one side, or (core products) a status. Everything goes to the Recycle Bin.</p>
             <div className="space-y-3">
               <div><label className="text-xs font-medium text-gray-500 block mb-1">Partner</label>
-                <select className="select" value={filters.partner} onChange={e => setFilters({ ...filters, partner: e.target.value })}>
+                <select className="select" value={filters.partner} onChange={e => setFilters({ ...filters, partner: e.target.value, recon_status: '' })}>
                   <option value="">All partners</option>
                   {partnerSlugs.map(s => <option key={s} value={s}>{s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
                 </select>
               </div>
-              <div><label className="text-xs font-medium text-gray-500 block mb-1">Recon Date</label>
-                <input type="date" className="input" value={filters.recon_date} onChange={e => setFilters({ ...filters, recon_date: e.target.value })} />
+              <div><label className="text-xs font-medium text-gray-500 block mb-1">Single Date <span className="text-gray-300">(or use a range below)</span></label>
+                <input type="date" className="input" value={filters.recon_date}
+                  onChange={e => setFilters({ ...filters, recon_date: e.target.value, date_from: '', date_to: '' })} />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div><label className="text-xs font-medium text-gray-500 block mb-1">From</label>
+                  <input type="date" className="input" value={filters.date_from} disabled={!!filters.recon_date}
+                    onChange={e => setFilters({ ...filters, date_from: e.target.value })} /></div>
+                <div><label className="text-xs font-medium text-gray-500 block mb-1">To</label>
+                  <input type="date" className="input" value={filters.date_to} disabled={!!filters.recon_date}
+                    onChange={e => setFilters({ ...filters, date_to: e.target.value })} /></div>
               </div>
               <div><label className="text-xs font-medium text-gray-500 block mb-1">Side</label>
                 <select className="select" value={filters.side} onChange={e => setFilters({ ...filters, side: e.target.value })}>
                   <option value="">Both sides</option><option value="bank">Bank only</option><option value="internal">Internal only</option>
                 </select>
               </div>
+              {!isModule && (
+                <div><label className="text-xs font-medium text-gray-500 block mb-1">Status <span className="text-gray-300">(core products only)</span></label>
+                  <select className="select" value={filters.recon_status} onChange={e => setFilters({ ...filters, recon_status: e.target.value })}>
+                    <option value="">Any status</option><option value="unmatched">Unmatched only</option>
+                    <option value="matched">Matched only</option><option value="src_assigned">SRC-assigned only</option>
+                  </select>
+                </div>
+              )}
             </div>
             {active.length === 0 && (
               <div className="mt-4 bg-red-50 border border-red-100 rounded-lg p-3 text-xs text-red-700">
@@ -908,24 +939,36 @@ function ClearModal({ onClose, onDone, partnerSlugs }) {
             )}
             <div className="flex gap-3 mt-5">
               <button onClick={onClose} className="btn-ghost flex-1">Cancel</button>
-              <button onClick={() => setStep(2)} className="flex-1 py-2 px-4 rounded-lg font-medium text-sm bg-red-500 text-white hover:bg-red-600 transition-colors">Review →</button>
+              <button onClick={review} className="flex-1 py-2 px-4 rounded-lg font-medium text-sm bg-red-500 text-white hover:bg-red-600 transition-colors">Preview →</button>
             </div>
           </>
         )}
         {step === 2 && (
           <>
-            <div className="bg-gray-50 rounded-lg p-4 mb-5 text-sm">
+            <div className="bg-gray-50 rounded-lg p-4 mb-4 text-sm">
               <p className="font-semibold text-gray-700 mb-2">You are about to delete:</p>
               {active.length === 0
                 ? <p className="text-red-600 font-medium">ALL transactions and upload sessions</p>
                 : active.map(([k, v]) => <div key={k} className="flex gap-2"><span className="text-gray-400 w-28 capitalize">{k.replace('_',' ')}</span><span className="font-medium text-gray-700">{v}</span></div>)
               }
+              <div className="mt-3 pt-3 border-t border-gray-200">
+                {preview === null && <p className="text-xs text-gray-400">Counting exactly what this deletes…</p>}
+                {preview?.error && <p className="text-xs text-red-500">{preview.error}</p>}
+                {preview && !preview.error && (
+                  <div className="text-xs space-y-1">
+                    <p><span className="font-bold text-red-600 text-sm tabular-nums">{preview.would_delete ?? 0}</span> row(s) will be deleted{preview.by_table && Object.keys(preview.by_table).length > 0 && <> ({Object.entries(preview.by_table).map(([t, n]) => `${t.replace(/^(sbi_|evalue_|bbps_)/, '')}: ${n}`).join(', ')})</>}</p>
+                    {(preview.counterparts_would_unmatch ?? 0) > 0 &&
+                      <p className="text-amber-600">{preview.counterparts_would_unmatch} matched counterpart(s) will revert to unmatched.</p>}
+                  </div>
+                )}
+              </div>
             </div>
-            <p className="text-xs text-red-500 mb-5">This cannot be undone.</p>
+            <p className="text-xs text-gray-500 mb-5">Deleted rows go to the <b>Recycle Bin</b> and can be restored for 30 days.</p>
             <div className="flex gap-3">
               <button onClick={() => setStep(1)} className="btn-ghost flex-1">← Back</button>
-              <button onClick={handleClear} disabled={clearing} className="flex-1 py-2 px-4 rounded-lg font-medium text-sm bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 transition-colors">
-                {clearing ? 'Deleting…' : 'Yes, Delete'}
+              <button onClick={handleClear} disabled={clearing || preview === null || !!preview?.error}
+                className="flex-1 py-2 px-4 rounded-lg font-medium text-sm bg-red-500 text-white hover:bg-red-600 disabled:opacity-50 transition-colors">
+                {clearing ? 'Deleting…' : `Yes, Delete${preview && !preview.error ? ` ${preview.would_delete ?? 0} rows` : ''}`}
               </button>
             </div>
           </>

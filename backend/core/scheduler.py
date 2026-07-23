@@ -257,3 +257,35 @@ def register_eod_email_job():
         misfire_grace_time=1800,  # allow up to 30 min late
     )
     logger.info(f"[scheduler] EOD email job registered at {hour:02d}:{minute:02d} IST")
+
+
+def _run_recycle_purge_job():
+    """Purge recycle-bin batches older than the retention window. Until this job existed,
+    purge_expired was never invoked anywhere — the 30-day retention the UI advertises
+    was not actually enforced and the bin grew forever."""
+    from models.database import SessionLocal
+    from core import recycle_bin
+    db = SessionLocal()
+    try:
+        n = recycle_bin.purge_expired(db)
+        if n:
+            logger.info(f"[scheduler] recycle-bin purge removed {n} expired row(s)")
+    except Exception as e:
+        logger.warning(f"[scheduler] recycle-bin purge failed: {e}")
+    finally:
+        db.close()
+
+
+def register_recycle_purge_job():
+    """Nightly 02:30 IST recycle-bin retention purge."""
+    jid = "recycle_bin_purge"
+    if _scheduler.get_job(jid):
+        _scheduler.remove_job(jid)
+    _scheduler.add_job(
+        _run_recycle_purge_job,
+        trigger=CronTrigger(hour=2, minute=30, timezone="Asia/Kolkata"),
+        id=jid,
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    logger.info("[scheduler] recycle-bin purge job registered at 02:30 IST")

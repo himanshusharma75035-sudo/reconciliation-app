@@ -2630,10 +2630,20 @@ def get_upload_status(
 def clear_sbi_data(
     table: Optional[str] = Query(None, description="bank|txn|limits|cash|failures|csp|p01|p02|p03|p04|all"),
     upload_date: Optional[str] = None,
+    recon_date: Optional[str] = None,    # business date (preferred over upload_date)
+    dry_run: bool = False,               # preview: exact counts, deletes NOTHING
     db: Session = Depends(get_db),
-    current_user=Depends(require_permission("upload")),
+    current_user=Depends(require_permission("clear_data")),
 ):
-    """Clear SBI data (all tables or specific table, optionally by upload_date)."""
+    """Clear SBI data per table — recycle-binned, audited, business-date-aware.
+
+    Rebuilt (2026-07-23): was a HARD delete with only an upload_date filter and the weak
+    'upload' permission, and it left P0x result rows claiming Matched after their source
+    rows were gone (unrecomputable — the wipe-guard rightly refuses an empty date). Now:
+    every deletion goes through the recycle bin (one batch, restorable), clearing bank/txn
+    sources also clears the affected business dates' results, and dry_run gives the UI an
+    exact-count preview."""
+    from core import recycle_bin
     tables = {
         "bank": SBIBankTransaction, "txn": SBITxnReport,
         "limits": SBIKOLimits, "cash": SBIKOCashHolding,
@@ -2641,14 +2651,57 @@ def clear_sbi_data(
         "p01": SBIP01Result, "p02": SBIP02Result,
         "p03": SBIP03Result, "p04": SBIP04Result,
     }
+    date_col = {"bank": "txn_date", "txn": "txn_date", "limits": "txn_date",
+                "cash": "report_date", "failures": "txn_date",
+                "p01": "recon_date", "p02": "recon_date", "p03": "recon_date",
+                "p04": "recon_date"}
     to_clear = tables if table in (None, "all") else {table: tables[table]} if table in tables else {}
     if not to_clear:
         raise HTTPException(status_code=400, detail=f"Unknown table: {table}")
+    batch = generate_id()
     counts = {}
+    stale_dates = set()      # business dates whose bank/txn sources are being removed
     for name, model in to_clear.items():
         q = db.query(model)
         if upload_date and hasattr(model, 'upload_date'):
             q = q.filter(model.upload_date == upload_date)
-        counts[name] = q.delete()
-        db.commit()
-    return {"deleted": counts}
+        if recon_date and name in date_col:
+            q = q.filter(getattr(model, date_col[name]) == recon_date)
+        if name in ("bank", "txn"):
+            stale_dates.update(d for (d,) in q.with_entities(
+                getattr(model, date_col[name])).distinct().all() if d)
+        if dry_run:
+            n = q.count()
+        else:
+            n = recycle_bin.soft_delete(
+                db, q, model, module="sbi", user=current_user.username,
+                filters={k: v for k, v in {"table": name, "upload_date": upload_date,
+                                           "recon_date": recon_date}.items() if v},
+                reason="sbi per-table clear", batch_id=batch)
+        if n:
+            counts[name] = n
+    # Sources gone ⇒ those dates' results are fiction — clear them in the same batch.
+    if stale_dates:
+        for rname in ("p01", "p02", "p03", "p04"):
+            if rname in to_clear and table not in (None, "all"):
+                continue                  # explicitly selected → already handled above
+            rm = tables[rname]
+            q = db.query(rm).filter(rm.recon_date.in_(stale_dates))
+            if dry_run:
+                n = q.count()
+            else:
+                n = recycle_bin.soft_delete(
+                    db, q, rm, module="sbi", user=current_user.username,
+                    filters={"stale_after": sorted(stale_dates)[:10]},
+                    reason="sbi clear (source cleared — results stale)", batch_id=batch)
+            if n:
+                counts[rname] = counts.get(rname, 0) + n
+    if dry_run:
+        return {"dry_run": True, "would_delete": counts,
+                "total": sum(counts.values()),
+                "stale_result_dates": sorted(stale_dates)}
+    db.commit()
+    _audit(db, current_user, "sbi_clear",
+           {"table": table or "all", "upload_date": upload_date, "recon_date": recon_date,
+            "deleted": counts, "recycle_batch_id": batch})
+    return {"deleted": counts, "total": sum(counts.values()), "recycle_batch_id": batch}

@@ -449,13 +449,17 @@ def startup():
     # ── Scheduler (non-fatal — app works without it) ───────────────────────
     db2 = SessionLocal()
     try:
-        from core.scheduler import start_scheduler, reload_all_schedules, register_eod_email_job
+        from core.scheduler import (start_scheduler, reload_all_schedules,
+                                    register_eod_email_job, register_recycle_purge_job)
         start_scheduler()
         reload_all_schedules(db2)
         # Daily EOD digest / match-rate alert job — was imported but never registered, so the
         # EOD_EMAIL_* env config was dead. Registering it makes the config live; it is a no-op
         # while EOD_EMAIL_TO is empty (notifications.py returns early), so it sends nothing today.
         register_eod_email_job()
+        # Nightly recycle-bin retention purge — purge_expired was never invoked anywhere,
+        # so the 30-day retention the UI advertises was not actually enforced.
+        register_recycle_purge_job()
         # Re-register all active personal report subscriptions (self-service EOD/weekly/monthly)
         from core.report_scheduler import reload_all_report_subscriptions
         reload_all_report_subscriptions(db2)

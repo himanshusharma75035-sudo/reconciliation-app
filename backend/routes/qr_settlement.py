@@ -344,8 +344,15 @@ def delete_chargeback(
     cb = db.query(QRChargeback).filter(QRChargeback.id == cb_id).first()
     if not cb:
         raise HTTPException(status_code=404, detail="Chargeback not found")
-    db.delete(cb); db.commit()
-    return {"message": "Deleted"}
+    # Soft delete via the recycle bin (was a hard db.delete — financial rows must stay
+    # recoverable, ground rule + skills.md).
+    from core import recycle_bin
+    q = db.query(QRChargeback).filter(QRChargeback.id == cb_id)
+    recycle_bin.soft_delete(db, q, QRChargeback, module="qr",
+                            user=current_user.username, filters={"id": cb_id},
+                            reason="delete chargeback")
+    db.commit()
+    return {"message": "Deleted (recoverable from the Recycle Bin)"}
 
 
 # ── Clear data ────────────────────────────────────────────────────────────────

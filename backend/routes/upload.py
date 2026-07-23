@@ -2048,6 +2048,7 @@ def _module_tables(module: str):
 
 
 def _clear_module(module: str, db, *, recon_date=None, side=None,
+                  date_from=None, date_to=None, dry_run=False,
                   user="system", filters=None, batch_id=None) -> dict:
     """Delete a module's data rows, HONOURING the caller's filters, via the recycle bin.
 
@@ -2090,12 +2091,20 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
             if date_expr is None:
                 continue                  # no business date → refuse to wipe it
             q = q.filter(date_expr(model) == recon_date)
+        elif date_from or date_to:
+            if date_expr is None:
+                continue                  # can't range-scope a dateless table → skip, never wipe
+            if date_from: q = q.filter(date_expr(model) >= date_from)
+            if date_to:   q = q.filter(date_expr(model) <= date_to)
         if model in _pair_models:
             _deleted_mids.update(m for (m,) in q.with_entities(model.match_id)
                                  .filter(model.match_id.isnot(None)).all())
-        n = recycle_bin.soft_delete(db, q, model, module=module, user=user,
-                                    filters=filters, reason=f"clear {module}",
-                                    batch_id=batch_id)
+        if dry_run:
+            n = q.count()                 # PREVIEW only — count, touch nothing
+        else:
+            n = recycle_bin.soft_delete(db, q, model, module=module, user=user,
+                                        filters=filters, reason=f"clear {module}",
+                                        batch_id=batch_id)
         if n:
             deleted[model.__tablename__] = n
             if module == "sbi" and model.__tablename__ in ("sbi_bank_transactions",
@@ -2109,7 +2118,16 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
     # this they stay "matched" forever, pointing at deleted rows (live incident: five
     # stale matched_manual wallet loads after a bank-side clear, 2026-07-22).
     cascaded = 0
-    if _deleted_mids:
+    if _deleted_mids and dry_run:
+        # preview of how many surviving legs WOULD revert
+        for pm, unmatched_status, paired in _PAIR_STATUS.get(module, []):
+            cascaded += (db.query(pm)
+                         .filter(pm.match_id.in_(_deleted_mids),
+                                 pm.recon_status.in_(paired)).count())
+        _evibt = {m for m in _deleted_mids if m and str(m).startswith("EVIBT-")}
+        if _evibt:
+            cascaded += db.query(Transaction).filter(Transaction.match_id.in_(_evibt)).count()
+    elif _deleted_mids:
         for pm, unmatched_status, paired in _PAIR_STATUS.get(module, []):
             cascaded += (db.query(pm)
                          .filter(pm.match_id.in_(_deleted_mids),
@@ -2142,22 +2160,29 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
             q = db.query(rm)
             if recon_date:
                 q = q.filter(rm.recon_date == recon_date)
-            n = recycle_bin.soft_delete(db, q, rm, module=module, user=user,
-                                        filters=filters,
-                                        reason=f"clear sbi ({side} side cleared — results stale)",
-                                        batch_id=batch_id)
+            elif date_from or date_to:
+                if date_from: q = q.filter(rm.recon_date >= date_from)
+                if date_to:   q = q.filter(rm.recon_date <= date_to)
+            if dry_run:
+                n = q.count()
+            else:
+                n = recycle_bin.soft_delete(db, q, rm, module=module, user=user,
+                                            filters=filters,
+                                            reason=f"clear sbi ({side} side cleared — results stale)",
+                                            batch_id=batch_id)
             if n:
                 deleted[rm.__tablename__] = deleted.get(rm.__tablename__, 0) + n
 
     # The upload-hash guard only blocks re-uploading an identical FILE. Dropping it is
-    # correct ONLY for a full, unfiltered product clear.
-    if not recon_date and not side:
+    # correct ONLY for a full, unfiltered product clear (and never during a dry run).
+    if not recon_date and not side and not date_from and not date_to and not dry_run:
         from models.database import ModuleUploadHash
         db.query(ModuleUploadHash).filter(
             ModuleUploadHash.module == module).delete(synchronize_session=False)
 
     return {"deleted": deleted, "total": sum(deleted.values()),
-            "counterparts_unmatched": cascaded, "batch_id": batch_id}
+            "counterparts_unmatched": cascaded, "batch_id": batch_id,
+            "dry_run": dry_run}
 
 
 # product slug → module key (kiosk and sbi both map to the SBI tables)
@@ -2170,6 +2195,9 @@ def clear_data(
     recon_date: Optional[str] = None,
     side: Optional[str] = None,          # "bank" | "internal"
     recon_status: Optional[str] = None,  # "matched" | "unmatched" | "src_assigned" | "all"
+    date_from: Optional[str] = None,     # inclusive range (used when recon_date is empty)
+    date_to: Optional[str] = None,       # inclusive range
+    dry_run: bool = False,               # preview: exact counts, deletes NOTHING
     db: Session = Depends(get_db),
     # Destructive — gated by the 'clear_data' permission ("Clear / Delete Data" in
     # the Users screen). Admins short-circuit; non-admins need the toggle granted.
@@ -2190,9 +2218,15 @@ def clear_data(
                         f"its own tables with their own status vocabulary. Clear by date "
                         f"and/or side, or act on specific rows from the {partner} screen."))
         _filters = {k: v for k, v in {"partner": partner, "recon_date": recon_date,
-                                      "side": side}.items() if v}
+                                      "side": side, "date_from": date_from,
+                                      "date_to": date_to}.items() if v}
         res = _clear_module(module, db, recon_date=recon_date, side=side,
+                            date_from=date_from, date_to=date_to, dry_run=dry_run,
                             user=current_user.username, filters=_filters)
+        if dry_run:
+            return {"dry_run": True, "would_delete": res["total"], "by_table": res["deleted"],
+                    "counterparts_would_unmatch": res["counterparts_unmatched"],
+                    "module": partner, "filters_applied": _filters}
         try:
             db.add(AuditLog(user_id=current_user.id, username=current_user.username,
                             action="clear", action_type="human", entity_type="module",
@@ -2204,6 +2238,7 @@ def clear_data(
         db.commit()
         return {"deleted_transactions": res["total"], "deleted_sessions": 0, "module": partner,
                 "by_table": res["deleted"], "recycle_batch_id": res["batch_id"],
+                "counterparts_unmatched": res["counterparts_unmatched"],
                 "filters_applied": _filters}
     """
     Clear transactions (and orphaned upload sessions) with granular filters.
@@ -2216,9 +2251,28 @@ def clear_data(
     q_txn = db.query(Transaction)
     if partner:      q_txn = q_txn.filter(Transaction.partner == partner)
     if recon_date:   q_txn = q_txn.filter(Transaction.recon_date == recon_date)
+    elif date_from or date_to:
+        # inclusive business-date range (zero-padded strings compare lexicographically)
+        if date_from: q_txn = q_txn.filter(Transaction.recon_date >= date_from)
+        if date_to:   q_txn = q_txn.filter(Transaction.recon_date <= date_to)
     if side:         q_txn = q_txn.filter(Transaction.side == side)
     if recon_status and recon_status != "all":
         q_txn = q_txn.filter(Transaction.recon_status == recon_status)
+
+    # ── Dry run: exact counts for the confirmation preview — deletes NOTHING ──
+    if dry_run:
+        _ids = [t.id for t in q_txn.with_entities(Transaction.id).all()]
+        _cp = (db.query(Transaction)
+               .filter(Transaction.matched_with_id.in_(_ids)).count()) if _ids else 0
+        _ev = (db.query(Transaction.match_id)
+               .filter(Transaction.id.in_(_ids),
+                       Transaction.match_id.like("EVIBT-%")).count()) if _ids else 0
+        return {"dry_run": True, "would_delete": len(_ids),
+                "counterparts_would_unmatch": _cp + _ev,
+                "filters_applied": {k: v for k, v in {
+                    "partner": partner, "recon_date": recon_date, "side": side,
+                    "recon_status": recon_status, "date_from": date_from,
+                    "date_to": date_to}.items() if v}}
 
     # ── Cascade: reset counterpart matches before deleting ────────────────────
     # Collect IDs of rows about to be deleted, then find any transaction on the
@@ -2373,15 +2427,30 @@ def clear_selected(
     if queued:
         return queued
 
-    # Cascade: reset counterparts before deleting
+    # Cascade: reset counterparts before deleting (incl. cross-product EVIBT- legs)
     db.query(Transaction).filter(
         Transaction.matched_with_id.in_(ids)
     ).update(
         {"recon_status": "unmatched", "matched_with_id": None, "match_id": None},
         synchronize_session=False,
     )
+    _evibt_sel = {m for (m,) in db.query(Transaction.match_id)
+                  .filter(Transaction.id.in_(ids),
+                          Transaction.match_id.like("EVIBT-%")).all() if m}
+    if _evibt_sel:
+        from models.database import EvalueBankTxn as _EvBSel
+        db.query(_EvBSel).filter(_EvBSel.match_id.in_(_evibt_sel)).update(
+            {"recon_status": "unmatched_bank", "match_id": None,
+             "match_note": "core interbank leg deleted — auto-reverted"},
+            synchronize_session=False)
 
-    deleted = db.query(Transaction).filter(Transaction.id.in_(ids)).delete(synchronize_session=False)
+    # Soft delete via the recycle bin (was a hard delete — checkbox bulk-deletes must be
+    # recoverable like every other financial-row deletion).
+    from core import recycle_bin as _rb_sel
+    deleted = _rb_sel.soft_delete(
+        db, db.query(Transaction).filter(Transaction.id.in_(ids)), Transaction,
+        module="core", user=current_user.username,
+        filters={"ids_count": len(ids)}, reason="delete selected rows")
     db.commit()
 
     # Audit log
