@@ -1398,8 +1398,10 @@ def confirm_mapping(
         row_dict = dict(row)
 
         # ── Mixed dump: resolve partner from source column ─────────────────
+        # (_clean strips Excel text-marker apostrophes — a marked source/filter
+        # cell must not silently drop the row; mirrored in ingest_service)
         if is_mixed:
-            src_val = str(row_dict.get(source_column, '')).strip().upper() if source_column else ''
+            src_val = (_clean(row_dict.get(source_column, '')) or '').upper() if source_column else ''
             row_partner = SOURCE_PARTNER_MAP.get(src_val)
             if not row_partner:
                 skipped += 1   # unknown source (e.g. Axis) — skip
@@ -1408,7 +1410,7 @@ def confirm_mapping(
             row_partner = session.partner
             # Legacy single-partner filter (e.g. source = FINO)
             if filter_column and filter_value:
-                cell = str(row_dict.get(filter_column, '')).strip()
+                cell = str(row_dict.get(filter_column, '')).strip().lstrip("'").strip()
                 if cell and cell.upper() not in NULL_VALUES and cell.upper() != filter_value.strip().upper():
                     skipped += 1
                     continue

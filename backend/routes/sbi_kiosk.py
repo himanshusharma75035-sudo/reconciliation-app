@@ -72,6 +72,8 @@ def _sf(v, default=0.0) -> float:
 
 def _clean(v) -> str:
     s = str(v).strip() if v is not None else ''
+    if s.startswith("'"):                 # Excel text-format marker — artifact, never data
+        s = s.lstrip("'").strip()         # (P01–P03 match on RAW equality; see routes.upload._clean)
     return '' if s.lower() in ('nan', 'none') else s
 
 def _nd(v) -> str:
@@ -288,7 +290,7 @@ async def upload_bank_statement(
             txn_date   = _nd(parts[0].strip()) if parts else ''
             value_date = _nd(parts[1].strip()) if len(parts) > 1 else ''
             desc       = parts[2].strip() if len(parts) > 2 else ''
-            ref_no     = parts[3].strip() if len(parts) > 3 else ''
+            ref_no     = parts[3].strip().lstrip("'").strip() if len(parts) > 3 else ''  # raw path bypasses _clean
             branch     = parts[4].strip() if len(parts) > 4 else ''
             debit      = _sf(parts[5].strip()) if len(parts) > 5 else 0.0
             credit     = _sf(parts[6].strip()) if len(parts) > 6 else 0.0

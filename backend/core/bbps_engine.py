@@ -47,6 +47,8 @@ def _sf(v, default=0.0) -> float:
 
 def _clean(v) -> str:
     s = str(v).strip() if v is not None else ""
+    if s.startswith("'"):                 # Excel text-format marker — artifact, never data
+        s = s.lstrip("'").strip()         # (protects _classify status reads + the upsert identity)
     if s.lower() in ("nan", "none", "null", "\\n", "-"):
         return ""
     return s

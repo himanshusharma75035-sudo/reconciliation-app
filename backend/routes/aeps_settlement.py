@@ -35,6 +35,15 @@ router = APIRouter(prefix="/api/aeps", tags=["aeps-settlement"],
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _noq(v) -> str:
+    """Strip Excel text-format marker apostrophes ('123 renders as 123) — an
+    encoding artifact, never data. RRNs here cross-ref core Transaction ids by
+    RAW equality, and the dedup keys must normalize identically for DB rows and
+    file rows or a marker/clean re-export defeats dedup and double-counts."""
+    s = str(v).strip() if v is not None else ""
+    return s.lstrip("'").strip() if s.startswith("'") else s
+
+
 def _safe_float(v, default=0.0):
     try:
         s = str(v).replace(',', '').strip()
@@ -116,14 +125,14 @@ def upload_tplus(
     # created date, settlement amount). Re-uploading the same T Plus report skips
     # already-present batches instead of duplicating the settlement totals.
     def _tkey(ref, cd, amt):
-        return (str(ref or "").strip(), str(cd or "").strip(), round(float(amt or 0), 2))
+        return (_noq(ref), str(cd or "").strip(), round(float(amt or 0), 2))
     existing = set()
     for r in db.query(AepsSettlement.reference_number, AepsSettlement.created_date, AepsSettlement.settlement_amount).all():
         existing.add(_tkey(r[0], r[1], r[2]))
 
     for idx, row in df.iterrows():
         try:
-            _ref = str(row.get("Reference Number", "")).strip()
+            _ref = _noq(row.get("Reference Number", ""))
             _cd  = _normalise_date(row.get("Created Date"))
             _sa  = _safe_float(row.get("Settlement Amount"))
             _k   = _tkey(_ref, _cd, _sa)
@@ -144,8 +153,8 @@ def upload_tplus(
                 twafa_count       = _safe_int(row.get("TwoFa Count")),
                 twafa_total       = _safe_float(row.get("TwoFa Amount")),
                 cd_amount         = _safe_float(row.get("CD Amount")),
-                reference_number  = str(row.get("Reference Number", "")).strip(),
-                cms_number        = str(row.get("CMS Number", "")).strip(),
+                reference_number  = _ref,
+                cms_number        = _noq(row.get("CMS Number", "")),
                 status_message    = str(row.get("Status Message", "")).strip(),
                 service_type      = str(row.get("Service Type", "")).strip(),
                 status            = str(row.get("Status", "")).strip(),
@@ -217,14 +226,14 @@ def upload_anomaly(
     # later report — must NOT create a second row (which would double-count the
     # unsettled total). Such rows are SKIPPED and reported as duplicates.
     def _akey(rrn, amt, ts):
-        return (str(rrn).strip(), round(float(amt or 0), 2), (ts or "").strip())
+        return (_noq(rrn), round(float(amt or 0), 2), (ts or "").strip())
     existing = set()
     for r in db.query(AepsAnomaly.rrn, AepsAnomaly.amount, AepsAnomaly.txn_timestamp).all():
         existing.add(_akey(r[0], r[1], r[2]))
 
     for idx, row in df.iterrows():
         try:
-            rrn = str(row.get("RRN", "")).strip()
+            rrn = _noq(row.get("RRN", ""))
             if not rrn:
                 continue
             amount = _safe_float(row.get("Transaction Amount"))
@@ -289,14 +298,14 @@ def upload_cib(
     # Dedup: a chargeback/penalty is uniquely identified by (RRN, amount, txn date,
     # reason). Re-uploading the same CIB report skips already-present recoveries.
     def _ckey(rrn, amt, td, rsn):
-        return (str(rrn).strip(), round(float(amt or 0), 2), str(td or "").strip(), str(rsn or "").strip())
+        return (_noq(rrn), round(float(amt or 0), 2), str(td or "").strip(), str(rsn or "").strip())
     existing = set()
     for r in db.query(AepsCIB.rrn, AepsCIB.amount, AepsCIB.txn_date, AepsCIB.reason).all():
         existing.add(_ckey(r[0], r[1], r[2], r[3]))
 
     for idx, row in df.iterrows():
         try:
-            rrn = str(row.get("RRN", "")).strip()
+            rrn = _noq(row.get("RRN", ""))
             if not rrn:
                 continue
             amount   = _safe_float(row.get("Amount"))

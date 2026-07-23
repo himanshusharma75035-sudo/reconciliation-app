@@ -307,8 +307,10 @@ def _ingest_dataframe_inner(
         row_dict = dict(row)
 
         # ── Partner resolution ────────────────────────────────────────────────
+        # (_clean strips Excel text-marker apostrophes — a marked source/filter
+        # cell must not silently drop the row; mirrors routes/upload.py)
         if is_mixed:
-            src_val    = str(row_dict.get(source_column, '')).strip() if source_column else ''
+            src_val    = (_clean(row_dict.get(source_column, '')) or '') if source_column else ''
             row_partner = _src_map.get(src_val) or _src_map.get(src_val.upper())
             if not row_partner:
                 skipped += 1
@@ -316,7 +318,7 @@ def _ingest_dataframe_inner(
         else:
             row_partner = session.partner
             if filter_column and filter_value:
-                cell = str(row_dict.get(filter_column, '')).strip()
+                cell = str(row_dict.get(filter_column, '')).strip().lstrip("'").strip()
                 if cell and cell.upper() not in NULL_VALUES and cell.upper() != filter_value.strip().upper():
                     skipped += 1
                     continue

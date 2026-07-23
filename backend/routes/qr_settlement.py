@@ -105,9 +105,16 @@ def upload_settlement(
 
     inserted, replaced, errors = 0, 0, []
 
+    # Excel text-format marker ('123 renders as 123) — artifact, never data. The
+    # settlement_id is an UPSERT KEY and rrn a cross-ref to core transactions, so a
+    # marker on either would duplicate batches / break the chargeback lookup.
+    def _noq(v):
+        s = str(v).strip() if v is not None else ""
+        return s.lstrip("'").strip() if s.startswith("'") else s
+
     for idx, row in df.iterrows():
         try:
-            _sid = str(row.get("Settlement ID", "")).strip()
+            _sid = _noq(row.get("Settlement ID", ""))
             if _sid:
                 _ex = (db.query(QRSettlement)
                        .filter(QRSettlement.settlement_id == _sid).all())
@@ -129,7 +136,7 @@ def upload_settlement(
             db.add(QRSettlement(
                 id                    = generate_id(),
                 upload_date           = str(datetime.date.today()),
-                settlement_id         = str(row.get("Settlement ID", "")).strip(),
+                settlement_id         = _sid,
                 payment_date          = _normalise_date(row.get("Payment Date")),
                 gross_amount          = gross,
                 fees                  = fees,
@@ -141,8 +148,8 @@ def upload_settlement(
                 payment_status        = str(row.get("Payment Status", "")).strip(),
                 payout_status         = str(row.get("Payout Status", "")).strip(),
                 payout_remarks        = str(row.get("Payout Remarks", "")).strip(),
-                bank_ref_number       = str(row.get("Bank Ref Number", "")).strip(),
-                rrn                   = str(row.get("RRN", "")).strip(),
+                bank_ref_number       = _noq(row.get("Bank Ref Number", "")),
+                rrn                   = _noq(row.get("RRN", "")),
                 uploaded_by           = current_user.username,
             ))
             inserted += 1
@@ -237,7 +244,7 @@ def create_chargeback(
         adj_type    = body.adj_type,
         txn_date    = _normalise_date(body.txn_date),
         upi_txn_id  = body.upi_txn_id,
-        rrn         = body.rrn.strip(),
+        rrn         = body.rrn.strip().lstrip("'").strip(),   # Excel marker guard — rrn cross-refs core txns
         adj_amount  = body.adj_amount,
         tat_date    = _normalise_date(body.tat_date),
         status      = body.status,

@@ -30,3 +30,34 @@ def test_apostrophe_wrapped_null_markers_still_null():
 def test_plain_values_unchanged():
     assert _clean("3570194429") == "3570194429"
     assert _clean("  Success  ") == "Success"
+
+
+# ── every module engine's own cleaner must strip the marker too ────────────────
+# (2026-07-23 sweep: SBI P01–P03 match on RAW equality; E-Value's Success/DR
+# eligibility filter and both upsert identities read raw; AePS/QR settlement
+# rrn cross-refs and dedup keys read raw. Live data was clean — these are the
+# preventive guards so the AePS 22-07 incident can't recur via any ingest path.)
+def test_sbi_clean_strips_marker():
+    from routes.sbi_kiosk import _clean as sbi_clean
+    assert sbi_clean("'61960000000000000001") == "61960000000000000001"
+    assert sbi_clean("nan") == ""
+
+
+def test_evalue_clean_strips_marker():
+    from core.evalue_engine import _clean as ev_clean
+    assert ev_clean("'Success") == "Success"
+    assert ev_clean("'DR") == "DR"
+    assert ev_clean("'-") == ""          # apostrophe-marked null stays null
+
+
+def test_bbps_clean_strips_marker():
+    from core.bbps_engine import _clean as bbps_clean
+    assert bbps_clean("'Failed") == "Failed"
+    assert bbps_clean("-") == ""
+
+
+def test_aeps_settlement_noq_strips_marker():
+    from routes.aeps_settlement import _noq
+    assert _noq("'520512345678") == "520512345678"
+    assert _noq("520512345678") == "520512345678"
+    assert _noq(None) == ""
