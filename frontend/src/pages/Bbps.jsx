@@ -146,6 +146,29 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
   // Branded modal instead of browser prompts (audit F2)
   const [modal, setModal] = useState(null)
   const [modalBusy, setModalBusy] = useState(false)
+
+  // Multi-select delete (keys are `${side}:${id}` since the table merges both sides).
+  // Routes through /upload/delete-rows: recycle-binned + matched counterparts reverted.
+  const [sel, setSel] = useState(() => new Set())
+  const selKey = r => `${r._side}:${r.id}`
+  const toggleSel = r => setSel(s => { const n = new Set(s); const k = selKey(r); n.has(k) ? n.delete(k) : n.add(k); return n })
+  const deleteSelected = async () => {
+    if (!sel.size) return
+    if (!window.confirm(`Delete ${sel.size} selected row(s)?\n\nMatched counterparts are safely reverted to unmatched, and the rows go to the Recycle Bin (restorable for 30 days).`)) return
+    try {
+      let deleted = 0, reverted = 0
+      for (const side of ['bank', 'internal']) {
+        const ids = [...sel].filter(k => k.startsWith(side + ':')).map(k => k.slice(side.length + 1))
+        if (!ids.length) continue
+        const fd = new FormData()
+        fd.append('module', 'bbps'); fd.append('table', side); fd.append('row_ids', ids.join(','))
+        const { data } = await api.post('/upload/delete-rows', fd)
+        deleted += data.deleted || 0; reverted += data.counterparts_unmatched || 0
+      }
+      toast.success(`Deleted ${deleted} row(s)${reverted ? ` · ${reverted} counterpart(s) reverted` : ''} — recoverable from the Recycle Bin`, { duration: 6000 })
+      setSel(new Set()); fetchRows(); refresh()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Delete failed (needs the Clear/Delete Data permission)') }
+  }
   const unmatch = (mid) => setModal({
     config: { title: 'Unmatch pair', danger: true, confirmLabel: 'Unmatch',
       description: `Break match ${mid} — both rows go back to unmatched.`, fields: [] },
@@ -214,6 +237,13 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
           <select className="select w-52 text-xs py-1" value={status} onChange={e => setStatus(e.target.value)}><option value="">All statuses</option>{Object.entries(STATUS_META).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</select>
           <select className="select w-32 text-xs py-1" value={provider} onChange={e => setProvider(e.target.value)}><option value="">All providers</option><option value="moneyart">Moneyart</option><option value="levin">Levin</option></select>
           <span className="text-[11px] text-gray-400">Operator &amp; Internal shown together · {rows.length} rows</span>
+          {sel.size > 0 && (
+            <span className="flex items-center gap-2 ml-auto">
+              <span className="text-xs font-medium text-primary">{sel.size} selected</span>
+              <button onClick={deleteSelected} className="px-3 py-1 rounded text-xs font-medium bg-red-600 text-white hover:bg-red-700">Delete selected</button>
+              <button onClick={() => setSel(new Set())} className="text-xs text-gray-500 hover:text-gray-700">Clear</button>
+            </span>
+          )}
         </div>
         {(() => { const fRows = rows.filter(r =>
           _hit(r._side === 'bank' ? 'operator' : 'internal', colF.side) && _hit(r.provider, colF.provider) &&
@@ -222,11 +252,15 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
           <div className="overflow-x-auto"><table className="w-full text-xs">
             <thead>
             <tr className="border-b text-gray-500">
+              <th className="table-th w-7"><input type="checkbox"
+                checked={fRows.length > 0 && fRows.every(r => sel.has(selKey(r)))}
+                onChange={() => setSel(s => { const all = fRows.every(r => s.has(selKey(r))); const n = new Set(s); fRows.forEach(r => all ? n.delete(selKey(r)) : n.add(selKey(r))); return n })} /></th>
               <th className="table-th">Side</th><th className="table-th">Provider</th><th className="table-th">Eko TID</th>
               <th className="table-th text-right">Amount</th><th className="table-th">Status</th><th className="table-th">Refunded</th>
               <th className="table-th">Date</th><th className="table-th">Recon ID</th><th className="table-th">Recon Status</th><th className="table-th">Actions</th>
             </tr>
             <tr className="border-b border-gray-100 bg-gray-50/40">
+              <th className="px-1 py-1"></th>
               <th className="px-1 py-1"><input className="input text-[11px] py-0.5 w-full" placeholder="op/int…" value={colF.side} onChange={e => setColF(f => ({ ...f, side: e.target.value }))} /></th>
               <th className="px-1 py-1"><input className="input text-[11px] py-0.5 w-full" placeholder="provider…" value={colF.provider} onChange={e => setColF(f => ({ ...f, provider: e.target.value }))} /></th>
               <th className="px-1 py-1"><input className="input text-[11px] py-0.5 w-full" placeholder="eko tid…" value={colF.eko} onChange={e => setColF(f => ({ ...f, eko: e.target.value }))} /></th>
@@ -236,10 +270,11 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
               <th className="px-1 py-1">{colFActive && <button onClick={() => setColF({ side: '', provider: '', eko: '', match_id: '', recon: '' })} className="text-[10px] text-gray-400 hover:text-gray-600">clear</button>}</th>
             </tr>
             </thead>
-            <tbody>{fRows.length === 0 ? <tr><td colSpan="10" className="text-center text-gray-400 py-4">{rows.length ? 'No rows match the column filters.' : 'No rows.'}</td></tr> : fRows.map((r, i) => {
+            <tbody>{fRows.length === 0 ? <tr><td colSpan="11" className="text-center text-gray-400 py-4">{rows.length ? 'No rows match the column filters.' : 'No rows.'}</td></tr> : fRows.map((r, i) => {
               const m = STATUS_META[r.recon_status] || { label: r.recon_status, cls: 'bg-gray-100 text-gray-600' }
               return (
                 <tr key={i} className="border-b border-gray-50 hover:bg-gray-50">
+                  <td className="table-td"><input type="checkbox" checked={sel.has(selKey(r))} onChange={() => toggleSel(r)} /></td>
                   <td className="table-td"><span className={`px-2 py-0.5 rounded-full text-[10px] ${r._side === 'bank' ? 'bg-blue-50 text-blue-700' : 'bg-violet-50 text-violet-700'}`}>{r._side === 'bank' ? 'Operator' : 'Internal'}</span></td>
                   <td className="table-td capitalize">{r.provider}</td>
                   <td className="table-td font-mono">{r.client_ref || r.eko_trxn_id || '—'}</td>
