@@ -475,6 +475,14 @@ def _trigger_sbi_upload(config, current_user, db):
             )
         else:
             result = handler(file=fake_file, db=db, current_user=current_user)
+    except HTTPException as e:
+        # Preserve the real status — a guard 409 [DUPLICATE] must reach the client as a
+        # 409 (so the UI can offer Re-upload/replace), not be flattened into a 500.
+        config.last_triggered_at   = datetime.datetime.utcnow()
+        config.last_trigger_status = "duplicate" if e.status_code == 409 else "error"
+        config.last_trigger_message = str(e.detail)[:500]
+        db.commit()
+        raise
     except Exception as e:
         config.last_triggered_at   = datetime.datetime.utcnow()
         config.last_trigger_status = "error"
@@ -536,6 +544,12 @@ def _trigger_bbps_upload(config, current_user, db):
         result = asyncio.get_event_loop().run_until_complete(
             handler(file=fake_file, db=db, user=current_user)
         )
+    except HTTPException as e:
+        config.last_triggered_at   = datetime.datetime.utcnow()
+        config.last_trigger_status = "duplicate" if e.status_code == 409 else "error"
+        config.last_trigger_message = str(e.detail)[:500]
+        db.commit()
+        raise
     except Exception as e:
         config.last_triggered_at   = datetime.datetime.utcnow()
         config.last_trigger_status = "error"
@@ -591,6 +605,12 @@ def _trigger_evalue_upload(config, current_user, db):
         result = asyncio.get_event_loop().run_until_complete(
             upload_internal(file=fake_file, db=db, user=current_user)
         )
+    except HTTPException as e:
+        config.last_triggered_at   = datetime.datetime.utcnow()
+        config.last_trigger_status = "duplicate" if e.status_code == 409 else "error"
+        config.last_trigger_message = str(e.detail)[:500]
+        db.commit()
+        raise
     except Exception as e:
         config.last_triggered_at   = datetime.datetime.utcnow()
         config.last_trigger_status = "error"

@@ -15,7 +15,7 @@ import datetime
 import logging
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -50,12 +50,20 @@ def _audit(db, user, action, detail, entity_id=None, prev=None):
 
 
 # ─── Uploads ──────────────────────────────────────────────────────────────────
+_BBPS_PAIRED = ("matched", "amount_mismatch", "failed_refunded",
+                "failed_pending_refund", "refunded_but_success")
+
+
 @router.post("/upload-internal")
-async def upload_internal(file: UploadFile = File(...), db: Session = Depends(get_db),
+async def upload_internal(file: UploadFile = File(...), force: bool = Form(False),
+                          db: Session = Depends(get_db),
                           user=Depends(get_current_user)):
     raw = await file.read()
     from core.file_hash_guard import guard_duplicate_file
-    guard_duplicate_file(db, "bbps", "internal", raw, file.filename, user)
+    # force= restores rows removed since the original upload (e.g. by a Clear) — the
+    # upsert-per-eko_trxn_id makes a forced re-apply idempotent (parser drops eko-less
+    # rows, so nothing can double).
+    guard_duplicate_file(db, "bbps", "internal", raw, file.filename, user, force=force)
     try:
         recs = BB.parse_internal(raw, file.filename)
     except Exception as e:
@@ -67,6 +75,15 @@ async def upload_internal(file: UploadFile = File(...), db: Session = Depends(ge
     for r in recs:
         ex = db.query(BbpsInternal).filter(BbpsInternal.eko_trxn_id == r["eko_trxn_id"]).first()
         if ex:
+            if ex.match_id:
+                # Replacing a matched internal row orphans its bank leg — reset it (the
+                # next run-recon would also heal it, but never leave a stale link).
+                db.query(BbpsBankTxn).filter(
+                    BbpsBankTxn.match_id == ex.match_id,
+                    BbpsBankTxn.recon_status.in_(_BBPS_PAIRED),
+                ).update({"recon_status": "unmatched_bank", "match_id": None,
+                          "match_note": "internal leg replaced by re-upload — auto-reverted"},
+                         synchronize_session=False)
             db.delete(ex); replaced += 1
         db.add(BbpsInternal(
             id=generate_id(), upload_date=upload_date, eko_trxn_id=r["eko_trxn_id"],
@@ -83,18 +100,34 @@ async def upload_internal(file: UploadFile = File(...), db: Session = Depends(ge
 
 
 @router.post("/upload-bank")
-async def upload_bank(file: UploadFile = File(...), db: Session = Depends(get_db),
+async def upload_bank(file: UploadFile = File(...), force: bool = Form(False),
+                      db: Session = Depends(get_db),
                       user=Depends(get_current_user)):
     raw = await file.read()
     from core.file_hash_guard import guard_duplicate_file
-    guard_duplicate_file(db, "bbps", "bank", raw, file.filename, user)
+    # force= restores rows removed since the original upload — safe: this path is a full
+    # replace per provider, so a forced re-apply supersedes rather than duplicates.
+    guard_duplicate_file(db, "bbps", "bank", raw, file.filename, user, force=force)
     try:
         provider, rows = BB.parse_bank_statement(raw, file.filename)
     except Exception as e:
         raise HTTPException(400, str(e))
     if not rows:
         raise HTTPException(400, "No transactions found in the statement.")
-    # Replace prior rows for this provider (fresh statement supersedes)
+    # Replace prior rows for this provider (fresh statement supersedes). The wipe removes
+    # matched bank legs too — reset their internal counterparts so no internal row stays
+    # matched pointing at a deleted bank row (run-recon right after also heals, but never
+    # leave the window).
+    _wiped_mids = {m for (m,) in db.query(BbpsBankTxn.match_id)
+                   .filter(BbpsBankTxn.provider == provider,
+                           BbpsBankTxn.match_id.isnot(None)).all()}
+    if _wiped_mids:
+        db.query(BbpsInternal).filter(
+            BbpsInternal.match_id.in_(_wiped_mids),
+            BbpsInternal.recon_status.in_(_BBPS_PAIRED),
+        ).update({"recon_status": "unmatched_internal", "match_id": None,
+                  "match_note": "bank statement replaced — auto-reverted"},
+                 synchronize_session=False)
     db.query(BbpsBankTxn).filter(BbpsBankTxn.provider == provider).delete()
     upload_date = _TODAY()
     for r in rows:

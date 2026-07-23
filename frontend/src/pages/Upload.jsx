@@ -127,10 +127,21 @@ function QRSettlementUpload() {
   const handleUpload = async (file) => {
     if (!file) return
     setUploading(true)
+    const attempt = force => { const fd = new FormData(); fd.append('file', file); return api.post(`/qr/upload/settlement${force ? '?force=true' : ''}`, fd) }
     try {
-      const fd = new FormData(); fd.append('file', file)
-      const { data } = await api.post('/qr/upload/settlement', fd)
-      toast.success(`Settlement: ${data.inserted} batches uploaded`)
+      let res
+      try { res = await attempt(false) }
+      catch (err) {
+        const detail = err.response?.data?.detail || 'Settlement upload failed'
+        // 409 [DUPLICATE] → offer Re-upload (replace): re-applying upserts per Settlement
+        // ID, so existing batches are replaced and new ones added — never doubled.
+        if (err.response?.status === 409 &&
+            window.confirm(`${detail}\n\nRe-upload anyway and re-apply this file? Existing settlement batches are replaced, not duplicated.`)) {
+          res = await attempt(true)
+        } else { toast.error(detail); return }
+      }
+      const data = res.data
+      toast.success(`Settlement: ${data.inserted} batches uploaded${data.replaced ? ` (${data.replaced} replaced)` : ''}`)
       if (data.errors?.length) toast.error(`${data.errors.length} formula errors — check file`)
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Settlement upload failed')
@@ -191,12 +202,26 @@ function SBIKioskUploads() {
     const doUpload = async () => {
       if (!file) return toast.error('Select a file first')
       setUploading(label)
-      try {
+      const attempt = force => {
         const fd = new FormData()
         fd.append('file', file)
         if (extraField && extra) fd.append(extraField.name, extra)
-        const { data } = await api.post(endpoint, fd)
-        toast.success(`${label}: ${data.inserted} rows uploaded`)
+        return api.post(`${endpoint}${force ? '?force=true' : ''}`, fd)
+      }
+      try {
+        let res
+        try { res = await attempt(false) }
+        catch (err) {
+          const detail = err.response?.data?.detail || `${label} failed`
+          // 409 [DUPLICATE] → Re-upload (replace): every SBI upload now REPLACES its own
+          // scope (its dates/product/BC) or dedups, so re-applying never doubles rows.
+          if (err.response?.status === 409 &&
+              window.confirm(`${detail}\n\nRe-upload anyway and re-apply this file? Rows it already covers are replaced, not duplicated.`)) {
+            res = await attempt(true)
+          } else { toast.error(detail); return }
+        }
+        const data = res.data
+        toast.success(`${label}: ${data.inserted} rows uploaded${data.replaced ? ` (${data.replaced} replaced)` : ''}`)
         setFile(null)
       } catch (err) {
         toast.error(err.response?.data?.detail || `${label} failed`)

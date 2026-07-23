@@ -226,13 +226,19 @@ def _repair_orphaned_matches(partner: str, recon_date: str, db: Session) -> int:
     Safe to call on every reconciliation run — is a no-op when nothing is wrong.
     Returns the number of rows repaired.
     """
+    # Every status that represents a LINKED PAIR — not just plain 'matched'. A stale
+    # manual_matched / amount_mismatch / reversal_matched / internal_matched /
+    # interbank_matched / duplicate row whose partner vanished is just as much a lie,
+    # and previously never healed because only 'matched' was inspected.
+    _PAIRED = ("matched", "manual_matched", "amount_mismatch", "reversal_matched",
+               "internal_matched", "interbank_matched", "duplicate")
     repaired = 0
     for side in ("bank", "internal"):
         stale = db.query(Transaction).filter(
             Transaction.partner == partner,
             Transaction.recon_date == recon_date,
             Transaction.side == side,
-            Transaction.recon_status == "matched",
+            Transaction.recon_status.in_(_PAIRED),
             Transaction.matched_with_id.isnot(None),
         ).all()
         for row in stale:

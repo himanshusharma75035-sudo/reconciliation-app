@@ -170,12 +170,25 @@ def _upsert_wallet_loads(db, loads):
     eko_trxn_id are appended (they cannot be upserted) — both callers SHA-256-guard the
     file first, so a re-applied file can't double-append them. Returns (inserted, replaced)."""
     upload_date = _TODAY()
+    _EV_PAIRED = ("matched_online", "matched_cash", "matched_manual", "wrong_amount",
+                  "twice_credit", "interbank_matched")
     inserted, replaced = 0, 0
     for l in loads:
         eko = l.get("eko_trxn_id") or ""
         if eko:
             ex = db.query(EvalueWalletLoad).filter(EvalueWalletLoad.eko_trxn_id == eko).first()
             if ex:
+                if ex.match_id:
+                    # Replacing a MATCHED load orphans its bank leg. Manual / preserved
+                    # dispositions (EVMAN-/EVX-/EVIBT-) never self-heal (re-runs skip
+                    # them by design), so reset the surviving bank row(s) to unmatched;
+                    # auto EV- legs also reset here and simply re-match on the next run.
+                    db.query(EvalueBankTxn).filter(
+                        EvalueBankTxn.match_id == ex.match_id,
+                        EvalueBankTxn.recon_status.in_(_EV_PAIRED),
+                    ).update({"recon_status": "unmatched_bank", "match_id": None,
+                              "match_note": "load leg replaced by re-upload — auto-reverted"},
+                             synchronize_session=False)
                 db.delete(ex); replaced += 1
         db.add(EvalueWalletLoad(
             id=generate_id(), upload_date=upload_date,

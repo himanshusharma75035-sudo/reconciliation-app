@@ -30,6 +30,18 @@ Reviewers: cite this file by item number.
    duplicate-flag pass (`flag_same_side_duplicates`) runs LAST, in both ingest copies,
    and only re-labels still-`unmatched` `txn`-row re-ingestions (same partner/side/
    tracking) as `duplicate` — never a matched, operator-actioned, or reversal/fee row.
+   *(2026-07-23)* The cascade is now universal: **every** delete path that removes one
+   leg of a matched pair reverts every surviving leg sharing its match_id — module
+   clears (E-Value/BBPS, full paired-status set incl. wrong_amount/amount_mismatch),
+   the E-Value/BBPS per-id upserts, the BBPS provider wipe, cross-product EVIBT- links
+   (both directions), and `_repair_orphaned_matches` heals all paired statuses, not
+   just `matched`. An SBI source-side clear also removes the same scope's P01–P04
+   result rows (recycle-binned) — results must never outlive their sources.
+   *(2026-07-23)* Upload semantics: every upload is **replace/upsert within its own
+   scope, never append** — SBI ko-limits (its dates × configurer), txn-report (its
+   dates × product), cash-holding (report_date × its KOs), limit-failures (its dates ×
+   BC), csp-master (content dedup), QR settlement (upsert per Settlement ID) — so the
+   Re-upload (replace)/force path is idempotent everywhere it is offered.
 5. **`_normalize` float canonicalization** (`core/matching_engine.py`) — `700.0 → '700'`,
    else 2-decimal string. Amount-keyed rules (PG, Digikhata) depend on this exact string.
 6. **`_build_key` returns None when ANY field is empty** — this is what lets fallback

@@ -2023,15 +2023,24 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
     from core import recycle_bin
     batch_id = batch_id or generate_id()
     deleted = {}
-    # Pair tables whose rows carry (recon_status, match_id) linking legs of a match, with
-    # each table's own "unmatched" literal. Used by the cascade below.
+    # Pair tables whose rows carry (recon_status, match_id) linking legs of a match:
+    # (model, unmatched-literal, the FULL set of statuses that represent a linked pair —
+    # NOT a 'matched%' prefix: wrong_amount / twice_credit / amount_mismatch /
+    # failed_refunded etc. are linked pairs too and must also revert).
     from models.database import BbpsBankTxn, BbpsInternal, EvalueBankTxn, EvalueWalletLoad
+    _EV_PAIRED = ("matched_online", "matched_cash", "matched_manual", "wrong_amount",
+                  "twice_credit", "interbank_matched")
+    _BBPS_PAIRED = ("matched", "amount_mismatch", "failed_refunded",
+                    "failed_pending_refund", "refunded_but_success")
     _PAIR_STATUS = {
-        "evalue": [(EvalueBankTxn, "unmatched_bank"), (EvalueWalletLoad, "unmatched_load")],
-        "bbps":   [(BbpsBankTxn, "unmatched_bank"), (BbpsInternal, "unmatched_internal")],
+        "evalue": [(EvalueBankTxn, "unmatched_bank", _EV_PAIRED),
+                   (EvalueWalletLoad, "unmatched_load", _EV_PAIRED)],
+        "bbps":   [(BbpsBankTxn, "unmatched_bank", _BBPS_PAIRED),
+                   (BbpsInternal, "unmatched_internal", _BBPS_PAIRED)],
     }
-    _pair_models = {m for m, _ in _PAIR_STATUS.get(module, [])}
+    _pair_models = {m for m, _, _ in _PAIR_STATUS.get(module, [])}
     _deleted_mids = set()                 # match_ids whose rows are being deleted
+    _sbi_source_deleted = False
 
     for model, date_expr, tside in _module_tables(module):
         if side and tside != side:
@@ -2049,6 +2058,9 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
                                     batch_id=batch_id)
         if n:
             deleted[model.__tablename__] = n
+            if module == "sbi" and model.__tablename__ in ("sbi_bank_transactions",
+                                                           "sbi_txn_reports"):
+                _sbi_source_deleted = True
 
     # ── Match-integrity cascade ────────────────────────────────────────────────
     # Deleting one leg of a matched pair must revert every SURVIVING leg sharing its
@@ -2058,13 +2070,44 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
     # stale matched_manual wallet loads after a bank-side clear, 2026-07-22).
     cascaded = 0
     if _deleted_mids:
-        for pm, unmatched_status in _PAIR_STATUS.get(module, []):
+        for pm, unmatched_status, paired in _PAIR_STATUS.get(module, []):
             cascaded += (db.query(pm)
                          .filter(pm.match_id.in_(_deleted_mids),
-                                 pm.recon_status.like("matched%"))
+                                 pm.recon_status.in_(paired))
                          .update({"recon_status": unmatched_status, "match_id": None,
                                   "match_note": "partner leg deleted by clear — auto-reverted"},
                                  synchronize_session=False))
+        # Cross-product interbank links: an EVIBT- match pairs an EvalueBankTxn with a
+        # CORE ledger Transaction (which carries the match_id but NO matched_with_id, so
+        # the core clear's own cascade can't see it). Deleting the E-Value leg must
+        # reset the core leg too — mirror of the /evalue/unmatch cross-table reset.
+        _evibt = {m for m in _deleted_mids if m and str(m).startswith("EVIBT-")}
+        if _evibt:
+            cascaded += (db.query(Transaction)
+                         .filter(Transaction.match_id.in_(_evibt))
+                         .update({"recon_status": "unmatched", "match_id": None,
+                                  "matched_with_id": None},
+                                 synchronize_session=False))
+
+    # ── SBI: source rows gone ⇒ that scope's results are fiction ───────────────
+    # P01-P04 result rows claim Matched with soft-FKs into the source tables; once the
+    # sources for a date are cleared they are unrecomputable (the wipe-guard rightly
+    # refuses to re-run an empty date) and would lie forever. Delete the same scope's
+    # results (recycle-binned, same batch) whenever a source side was cleared under a
+    # side filter (with no side filter the main loop already removed them).
+    if module == "sbi" and _sbi_source_deleted and side:
+        from models.database import (SBIP01Result as _P1, SBIP02Result as _P2,
+                                     SBIP03Result as _P3, SBIP04Result as _P4)
+        for rm in (_P1, _P2, _P3, _P4):
+            q = db.query(rm)
+            if recon_date:
+                q = q.filter(rm.recon_date == recon_date)
+            n = recycle_bin.soft_delete(db, q, rm, module=module, user=user,
+                                        filters=filters,
+                                        reason=f"clear sbi ({side} side cleared — results stale)",
+                                        batch_id=batch_id)
+            if n:
+                deleted[rm.__tablename__] = deleted.get(rm.__tablename__, 0) + n
 
     # The upload-hash guard only blocks re-uploading an identical FILE. Dropping it is
     # correct ONLY for a full, unfiltered product clear.
@@ -2165,6 +2208,20 @@ def clear_data(
                 synchronize_session=False,
             )
         )
+        # Cross-product interbank links: an EVIBT- match pairs a core Transaction with an
+        # EvalueBankTxn. The core leg carries the match_id but NOT matched_with_id (the
+        # partner lives in another table), so the reset above can't see the E-Value leg.
+        # Collect the deleted rows' EVIBT- mids and reset those E-Value bank rows too.
+        _evibt_mids = {m for (m,) in db.query(Transaction.match_id)
+                       .filter(Transaction.id.in_(ids_to_delete),
+                               Transaction.match_id.like("EVIBT-%")).all() if m}
+        if _evibt_mids:
+            from models.database import EvalueBankTxn as _EvB
+            counterparts_reset += (db.query(_EvB)
+                                   .filter(_EvB.match_id.in_(_evibt_mids))
+                                   .update({"recon_status": "unmatched_bank", "match_id": None,
+                                            "match_note": "core interbank leg deleted by clear — auto-reverted"},
+                                           synchronize_session=False))
     else:
         counterparts_reset = 0
 

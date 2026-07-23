@@ -399,32 +399,53 @@ async def upload_ko_limits(
     data.columns = h
     today = str(datetime.date.today())
     inserted = 0
-    file_dates = set()
 
+    # Parse first, insert after — this upload REPLACES its own scope instead of appending.
+    parsed = []
     for _, row in data.iterrows():
         txn_type = _clean(row.get('Type of Transaction', ''))
         if txn_type not in ('KO Deposit', 'KO Withdrawal'): continue
+        raw_dt = _clean(row.get('Date of Transaction', ''))
+        parsed.append({
+            "raw_dt": raw_dt, "td": _nd(raw_dt[:10] if raw_dt else ''),
+            "configurer": _clean(row.get('Limit Configured By', '')),
+            "ko": _clean(row.get('KO ID', '')), "ol": _sf(row.get('Opening Limit')),
+            "tt": txn_type, "amt": _sf(row.get('Amount')), "cl": _sf(row.get('Closing Limit')),
+        })
+    file_dates = {p["td"] for p in parsed if p["td"]}
+    configurers = {p["configurer"] for p in parsed if p["configurer"]}
+
+    # REPLACE, not append: this file supersedes the same dates for the same configurer(s).
+    # The old append meant a re-upload (or the force path) DOUBLED KO withdrawals — and
+    # P01/P04 SUM per KO per date, so settlement totals doubled. Scoping by configurer
+    # keeps another BC's file for the same date untouched (isolation of change).
+    replaced = 0
+    if file_dates:
+        q = db.query(SBIKOLimits).filter(SBIKOLimits.txn_date.in_(file_dates))
+        if configurers:
+            q = q.filter(SBIKOLimits.limit_configured_by.in_(configurers))
+        replaced = q.delete(synchronize_session=False)
+
+    for p in parsed:
         try:
-            raw_dt = _clean(row.get('Date of Transaction', ''))
-            _td = _nd(raw_dt[:10] if raw_dt else '')
-            if _td: file_dates.add(_td)
             db.add(SBIKOLimits(
                 id                  = generate_id(),
                 upload_date         = today,
-                txn_datetime        = _clip(raw_dt, 30),
-                txn_date            = _clip(_td, 10),
-                limit_configured_by = _clip(_clean(row.get('Limit Configured By', '')), 20),
-                ko_id               = _clip(_clean(row.get('KO ID', '')), 20),
-                opening_limit       = _sf(row.get('Opening Limit')),
-                txn_type            = _clip(txn_type, 30),
-                amount              = _sf(row.get('Amount')),
-                closing_limit       = _sf(row.get('Closing Limit')),
+                txn_datetime        = _clip(p["raw_dt"], 30),
+                txn_date            = _clip(p["td"], 10),
+                limit_configured_by = _clip(p["configurer"], 20),
+                ko_id               = _clip(p["ko"], 20),
+                opening_limit       = p["ol"],
+                txn_type            = _clip(p["tt"], 30),
+                amount              = p["amt"],
+                closing_limit       = p["cl"],
             ))
             inserted += 1
         except Exception as _e:
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
-    _audit(db, current_user, "sbi_upload_ko_limits", {"filename": file.filename, "inserted": inserted})
-    return {"inserted": inserted, "filename": file.filename,
+    _audit(db, current_user, "sbi_upload_ko_limits",
+           {"filename": file.filename, "inserted": inserted, "replaced": replaced})
+    return {"inserted": inserted, "replaced": replaced, "filename": file.filename,
             "auto_recon": _auto_run_after_upload(db, current_user, dates=sorted(file_dates))}
 
 
@@ -471,17 +492,39 @@ async def upload_txn_report(
     today = str(datetime.date.today())
     source = file.filename
     inserted = 0
-    file_dates = set()   # only reconcile the business dates THIS file touches (see below)
 
+    # Parse first, insert after — this upload REPLACES its own scope instead of appending.
+    parsed = []
+    file_dates = set()   # only reconcile the business dates THIS file touches (see below)
     for _, row in data.iterrows():
         # Skip metadata/empty rows
         sr = gv(row, 'sr._no') or gv(row, 'sr._no.')
         if not sr or not str(sr).replace('.', '').strip().isdigit(): continue
-
         raw_dt = gv(row, 'transaction_date_&_time') or gv(row, 'transaction_date')
         txn_date = _nd(raw_dt[:10]) if raw_dt else ''
         if txn_date: file_dates.add(txn_date)
+        parsed.append((raw_dt, txn_date, row))
 
+    # REPLACE, not append: a day has ~7 report files that legitimately share dates, so a
+    # blanket per-date replace would destroy the day's other files (that append was
+    # deliberate). Instead this file supersedes rows of the SAME PRODUCT for ITS dates:
+    # product comes from canonical_product(source_file), which is stable across renamed
+    # re-downloads ("report.xls" vs "report (1).xls") — so a re-upload (or the force
+    # path) replaces its own prior rows and can add new entries, never double them.
+    replaced = 0
+    if file_dates:
+        from core.sbi_reports import canonical_product
+        my_product = canonical_product(source)
+        prior_files = [sf for (sf,) in db.query(SBITxnReport.source_file)
+                       .filter(SBITxnReport.txn_date.in_(file_dates)).distinct().all()
+                       if canonical_product(sf) == my_product]
+        if prior_files:
+            replaced = (db.query(SBITxnReport)
+                        .filter(SBITxnReport.txn_date.in_(file_dates),
+                                SBITxnReport.source_file.in_(prior_files))
+                        .delete(synchronize_session=False))
+
+    for raw_dt, txn_date, row in parsed:
         try:
             db.add(SBITxnReport(
                 id              = generate_id(),
@@ -505,11 +548,12 @@ async def upload_txn_report(
             inserted += 1
         except Exception as _e:
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
-    _audit(db, current_user, "sbi_upload_txn_report", {"filename": source, "inserted": inserted})
+    _audit(db, current_user, "sbi_upload_txn_report",
+           {"filename": source, "inserted": inserted, "replaced": replaced})
     # Reconcile ONLY the dates this file touched — not every business date. A full re-run
     # (22 dates × P01-P04) took minutes and blocked the single worker, freezing the app on
     # every upload. `dates=[]` (a file with no parseable dates) → skip, don't fall back to all.
-    return {"inserted": inserted, "filename": source,
+    return {"inserted": inserted, "replaced": replaced, "filename": source,
             "auto_recon": _auto_run_after_upload(db, current_user, dates=sorted(file_dates))}
 
 
@@ -542,24 +586,39 @@ async def upload_csp_master(
     today = str(datetime.date.today())
     inserted = 0
 
+    # DEDUP, not append: reference data must never double. Rows identical on the full
+    # business tuple are skipped, so a re-upload (or the force path) is idempotent and a
+    # second file with additional CSPs inserts only the new ones.
+    existing = {(r.csp_code, r.ref_number, r.mode)
+                for r in db.query(SBICSPMaster.csp_code, SBICSPMaster.ref_number,
+                                  SBICSPMaster.mode).all()}
+    skipped = 0
     for _, row in data.iterrows():
         csp = _clean(row.get('CSP Code', ''))
         if not csp: continue
+        rec = (_clip(csp, 20),
+               _clip(_clean(row.get('Ref.. Number', '') or row.get('Ref Number', '')), 100),
+               _clip(_clean(row.get('Mood', '') or row.get('Mode', '')), 30))
+        if rec in existing:
+            skipped += 1
+            continue
+        existing.add(rec)
         db.add(SBICSPMaster(
             id          = generate_id(),
             upload_date = today,
-            csp_code    = _clip(csp, 20),
-            ref_number  = _clip(_clean(row.get('Ref.. Number', '') or row.get('Ref Number', '')), 100),
-            mode        = _clip(_clean(row.get('Mood', '') or row.get('Mode', '')), 30),
+            csp_code    = rec[0],
+            ref_number  = rec[1],
+            mode        = rec[2],
         ))
         inserted += 1
 
     db.commit()
-    _audit(db, current_user, "sbi_upload_csp_master", {"filename": file.filename, "inserted": inserted})
+    _audit(db, current_user, "sbi_upload_csp_master",
+           {"filename": file.filename, "inserted": inserted, "skipped_duplicates": skipped})
     # CSP Master is reference data (no business date). It feeds P03's mode lookup across ALL
     # dates, so auto-reconciling it would mean a full re-run that freezes the worker — and
     # it changes rarely. Skip auto-recon; use "Reconcile all dates" to propagate a change.
-    return {"inserted": inserted, "filename": file.filename,
+    return {"inserted": inserted, "skipped_duplicates": skipped, "filename": file.filename,
             "auto_recon": _auto_run_after_upload(db, current_user, dates=[])}
 
 
@@ -589,9 +648,23 @@ async def upload_ko_cash_holding(
     r_date = _nd(report_date) if report_date else today
     inserted = 0
 
+    # Parse first — this upload REPLACES the same report_date's rows for the KOs it
+    # re-states (a re-upload/force must never double per-KO balances; another BC's file
+    # for the same date is untouched).
+    parsed = []
     for _, row in data.iterrows():
         ko = _clean(row.get('KO ID', ''))
         if not ko: continue
+        parsed.append((ko, row))
+    replaced = 0
+    file_kos = {_clip(ko, 20) for ko, _ in parsed}
+    if r_date and file_kos:
+        replaced = (db.query(SBIKOCashHolding)
+                    .filter(SBIKOCashHolding.report_date == _clip(r_date, 10),
+                            SBIKOCashHolding.ko_id.in_(file_kos))
+                    .delete(synchronize_session=False))
+
+    for ko, row in parsed:
         db.add(SBIKOCashHolding(
             id              = generate_id(),
             upload_date     = today,
@@ -608,8 +681,9 @@ async def upload_ko_cash_holding(
         inserted += 1
 
     db.commit()
-    _audit(db, current_user, "sbi_upload_ko_cash_holding", {"filename": file.filename, "inserted": inserted})
-    return {"inserted": inserted, "filename": file.filename,
+    _audit(db, current_user, "sbi_upload_ko_cash_holding",
+           {"filename": file.filename, "inserted": inserted, "replaced": replaced})
+    return {"inserted": inserted, "replaced": replaced, "filename": file.filename,
             "auto_recon": _auto_run_after_upload(db, current_user, dates=[r_date] if r_date else [])}
 
 
@@ -634,15 +708,29 @@ async def upload_limit_failures(
     # simply inserts nothing rather than erroring.
     today = str(datetime.date.today())
     inserted = 0
-    file_dates = set()
 
+    # Parse first — this upload REPLACES its own scope (its dates for its BC ids) instead
+    # of appending, so a re-upload/force never doubles failures; another BC's file for
+    # the same date is untouched.
+    parsed = []
+    file_dates = set()
     for row in rows[4:]:  # data starts at row 4
         if len(row) < 5: continue
         sr = row[0].replace('.', '').strip()
         if not sr or not sr.isdigit(): continue
+        _td = _nd(row[1])
+        if _td: file_dates.add(_td)
+        parsed.append((_td, row))
+    file_bcs = {_clip(r[3].strip(), 20) for _, r in parsed if len(r) > 3 and r[3].strip()}
+    replaced = 0
+    if file_dates:
+        q = db.query(SBILimitFailure).filter(SBILimitFailure.txn_date.in_(file_dates))
+        if file_bcs:
+            q = q.filter(SBILimitFailure.bc_id.in_(file_bcs))
+        replaced = q.delete(synchronize_session=False)
+
+    for _td, row in parsed:
         try:
-            _td = _nd(row[1])
-            if _td: file_dates.add(_td)
             db.add(SBILimitFailure(
                 id          = generate_id(),
                 upload_date = today,
@@ -655,8 +743,9 @@ async def upload_limit_failures(
             inserted += 1
         except Exception as _e:
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
-    _audit(db, current_user, "sbi_upload_limit_failures", {"filename": file.filename, "inserted": inserted})
-    return {"inserted": inserted, "filename": file.filename,
+    _audit(db, current_user, "sbi_upload_limit_failures",
+           {"filename": file.filename, "inserted": inserted, "replaced": replaced})
+    return {"inserted": inserted, "replaced": replaced, "filename": file.filename,
             "auto_recon": _auto_run_after_upload(db, current_user, dates=sorted(file_dates))}
 
 

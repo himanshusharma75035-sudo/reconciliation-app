@@ -78,6 +78,7 @@ def _audit(db, user, action, detail, entity_id=None):
 @router.post("/upload/settlement")
 def upload_settlement(
     file: UploadFile = File(...),
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
@@ -85,18 +86,33 @@ def upload_settlement(
     Upload QR settlement report (ExportSettlementsList_*.xlsx).
     One row per settlement batch. Formula verified:
       Net = Amount - Fees - Fees Tax - Early Settlement Fees - Early Settlement Tax
+
+    UPSERT per Settlement ID (was a pure append with no duplicate guard — re-uploading
+    the same export silently DOUBLED every batch and the summary grand totals). A row
+    whose Settlement ID already exists REPLACES the prior row; new batches insert; the
+    SHA-256 guard blocks byte-identical re-uploads, with force= as the deliberate
+    re-apply path (safe now that re-applying is idempotent).
     """
     content = file.file.read()
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "qr", "settlement", content, file.filename or "",
+                         current_user, force=force)
     try:
         df = pd.read_excel(io.BytesIO(content), dtype=str)
         df.columns = [str(c).strip() for c in df.columns]
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot parse file: {e}")
 
-    inserted, errors = 0, []
+    inserted, replaced, errors = 0, 0, []
 
     for idx, row in df.iterrows():
         try:
+            _sid = str(row.get("Settlement ID", "")).strip()
+            if _sid:
+                _ex = (db.query(QRSettlement)
+                       .filter(QRSettlement.settlement_id == _sid).all())
+                for _e_row in _ex:
+                    db.delete(_e_row); replaced += 1
             gross  = _safe_float(row.get("Amount"))
             fees   = _safe_float(row.get("Fees"))
             f_tax  = _safe_float(row.get("Fees Tax Amount"))
@@ -135,9 +151,10 @@ def upload_settlement(
 
     db.commit()
     _audit(db, current_user, "upload_qr_settlement",
-           {"filename": file.filename, "rows_inserted": inserted},
+           {"filename": file.filename, "rows_inserted": inserted, "replaced": replaced},
            entity_id=file.filename)
-    return {"inserted": inserted, "errors": errors, "filename": file.filename}
+    return {"inserted": inserted, "replaced": replaced, "errors": errors,
+            "filename": file.filename}
 
 
 # ── Settlement Summary ────────────────────────────────────────────────────────

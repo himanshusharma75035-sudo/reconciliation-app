@@ -42,18 +42,29 @@ export default function Bbps() {
     .catch((e) => { console.error('BBPS summary load failed', e); toast.error('Failed to load BBPS summary') })
   useEffect(() => { loadSummary() }, [dates.from, dates.to])
 
-  const uploadInternal = async f => {
-    if (!f) return
-    setBusy(true); const fd = new FormData(); fd.append('file', f)
-    try { const { data } = await api.post('/bbps/upload-internal', fd); toast.success(`Internal: ${data.rows} txns (${Object.entries(data.by_provider).map(([k, v]) => `${k} ${v}`).join(', ')})`); loadSummary() }
-    catch (e) { toast.error(e.response?.data?.detail || 'Upload failed') } finally { setBusy(false) }
+  // On a 409 [DUPLICATE] offer Re-upload (replace) with force=true — re-applying is
+  // idempotent on both paths (internal = upsert per eko id, bank = replace per provider),
+  // so it restores rows removed since without ever duplicating.
+  const postWithForce = async (url, f, onOk) => {
+    setBusy(true)
+    const attempt = force => { const fd = new FormData(); fd.append('file', f); if (force) fd.append('force', 'true'); return api.post(url, fd) }
+    try {
+      let res
+      try { res = await attempt(false) }
+      catch (e) {
+        const detail = e.response?.data?.detail || 'Upload failed'
+        if (e.response?.status === 409 &&
+            window.confirm(`${detail}\n\nRe-upload anyway and re-apply this file? Rows it already covers are replaced, not duplicated.`)) {
+          res = await attempt(true)
+        } else { toast.error(detail); return }
+      }
+      onOk(res.data)
+    } catch (e) { toast.error(e.response?.data?.detail || 'Upload failed') } finally { setBusy(false) }
   }
-  const uploadBank = async f => {
-    if (!f) return
-    setBusy(true); const fd = new FormData(); fd.append('file', f)
-    try { const { data } = await api.post('/bbps/upload-bank', fd); toast.success(`${data.provider}: ${data.rows} rows (${data.success} success, ${data.failed} failed)`); loadSummary() }
-    catch (e) { toast.error(e.response?.data?.detail || 'Upload failed') } finally { setBusy(false) }
-  }
+  const uploadInternal = f => { if (!f) return; postWithForce('/bbps/upload-internal', f,
+    data => { toast.success(`Internal: ${data.rows} txns (${Object.entries(data.by_provider).map(([k, v]) => `${k} ${v}`).join(', ')})`); loadSummary() }) }
+  const uploadBank = f => { if (!f) return; postWithForce('/bbps/upload-bank', f,
+    data => { toast.success(`${data.provider}: ${data.rows} rows (${data.success} success, ${data.failed} failed)`); loadSummary() }) }
   const runRecon = async () => {
     setBusy(true)
     try { const { data } = await api.post('/bbps/run-recon'); toast.success(`Reconciled — ${data.match_rate}% (${data.matched} matched, ${data.exceptions || 0} exceptions)`); loadSummary(); setTab('recon') }
