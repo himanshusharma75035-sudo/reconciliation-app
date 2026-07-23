@@ -289,14 +289,36 @@ export default function OpenItems() {
 
   const handleDeleteSelected = async () => {
     if (selected.size === 0) return
-    if (!window.confirm(`Delete ${selected.size} selected transaction(s)? This cannot be undone.`)) return
+    if (!window.confirm(`Delete ${selected.size} selected row(s)?\n\nMatched counterparts are safely reverted to unmatched, and the rows go to the Recycle Bin (restorable for 30 days).`)) return
     setDeleting(true)
     try {
-      const ids = [...selected].join(',')
-      const { data } = await api.delete(`/upload/clear-selected?transaction_ids=${ids}`)
-      toast.success(`Deleted ${data.deleted_transactions} transactions`)
+      // Module rows (E-Value / BBPS) live in their own tables — dispatch them to the
+      // module-aware /upload/delete-rows; core rows keep /upload/clear-selected.
+      // Previously EVERYTHING went to the core endpoint, so selected module rows were
+      // silently not deleted at all.
+      const rows = items.filter(it => selected.has(it.id))
+      const known = new Set(rows.map(r => r.id))
+      const coreIds = rows.filter(it => !MODULE_PARTNERS.has(it.partner)).map(it => it.id)
+        .concat([...selected].filter(id => !known.has(id)))   // selections from other pages → core (old behavior)
+      let deleted = 0, reverted = 0
+      if (coreIds.length) {
+        const { data } = await api.delete(`/upload/clear-selected?transaction_ids=${coreIds.join(',')}`)
+        deleted += data.deleted_transactions || 0
+      }
+      for (const mod of ['evalue', 'bbps']) {
+        for (const side of ['bank', 'internal']) {
+          const ids = rows.filter(it => it.partner === mod && it.side === side).map(it => it.id)
+          if (!ids.length) continue
+          const fd = new FormData()
+          fd.append('module', mod); fd.append('table', side); fd.append('row_ids', ids.join(','))
+          const { data } = await api.post('/upload/delete-rows', fd)
+          deleted += data.deleted || 0; reverted += data.counterparts_unmatched || 0
+        }
+      }
+      toast.success(`Deleted ${deleted} row(s)${reverted ? ` · ${reverted} counterpart(s) reverted` : ''} — recoverable from the Recycle Bin`, { duration: 6000 })
+      setSelected(new Set())
       load(page)
-    } catch { toast.error('Delete failed') }
+    } catch (e) { toast.error(e.response?.data?.detail || 'Delete failed (needs the Clear/Delete Data permission)') }
     finally { setDeleting(false) }
   }
 
