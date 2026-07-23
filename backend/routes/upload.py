@@ -812,8 +812,17 @@ def _parse_description(desc: str) -> dict:
 
 
 def _clean(val) -> Optional[str]:
-    """Convert value to string, treating known null markers as None."""
+    """Convert value to string, treating known null markers as None.
+
+    Leading apostrophes are stripped: they are Excel's text-format marker
+    ('3570194429 renders as 3570194429), an encoding artifact — never data.
+    [Live incident 2026-07-22: the AePS internal dump text-marked its id
+    columns, every identifier ingested as '35701… and the entire day sat
+    unmatched against clean bank-side ids.] Interior apostrophes (O'Brien)
+    are untouched. Shared by both ingest copies — ingest_service imports this."""
     s = str(val).strip() if val is not None else ''
+    if s.startswith("'"):
+        s = s.lstrip("'").strip()
     return None if s in NULL_VALUES else s
 
 
