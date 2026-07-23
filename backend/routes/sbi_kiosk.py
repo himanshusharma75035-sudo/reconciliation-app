@@ -2102,16 +2102,63 @@ def _resolve_bank_date(db, recon_date):
         SBIBankTransaction.txn_date.like("20%")).scalar()
 
 
+# Range cap for the operator workbooks: each date is a full independent reconcile pass
+# on a single worker, so an accidental all-time range must not freeze the app
+# (the sync-full-recon-on-upload lesson). A calendar month fits.
+_MAX_WORKBOOK_DATES = 31
+
+
+def _resolve_workbook_dates(db, date_from, date_to):
+    """Distinct business dates with SBI bank, txn-report OR KO-limits rows inside
+    [from, to] (either bound optional), sentinel dates excluded. Sorted ascending.
+    KO-limits-only dates (e.g. a bank holiday with limit activity) must be included
+    or their rows silently vanish from the range Limit & Settlement sheet."""
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from is after date_to")
+    def _dates(model):
+        q = db.query(model.txn_date).filter(model.txn_date.like("20%"))
+        if date_from:
+            q = q.filter(model.txn_date >= date_from)
+        if date_to:
+            q = q.filter(model.txn_date <= date_to)
+        return {d for (d,) in q.distinct().all() if d}
+    dates = sorted(_dates(SBIBankTransaction) | _dates(SBITxnReport) | _dates(SBIKOLimits))
+    if len(dates) > _MAX_WORKBOOK_DATES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"The range covers {len(dates)} business dates — max "
+                   f"{_MAX_WORKBOOK_DATES} per workbook. Narrow the date range.")
+    return dates
+
+
 @router.get("/reports/reconciliation")
 def sbi_reconciliation_report(
     recon_date: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Bank-statement-centric reconciliation workbook: every bank row annotated with the
     source product/type it matched (by 20-digit reference), plus unmatched (both sides,
-    Success-first) and duplicate/reversal sheets."""
-    from core.sbi_reports import build_reconciliation_report
+    Success-first) and duplicate/reversal sheets.
+
+    Single date (recon_date, latest-with-data fallback) or a date range
+    (date_from/date_to → one workbook, each date reconciled independently)."""
+    from core.sbi_reports import (build_reconciliation_report,
+                                  build_reconciliation_report_range)
+    if date_from or date_to:
+        dates = _resolve_workbook_dates(db, date_from, date_to)
+        if not dates:
+            raise HTTPException(status_code=404, detail="No SBI data in the selected date range")
+        if len(dates) == 1:      # one date in range → the exact single-date workbook
+            out, tag = build_reconciliation_report(db, dates[0]), dates[0]
+        else:
+            out, tag = build_reconciliation_report_range(db, dates), f"{dates[0]}_to_{dates[-1]}"
+        return StreamingResponse(
+            out, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="Reconciliation_Report_{tag}.xlsx"',
+                     "X-Recon-Date": str(tag), "Access-Control-Expose-Headers": "X-Recon-Date"})
     d = _resolve_bank_date(db, recon_date)
     if not d:
         raise HTTPException(status_code=404, detail="No SBI bank statement data to report on")
@@ -2125,13 +2172,31 @@ def sbi_reconciliation_report(
 @router.get("/reports/source-match")
 def sbi_source_match_report(
     recon_date: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """Source-file-centric match-status workbook: a Summary split by Success/Failure, a
     Limit & Settlement sheet, and one sheet per source product with each row's match status
-    highlighted (green matched / orange Success-unmatched / red Failure)."""
-    from core.sbi_reports import build_source_match_report
+    highlighted (green matched / orange Success-unmatched / red Failure).
+
+    Single date (recon_date, latest-with-data fallback) or a date range
+    (date_from/date_to → one workbook, each date reconciled independently)."""
+    from core.sbi_reports import (build_source_match_report,
+                                  build_source_match_report_range)
+    if date_from or date_to:
+        dates = _resolve_workbook_dates(db, date_from, date_to)
+        if not dates:
+            raise HTTPException(status_code=404, detail="No SBI data in the selected date range")
+        if len(dates) == 1:      # one date in range → the exact single-date workbook
+            out, tag = build_source_match_report(db, dates[0]), dates[0]
+        else:
+            out, tag = build_source_match_report_range(db, dates), f"{dates[0]}_to_{dates[-1]}"
+        return StreamingResponse(
+            out, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="Source_Files_Match_Status_{tag}.xlsx"',
+                     "X-Recon-Date": str(tag), "Access-Control-Expose-Headers": "X-Recon-Date"})
     d = _resolve_bank_date(db, recon_date)
     if not d:
         raise HTTPException(status_code=404, detail="No SBI data to report on")

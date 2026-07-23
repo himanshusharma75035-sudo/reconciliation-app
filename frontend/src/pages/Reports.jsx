@@ -122,6 +122,39 @@ export default function Reports() {
     } catch { toast.error('Report failed') }
   }
 
+  // The two finance-ops operator workbooks (same files as the SBI Kiosk page's
+  // download buttons). Only To Date (or From = To) → the exact single-day workbook;
+  // both dates → one workbook covering the range, each date reconciled independently
+  // (max 31 dates with data); neither → the latest date with data.
+  const [opBusy, setOpBusy] = useState('')
+  const downloadOperatorWorkbook = async (kind) => {
+    const path  = kind === 'recon' ? '/sbi/reports/reconciliation' : '/sbi/reports/source-match'
+    const label = kind === 'recon' ? 'Reconciliation_Report' : 'Source_Files_Match_Status'
+    const { from_date: f, to_date: t } = filters
+    const params = new URLSearchParams()
+    if (f && t && f !== t) { params.append('date_from', f); params.append('date_to', t) }
+    else if (f && !t)      params.append('date_from', f)
+    else if (t || f)       params.append('recon_date', t || f)
+    setOpBusy(kind)
+    try {
+      const r = await api.get(`${path}?${params}`, { responseType: 'blob' })
+      const used = r.headers['x-recon-date'] || 'export'
+      _download(r.data, `${label}_${used}.xlsx`)
+      toast.success(`Downloaded ${label.replace(/_/g, ' ')} (${used.replace('_to_', ' → ')})`)
+      // single-date mode falls back to the latest date with data — say so, like
+      // every other download handler on this page
+      const rd = params.get('recon_date')
+      if (rd && used && used !== rd)
+        toast(`No data for ${rd} — exported latest (${used})`, { icon: 'ℹ️' })
+    } catch (e) {
+      // error bodies arrive as Blobs on blob requests — parse for the real detail
+      let detail = ''
+      try { detail = JSON.parse(await e.response.data.text()).detail } catch { /* not JSON */ }
+      toast.error(detail || (e?.response?.status === 404
+        ? 'No SBI data for the selected date(s)' : 'Download failed'))
+    } finally { setOpBusy('') }
+  }
+
   // Resolved list — always non-empty.
   // E-Value, BBPS and SBI Kiosk reconcile in their OWN tables, so the core
   // report tabs (which read the transactions ledger) would always show zeros
@@ -816,6 +849,40 @@ export default function Reports() {
             }} className="btn-primary flex items-center gap-2 mt-3">
               <Download size={14} /> Download All Processes (multi-sheet)
             </button>
+          </div>
+
+          {/* The two operator workbooks finance ops reconciles against by hand —
+              same files as the SBI Kiosk page's download buttons, here with the
+              date-range option. */}
+          <div className="card">
+            <h2 className="font-semibold text-gray-700 mb-1">Operator Workbooks</h2>
+            <p className="text-xs text-gray-400 mb-3">
+              Set only <strong>To Date</strong> for a single day, or <strong>From + To</strong> for one
+              workbook covering the range (each day reconciled on its own — max 31 days with data).
+              Leave both blank for the latest day.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {[
+                { k: 'recon', label: 'Reconciliation Report',
+                  desc: 'Bank-statement-centric: every bank row annotated with the source product it matched, plus unmatched (both sides) and duplicate/reversal sheets.' },
+                { k: 'src', label: 'Source Match Report',
+                  desc: 'Source-file-centric: per product matched / unmatched split by Success vs Failure, plus the Limit & Settlement sheet.' },
+              ].map(({ k, label, desc }) => (
+                <button key={k} onClick={() => downloadOperatorWorkbook(k)} disabled={!!opBusy}
+                  className="border border-gray-100 rounded-lg p-3 text-left hover:border-primary/40 hover:shadow-sm transition-all group disabled:opacity-50">
+                  <div className="flex items-center gap-2">
+                    <Download size={13} className="text-gray-300 group-hover:text-primary shrink-0" />
+                    <span className="text-sm font-medium text-gray-700">
+                      {opBusy === k ? 'Building…' : label}
+                    </span>
+                    <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full font-semibold shrink-0 bg-teal-50 text-teal-600">
+                      date / range
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-gray-400 mt-1 leading-snug">{desc}</div>
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* Report library — served by GET /sbi/report-options; each tile is one

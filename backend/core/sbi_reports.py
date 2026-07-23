@@ -391,15 +391,83 @@ def _highlight_by_match(ws, rows, match_col_idx, status_col_idx):
             ws.cell(row=i, column=match_col_idx).fill = fills[key]
 
 
+# ── merge helpers (range mode) ─────────────────────────────────────────────────
+# A date RANGE workbook is per-date reconcile() results concatenated chronologically.
+# Matching deliberately never crosses a date boundary: pooling the range into one
+# reconcile() call would let day-1 bank debits consume day-2 source rows / KO
+# Withdrawals and pair reversal legs across days — a silent semantics change of the
+# same class as the reverted P03 scope change. Counters are purely additive, so the
+# Summary sheets are exact sums of the per-date workbooks.
+def _sum_totals(results):
+    return {k: sum(r["totals"][k] for r in results) for k in results[0]["totals"]}
+
+
+def _sum_per_product(results):
+    merged = {}
+    for r in results:
+        for p, pp in r["per_product"].items():
+            m = merged.setdefault(p, {k: 0 for k in pp})
+            for k, v in pp.items():
+                m[k] = m.get(k, 0) + v
+    return merged
+
+
+def _coverage_gaps(results):
+    """Dates inside a range whose bank statement or transaction reports are missing.
+    On such half-loaded days every row of the present side shows as Unmatched — a
+    missing FILE, not a recon failure — so the range workbooks must say so up front
+    (the single-date path can't hit this: its resolver requires bank rows).
+    Derived from the reconcile results themselves: zero bank rows for a resolved
+    date ⇔ no bank statement that day, and likewise for source rows."""
+    no_bank = [r["recon_date"] for r in results
+               if r["totals"]["bank_total"] == 0 and r["source_recs"]]
+    no_src = [r["recon_date"] for r in results
+              if r["totals"]["bank_total"] > 0 and not r["source_recs"]]
+    return no_bank, no_src
+
+
+_GAP_NO_BANK = ("⚠ Dates with source files but NO bank-statement rows "
+                "(their source rows show Unmatched — missing file, not a recon failure)")
+_GAP_NO_SRC = ("⚠ Dates with bank rows but NO transaction reports "
+               "(their bank rows show Unmatched — missing file, not a recon failure)")
+
+
 # ── Report A: Reconciliation_Report (bank-centric, 5 sheets) ────────────────────
 def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
-    from openpyxl.styles import Font
-    R = reconcile(db, recon_date)
-    t = R["totals"]
+    return _write_reconciliation_workbook([reconcile(db, recon_date)])
+
+
+def build_reconciliation_report_range(db, dates) -> io.BytesIO:
+    """Range variant: one workbook covering several business dates, each date
+    reconciled independently (see merge-helper note) and concatenated in date order.
+    Sheet shapes match the single-date workbook exactly, plus (range only): a
+    'Business Dates Covered' summary row, and a 'Txn Date' column on the duplicates
+    sheet — the one sheet whose rows otherwise would not identify their date."""
+    return _write_reconciliation_workbook([reconcile(db, d) for d in sorted(set(dates))])
+
+
+def _write_reconciliation_workbook(results) -> io.BytesIO:
+    multi = len(results) > 1
+    t = _sum_totals(results)
+    per_product = _sum_per_product(results)
+    dup_ref_count = sum(r["dup_ref_count"] for r in results)
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        # Summary
-        summ = [
+        # Summary — in range mode, one extra leading row naming the dates covered.
+        # (The single-date shape below is the finance-ops-verified contract; the
+        # 'Matched Count by Source File' block offset is computed from len(summ),
+        # so the extra range row shifts it safely.)
+        summ = []
+        if multi:
+            ds = [r["recon_date"] for r in results]
+            summ.append({"Metric": "Business Dates Covered",
+                         "Value": f"{ds[0]} → {ds[-1]} ({len(ds)} date(s) with data)"})
+            no_bank, no_src = _coverage_gaps(results)
+            if no_bank:
+                summ.append({"Metric": _GAP_NO_BANK, "Value": ", ".join(no_bank)})
+            if no_src:
+                summ.append({"Metric": _GAP_NO_SRC, "Value": ", ".join(no_src)})
+        summ += [
             {"Metric": "Total Bank Statement Transactions", "Value": t["bank_total"]},
             {"Metric": "Bank Rows with a 20-digit Txn Number", "Value": t["bank_with_ref"]},
             {"Metric": "Bank Rows Matched to a Source File", "Value": t["bank_matched"]},
@@ -415,7 +483,7 @@ def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
             {"Metric": "  — of which Status=Success (needs review)", "Value": t["source_unmatched_success"]},
             {"Metric": "  — of which Status=Failure (expected)", "Value": t["source_unmatched_failure"]},
             {"Metric": "Not-Applicable source rows (non-20-digit ref)", "Value": t["source_not_applicable"]},
-            {"Metric": "Duplicate Txn Numbers in Bank Stmt (DR+CR)", "Value": R["dup_ref_count"]},
+            {"Metric": "Duplicate Txn Numbers in Bank Stmt (DR+CR)", "Value": dup_ref_count},
         ]
         _write_sheet(writer, "Summary", summ, ["Metric", "Value"])
         # Matched-by-source-file block appended below the metrics
@@ -427,19 +495,23 @@ def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
         for j, h in enumerate(hdr, start=1):
             ws.cell(row=start + 1, column=j, value=h).font = __import__("openpyxl").styles.Font(bold=True)
         for k, p in enumerate(PRODUCTS, start=start + 2):
-            pp = R["per_product"].get(p, {})
+            pp = per_product.get(p, {})
             ws.cell(row=k, column=1, value=p)
             ws.cell(row=k, column=2, value=pp.get("matched", 0))
             ws.cell(row=k, column=3, value=pp.get("total", 0))
             ws.cell(row=k, column=4, value=pp.get("unmatched", 0))
 
-        # Bank Statement (Reconciled)
+        # Bank Statement (Reconciled) — per-date blocks concatenated chronologically.
+        # 'Bank Stmt Row' deliberately keeps its per-date meaning (the row's position in
+        # THAT day's statement, the operator's cross-reference into the raw file); the
+        # adjacent 'Txn Date' column disambiguates in range mode.
         bank_cols = ["Bank Stmt Row", "Txn Date", "Value Date", "Description", "Branch Code",
                      "Debit", "Credit", "Balance", "Extracted Txn No. (20-digit)",
                      "Matched Source File", "Matched Transaction Type", "Source Amount",
                      "Amount Match", "Match Status"]
-        wsb = _write_sheet(writer, "Bank Statement (Reconciled)", R["bank_recs"], bank_cols)
-        _highlight_by_match(wsb, R["bank_recs"], len(bank_cols), None)
+        bank_rows = [r for R in results for r in R["bank_recs"]]
+        wsb = _write_sheet(writer, "Bank Statement (Reconciled)", bank_rows, bank_cols)
+        _highlight_by_match(wsb, bank_rows, len(bank_cols), None)
 
         # Unmatched Bank Entries
         _write_sheet(writer, "Unmatched Bank Entries",
@@ -450,35 +522,60 @@ def build_reconciliation_report(db, recon_date: str) -> io.BytesIO:
                        "Remarks": ("Settlement debit (EKO DEDUCTION) with no matching KO Withdrawal"
                                    if r["Match Status"] == "Unmatched Settlement"
                                    else "Has a 20-digit txn no. but no matching source record")}
-                      for r in R["unmatched_bank"]],
+                      for R in results for r in R["unmatched_bank"]],
                      ["Bank Stmt Row", "Txn Date", "Debit", "Credit", "Balance",
                       "Extracted Txn No.", "Description", "Remarks"])
 
-        # Unmatched Source Records (Success first)
+        # Unmatched Source Records (per-date blocks, Success first within each date)
         us_cols = ["Sr. No.", "KO ID", "Transaction Date & Time", "Reference Number",
                    "Type of Transaction", "From Account", "To Account", "Amount", "Status"]
         _write_sheet(writer, "Unmatched Source Records",
                      [{"Source File": r["product"], **{c: r[c] for c in us_cols}}
-                      for r in R["unmatched_source"]],
+                      for R in results for r in R["unmatched_source"]],
                      ["Source File"] + us_cols)
 
-        # Duplicate Txn in Bank Stmt
-        _write_sheet(writer, "Duplicate Txn in Bank Stmt", R["duplicates"],
-                     ["Group No.", "Bank Stmt Row", "Transaction Number", "Debit", "Credit",
-                      "Matched Source File", "Description", "Remarks"])
+        # Duplicate Txn in Bank Stmt — range mode adds a Txn Date column (these rows
+        # otherwise carry no date) right after Group No.; single-date shape unchanged.
+        dup_cols = ["Group No.", "Bank Stmt Row", "Transaction Number", "Debit", "Credit",
+                    "Matched Source File", "Description", "Remarks"]
+        if multi:
+            dup_rows = [{"Group No.": d["Group No."], "Txn Date": R["recon_date"],
+                         **{k: d[k] for k in dup_cols[1:]}}
+                        for R in results for d in R["duplicates"]]
+            dup_cols = dup_cols[:1] + ["Txn Date"] + dup_cols[1:]
+        else:
+            dup_rows = results[0]["duplicates"]
+        _write_sheet(writer, "Duplicate Txn in Bank Stmt", dup_rows, dup_cols)
     out.seek(0)
     return out
 
 
 # ── Report B: Source_Files_Match_Status (source-centric, per-product sheets) ────
+_P01_LABEL = {"CREDITED": "Matched", "PENDING": "Pending",
+              "EXCESS": "Excess (bank only)", "PARTIAL": "Partial"}
+
+
 def build_source_match_report(db, recon_date: str) -> io.BytesIO:
-    R = reconcile(db, recon_date)
+    return _write_source_match_workbook(db, [reconcile(db, recon_date)])
+
+
+def build_source_match_report_range(db, dates) -> io.BytesIO:
+    """Range variant: per-date reconcile() results concatenated in date order (matching
+    never crosses a date boundary — see merge-helper note). Sheet shapes are identical
+    to the single-date workbook; the Limit & Settlement sheet groups rows by date with
+    the P01 status looked up per (date, KO) so the same KO on two dates can't collide."""
+    return _write_source_match_workbook(db, [reconcile(db, d) for d in sorted(set(dates))])
+
+
+def _write_source_match_workbook(db, results) -> io.BytesIO:
+    per_product = _sum_per_product(results)
+    t = _sum_totals(results)
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         # Summary — per source file split by Success/Failure
         rows = []
         for p in PRODUCTS:
-            pp = R["per_product"].get(p, {})
+            pp = per_product.get(p, {})
             rows.append({
                 "Source File": p, "Total Records": pp.get("total", 0),
                 "Matched": pp.get("matched", 0), "Unmatched": pp.get("unmatched", 0),
@@ -486,7 +583,6 @@ def build_source_match_report(db, recon_date: str) -> io.BytesIO:
                 "Unmatched - Failure": pp.get("unmatched_failure", 0),
                 "Not Applicable": pp.get("not_applicable", 0),
             })
-        t = R["totals"]
         rows.append({"Source File": "TOTAL", "Total Records": t["source_total"],
                      "Matched": t["source_matched"], "Unmatched": t["source_unmatched"],
                      "Unmatched - Success": t["source_unmatched_success"],
@@ -495,33 +591,53 @@ def build_source_match_report(db, recon_date: str) -> io.BytesIO:
         _write_sheet(writer, "Summary", rows,
                      ["Source File", "Total Records", "Matched", "Unmatched",
                       "Unmatched - Success", "Unmatched - Failure", "Not Applicable"])
+        # Range mode: flag half-loaded days below the table (same computed-offset
+        # pattern as Report A's matched-by-source-file block) so a missing upload
+        # can't read as a day of real gaps.
+        if len(results) > 1:
+            no_bank, no_src = _coverage_gaps(results)
+            if no_bank or no_src:
+                ws = writer.sheets["Summary"]
+                r0 = len(rows) + 3
+                ws.cell(row=r0, column=1, value="Coverage Notes").font = \
+                    __import__("openpyxl").styles.Font(bold=True)
+                for note, ds in ((_GAP_NO_BANK, no_bank), (_GAP_NO_SRC, no_src)):
+                    if ds:
+                        r0 += 1
+                        ws.cell(row=r0, column=1, value=note)
+                        ws.cell(row=r0, column=2, value=", ".join(ds))
 
-        # Limit & Settlement — raw KO-limits for the date + our current P01 status.
+        # Limit & Settlement — raw KO-limits per date + our current P01 status.
         # NOTE: P01 settlement recon is a finance-ops "still open" item (docs/sbi-kiosk.md);
         # the Status shown is our existing P01 output, not a re-validated settlement match.
-        ko = (db.query(SBIKOLimits).filter(SBIKOLimits.txn_date == recon_date)
-                .order_by(SBIKOLimits.amount).all())
-        p01 = {r.ko_id: r.status for r in
-               db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date).all()}
-        _P01_LABEL = {"CREDITED": "Matched", "PENDING": "Pending",
-                      "EXCESS": "Excess (bank only)", "PARTIAL": "Partial"}
-        ls_rows = [{
-            "Sr. No.": i, "Date of Transaction": r.txn_datetime or "",
-            "Limit Configured By": r.limit_configured_by or "", "KO ID": r.ko_id or "",
-            "Opening Limit": r.opening_limit if r.opening_limit is not None else "",
-            "Type of Transaction": r.txn_type or "", "Amount": r.amount or 0,
-            "Closing Limit": r.closing_limit if r.closing_limit is not None else "",
-            "Settlement Status (P01)": _P01_LABEL.get(p01.get(r.ko_id, ""), p01.get(r.ko_id, "") or "—"),
-        } for i, r in enumerate(ko, start=1)]
+        # Queried per date (chronological blocks, amount-ordered within a date; Sr. No.
+        # runs across the whole sheet) with the P01 lookup scoped to that date.
+        ls_rows = []
+        for R in results:
+            d = R["recon_date"]
+            ko = (db.query(SBIKOLimits).filter(SBIKOLimits.txn_date == d)
+                    .order_by(SBIKOLimits.amount).all())
+            p01 = {r.ko_id: r.status for r in
+                   db.query(SBIP01Result).filter(SBIP01Result.recon_date == d).all()}
+            ls_rows += [{
+                "Sr. No.": len(ls_rows) + j + 1, "Date of Transaction": r.txn_datetime or "",
+                "Limit Configured By": r.limit_configured_by or "", "KO ID": r.ko_id or "",
+                "Opening Limit": r.opening_limit if r.opening_limit is not None else "",
+                "Type of Transaction": r.txn_type or "", "Amount": r.amount or 0,
+                "Closing Limit": r.closing_limit if r.closing_limit is not None else "",
+                "Settlement Status (P01)": _P01_LABEL.get(p01.get(r.ko_id, ""), p01.get(r.ko_id, "") or "—"),
+            } for j, r in enumerate(ko)]
         _write_sheet(writer, "Limit & Settlement", ls_rows,
                      ["Sr. No.", "Date of Transaction", "Limit Configured By", "KO ID",
                       "Opening Limit", "Type of Transaction", "Amount", "Closing Limit",
                       "Settlement Status (P01)"])
 
-        # one sheet per product
+        # one sheet per product (rows in date order; Sr. No. restarts per date, the
+        # Transaction Date & Time column disambiguates in range mode)
         by_prod = defaultdict(list)
-        for r in R["source_recs"]:
-            by_prod[r["product"]].append(r)
+        for R in results:
+            for r in R["source_recs"]:
+                by_prod[r["product"]].append(r)
         prod_cols = ["Sr. No.", "KO ID", "Transaction Date & Time", "Reference Number",
                      "Type of Transaction", "From Account", "To Account", "Amount", "Status",
                      "Match Status", "Matched Bank Stmt Row", "Matched Bank Txn Date"]
