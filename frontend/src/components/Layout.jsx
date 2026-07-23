@@ -2,10 +2,49 @@ import React, { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Play, AlertTriangle, GitMerge,
-  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2, PieChart, Trash2
+  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2, PieChart, Trash2, Palette
 } from 'lucide-react'
 import { hasPermission, isAdmin } from '../utils/permissions'
 import EkoLogo from './EkoLogo'
+import { useTheme } from '../ThemeContext'
+import { THEMES } from '../themes'
+
+// Small per-user theme picker for the sidebar footer — swatch buttons, one per theme.
+function ThemePicker({ collapsed }) {
+  const { theme, setTheme } = useTheme()
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        title="Theme"
+        className={`flex items-center gap-2 rounded-lg px-2 py-1.5 w-full text-xs
+                    text-white/60 hover:text-white hover:bg-white/10 transition-colors
+                    ${collapsed ? 'justify-center' : ''}`}
+      >
+        <Palette size={15} />
+        {!collapsed && <>Theme <span className="ml-auto text-white/40 capitalize">{THEMES.find(t => t.id === theme)?.label}</span></>}
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 mb-1 w-44 rounded-lg bg-white shadow-xl border border-gray-100 p-2 z-50">
+          {THEMES.map(t => (
+            <button key={t.id}
+              onClick={() => { setTheme(t.id); setOpen(false) }}
+              className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-md text-xs text-left transition-colors
+                          ${theme === t.id ? 'bg-gray-100 font-semibold text-gray-800' : 'text-gray-600 hover:bg-gray-50'}`}>
+              <span className="inline-flex -space-x-1">
+                <span className="w-3.5 h-3.5 rounded-full ring-1 ring-white" style={{ background: t.primary }} />
+                <span className="w-3.5 h-3.5 rounded-full ring-1 ring-white" style={{ background: t.accent }} />
+              </span>
+              {t.label}
+              {theme === t.id && <span className="ml-auto text-emerald-500">✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // requiredPerm: nav item is hidden if user doesn't have this permission
 // adminOnly:    nav item is hidden for non-admins
@@ -118,6 +157,7 @@ export default function Layout() {
               </div>
             )}
           </div>
+          <ThemePicker collapsed={collapsed} />
           <button
             onClick={handleLogout}
             title="Logout"

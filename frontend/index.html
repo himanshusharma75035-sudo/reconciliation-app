@@ -19,6 +19,8 @@
 </head>
 <body>
   <div id="root"></div>
+  <!-- Apply the saved theme BEFORE first paint so there is no color flash -->
+  <script>try{var _t=localStorage.getItem('theme');if(_t&&_t!=='eko')document.documentElement.dataset.theme=_t}catch(e){}</script>
   <script type="module" src="/src/main.jsx"></script>
 </body>
 </html>

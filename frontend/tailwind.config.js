@@ -4,41 +4,46 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Brand petrol-teal. DEFAULT/light/dark are load-bearing — referenced
-        // throughout the pages — so their values never change; the numeric
-        // scale is additive for finer-grained design work.
+        // THEME TOKENS (2026-07-23): every brand color resolves through a CSS variable
+        // (RGB triplet + <alpha-value>, mandatory for /NN opacity utilities in v3.4) so
+        // a [data-theme="…"] attribute on <html> re-skins the whole app. The :root
+        // defaults in index.css are EXACTLY the old hexes — with no theme selected the
+        // app renders byte-identical to before. Status/product colors stay hardcoded
+        // (semantic, theme-independent) on purpose.
         primary: {
-          DEFAULT: "#094053",
-          light: "#0F5A72",
-          dark: "#062D3A",
-          50: "#EDF6F9",
-          100: "#D7EAF1",
-          200: "#ABD4E2",
-          300: "#7CB9CE",
-          400: "#4A94B0",
-          500: "#1E7090",
-          600: "#115A75",
-          700: "#094053",
-          800: "#062D3A",
-          900: "#041F29",
-          950: "#02131A",
+          DEFAULT: "rgb(var(--c-primary) / <alpha-value>)",
+          light: "rgb(var(--c-primary-light) / <alpha-value>)",
+          dark: "rgb(var(--c-primary-dark) / <alpha-value>)",
+          50: "rgb(var(--c-primary-50) / <alpha-value>)",
+          100: "rgb(var(--c-primary-100) / <alpha-value>)",
+          200: "rgb(var(--c-primary-200) / <alpha-value>)",
+          300: "rgb(var(--c-primary-300) / <alpha-value>)",
+          400: "rgb(var(--c-primary-400) / <alpha-value>)",
+          500: "rgb(var(--c-primary-500) / <alpha-value>)",
+          600: "rgb(var(--c-primary-600) / <alpha-value>)",
+          700: "rgb(var(--c-primary-700) / <alpha-value>)",
+          800: "rgb(var(--c-primary-800) / <alpha-value>)",
+          900: "rgb(var(--c-primary-900) / <alpha-value>)",
+          950: "rgb(var(--c-primary-950) / <alpha-value>)",
         },
-        // Brand amber accent.
         accent: {
-          DEFAULT: "#F9AB10",
-          light: "#FBBC38",
-          50: "#FEF8E8",
-          100: "#FDEFC8",
-          200: "#FBDD8C",
-          300: "#FBCA50",
-          400: "#FABA2C",
-          500: "#F9AB10",
-          600: "#DB920A",
-          700: "#B77607",
-          800: "#935C08",
-          900: "#7A4B0C",
+          DEFAULT: "rgb(var(--c-accent) / <alpha-value>)",
+          light: "rgb(var(--c-accent-light) / <alpha-value>)",
+          50: "rgb(var(--c-accent-50) / <alpha-value>)",
+          100: "rgb(var(--c-accent-100) / <alpha-value>)",
+          200: "rgb(var(--c-accent-200) / <alpha-value>)",
+          300: "rgb(var(--c-accent-300) / <alpha-value>)",
+          400: "rgb(var(--c-accent-400) / <alpha-value>)",
+          500: "rgb(var(--c-accent-500) / <alpha-value>)",
+          600: "rgb(var(--c-accent-600) / <alpha-value>)",
+          700: "rgb(var(--c-accent-700) / <alpha-value>)",
+          800: "rgb(var(--c-accent-800) / <alpha-value>)",
+          900: "rgb(var(--c-accent-900) / <alpha-value>)",
         },
-        surface: { DEFAULT: "#f8f9fc", dark: "#f1f3f8" },
+        surface: {
+          DEFAULT: "rgb(var(--c-surface) / <alpha-value>)",
+          dark: "rgb(var(--c-surface-dark) / <alpha-value>)",
+        },
       },
       fontFamily: {
         sans: [

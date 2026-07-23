@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
 import App from './App'
+import { ThemeProvider } from './ThemeContext'
 import './index.css'
 
 // The app is served under a base path behind nginx (Vite `base`, e.g. /recon/).
@@ -12,7 +13,9 @@ const BASENAME = import.meta.env.BASE_URL.replace(/\/+$/, '') || '/'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <BrowserRouter basename={BASENAME}>
+    <ThemeProvider>
     <App />
+    </ThemeProvider>
     <Toaster
       position="top-right"
       toastOptions={{
