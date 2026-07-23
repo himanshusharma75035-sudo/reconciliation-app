@@ -17,14 +17,16 @@ def guard_duplicate_file(db, module: str, side: str, file_bytes: bytes,
     and return the hex digest.
 
     `force=True` bypasses the 409 and re-allows the same bytes. This exists for the
-    E-Value BANK path only: the hash records a *file ever uploaded*, not *data still
-    present*, and bank rows can be removed later by a subsequent per-date replace (or a
-    clear), yet this hash lingers — so a legitimate re-upload to RESTORE that data would
-    otherwise be blocked forever. The bank re-upload is idempotent (per-date replace,
-    preserving matched/SRC rows), so re-applying only rewrites the ordinary rows for
-    those dates. Do NOT pass force on the internal-dump path: it upserts per eko_trxn_id
-    and never bulk-deletes, so its data cannot be lost, and rows with a blank
-    eko_trxn_id are appended (not upserted) — a forced replay would duplicate them.
+    The hash records a *file ever uploaded*, not *data still present* — rows can be
+    removed later (a per-date replace, or the Clear Data screen) while the hash lingers,
+    so a legitimate re-upload to RESTORE that data would otherwise be blocked forever.
+    `force=True` is the deliberate override for exactly that case:
+      • E-Value BANK path — idempotent per-date replace (matched/SRC rows preserved).
+      • E-Value INTERNAL path — upsert per eko_trxn_id is idempotent for id-carrying
+        rows; the caller must skip blank-eko rows on a forced re-apply (they append, so
+        a replay would double them — upload_internal does this).
+    (The old "internal can never lose data so force is bank-only" rule was disproved on
+    2026-07-22 when Clear Data bulk-deleted wallet loads and the hash blocked recovery.)
     The hash stays on record (audit trail); force just declines to hard-error on it.
     """
     from models.database import ModuleUploadHash

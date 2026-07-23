@@ -57,13 +57,12 @@ export default function Evalue() {
   useEffect(() => { loadSummary() }, [dates.from, dates.to])
   const accountsForBank = banks.find(b => b.bank_name === selBank)?.accounts || []
 
-  // Shared upload driver. allowForce is BANK-ONLY: a bank re-upload is idempotent
-  // (per-date replace, preserving matched/SRC rows), so on a 409 [DUPLICATE] we offer a
-  // confirm to re-upload with force=true — this is how an operator restores rows that
-  // were removed since. The INTERNAL path never bulk-deletes (upsert per eko id) and
-  // would DUPLICATE eko-less rows on a forced replay, so it never gets force: a 409
-  // there is a genuine accidental re-upload and is simply surfaced. buildFd() rebuilds
-  // a fresh FormData for the retry.
+  // Shared upload driver. On a 409 [DUPLICATE] we offer a confirm to re-upload with
+  // force=true — how an operator RESTORES rows removed since the original upload (a
+  // per-date replace, or the Clear Data screen — which CAN delete internal rows too, so
+  // both paths get force). Re-applying is idempotent: bank = per-date replace keeping
+  // matched/SRC rows; internal = upsert per eko id (eko-less rows are skipped server-side
+  // on a forced re-apply so they can't double). buildFd() rebuilds a fresh FormData.
   const postUpload = async (url, buildFd, onOk, allowForce = false) => {
     setBusy(true)
     const attempt = force => { const fd = buildFd(); if (force) fd.append('force', 'true'); return api.post(url, fd) }
@@ -73,7 +72,7 @@ export default function Evalue() {
       catch (e) {
         const detail = e.response?.data?.detail || 'Upload failed'
         if (allowForce && e.response?.status === 409 &&
-            window.confirm(`${detail}\n\nRe-upload anyway and replace the existing rows for these dates? (matched/SRC rows are kept)`)) {
+            window.confirm(`${detail}\n\nRe-upload anyway and re-apply this file? Rows it already covers are replaced, not duplicated.`)) {
           res = await attempt(true)
         } else { toast.error(detail); return }
       }
@@ -85,7 +84,8 @@ export default function Evalue() {
     if (!f) return
     postUpload('/evalue/upload-internal',
       () => { const fd = new FormData(); fd.append('file', f); return fd },
-      data => { toast.success(`Internal dump: ${data.rows} loads across ${data.accounts} accounts`); loadSummary() })
+      data => { toast.success(`Internal dump: ${data.rows} loads across ${data.accounts} accounts`); loadSummary() },
+      true)
   }
   const uploadBank = f => {
     if (!f) return

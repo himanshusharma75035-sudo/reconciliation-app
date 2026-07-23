@@ -201,29 +201,41 @@ def _upsert_wallet_loads(db, loads):
 @router.post("/upload-internal")
 async def upload_internal(
     file: UploadFile = File(...),
+    force: bool = Form(False),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
     raw = await file.read()
     from core.file_hash_guard import guard_duplicate_file
-    # No force= here on purpose: the internal path UPSERTS per eko_trxn_id and never
-    # bulk-deletes, so its data cannot be "lost" the way bank rows can — a byte-identical
-    # re-upload is therefore always a genuine accidental duplicate and must stay blocked.
-    # (Rows with a blank eko_trxn_id are appended, not upserted, so a forced re-apply
-    # would duplicate them — another reason force is bank-only.)
-    guard_duplicate_file(db, "evalue", "internal", raw, file.filename, user)
+    # force= restores rows removed since the original upload. The old "internal can never
+    # lose data" rationale is FALSE: the Clear Data screen bulk-deletes wallet loads (it
+    # did, three times on 2026-07-22), after which the lingering hash blocked the
+    # legitimate re-upload forever — the documented hash-outlives-its-data trap. The
+    # upsert-per-eko_trxn_id makes a forced re-apply idempotent for id-carrying rows; the
+    # one hazard (blank-eko rows append, so a replay would double them) is closed below
+    # by skipping eko-less rows on a forced re-apply.
+    guard_duplicate_file(db, "evalue", "internal", raw, file.filename, user, force=force)
     try:
         loads = EV.parse_internal_dump(raw, file.filename)
     except Exception as e:
         raise HTTPException(400, f"Could not parse internal dump: {e}")
     if not loads:
         raise HTTPException(400, "No wallet-load rows found in the dump.")
+    skipped_ekoless = 0
+    if force:
+        n0 = len(loads)
+        loads = [l for l in loads if l.get("eko_trxn_id")]
+        skipped_ekoless = n0 - len(loads)
+        if not loads:
+            raise HTTPException(400, "All rows in this dump lack an eko_trxn_id — a forced "
+                                     "re-apply would duplicate them, so nothing was ingested.")
 
     inserted, replaced = _upsert_wallet_loads(db, loads)
     db.add(AuditLog(id=generate_id(), user_id=getattr(user, "id", None),
                     username=getattr(user, "username", None), action="evalue_upload_internal",
                     action_type="human", entity_type="evalue_wallet_load",
-                    detail=json.dumps({"file": file.filename, "rows": inserted, "replaced": replaced})))
+                    detail=json.dumps({"file": file.filename, "rows": inserted, "replaced": replaced,
+                                       "force": force, "skipped_ekoless": skipped_ekoless})))
     db.commit()
     from collections import Counter
     by_acct = Counter(l["reco_acc_no"] for l in loads)
