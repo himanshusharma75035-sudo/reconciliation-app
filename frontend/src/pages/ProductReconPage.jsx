@@ -251,6 +251,17 @@ function ProductReconTab({ slug, partners }) {
       },
     })
   }
+  const bulkDelete = async () => {
+    const ids = [...selected]; if (!ids.length) return
+    if (!window.confirm(`Delete ${ids.length} selected row(s)?\n\nMatched counterparts are safely reverted to unmatched, and the rows go to the Recycle Bin (restorable for 30 days).`)) return
+    try {
+      const fd = new FormData()
+      fd.append('module', 'core'); fd.append('table', 'txn'); fd.append('row_ids', ids.join(','))
+      const { data } = await api.post('/upload/delete-rows', fd)
+      toast.success(`Deleted ${data.deleted} row(s)${data.counterparts_unmatched ? ` · ${data.counterparts_unmatched} counterpart(s) reverted` : ''} — recoverable from the Recycle Bin`, { duration: 6000 })
+      clearSel(); fetchRows()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Delete failed (needs the Clear/Delete Data permission)') }
+  }
   const bulkOverride = () => {
     const ids = [...selected]; if (!ids.length) return
     setModal({
@@ -529,6 +540,7 @@ function ProductReconTab({ slug, partners }) {
             <button onClick={bulkAssign} className="px-3 py-1 rounded text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700">Assign owner</button>
             <button onClick={bulkSrc} className="px-3 py-1 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-700">Bulk assign SRC</button>
             <button onClick={bulkOverride} className="px-3 py-1 rounded text-xs font-medium bg-amber-600 text-white hover:bg-amber-700">Bulk override status</button>
+            <button onClick={bulkDelete} className="px-3 py-1 rounded text-xs font-medium bg-red-600 text-white hover:bg-red-700">Delete selected</button>
             <button onClick={clearSel} className="text-xs text-gray-500 hover:text-gray-700 ml-auto">Clear</button>
           </div>
         )}

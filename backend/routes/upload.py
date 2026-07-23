@@ -2467,6 +2467,110 @@ def clear_selected(
     return {"deleted_transactions": deleted}
 
 
+@router.post("/delete-rows")
+def delete_rows(
+    module: str = Form(...),             # core | evalue | bbps | sbi
+    table: str = Form(...),              # core: txn · evalue/bbps: bank|internal · sbi: bank|txn
+    row_ids: str = Form(...),            # comma-separated ids
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_permission("clear_data")),
+):
+    """Row-level multi-select delete for ANY window — recycle-binned, match-cascaded.
+
+    The per-window checkbox delete (Mismatches / product pages / All Entries) routes
+    here. Every deletion: (1) goes to the recycle bin (one restorable batch), (2)
+    reverts every surviving matched counterpart sharing the deleted rows' match ids
+    (full paired-status sets, incl. cross-product EVIBT- legs), and (3) for SBI source
+    rows, re-runs the affected business dates so the P0x results stay truthful."""
+    ids = [i.strip() for i in row_ids.split(",") if i.strip()]
+    if not ids:
+        return {"deleted": 0}
+    from core import recycle_bin
+    from models.database import (BbpsBankTxn, BbpsInternal, EvalueBankTxn,
+                                 EvalueWalletLoad, SBIBankTransaction, SBITxnReport)
+    _EV_PAIRED = ("matched_online", "matched_cash", "matched_manual", "wrong_amount",
+                  "twice_credit", "interbank_matched")
+    _BBPS_PAIRED = ("matched", "amount_mismatch", "failed_refunded",
+                    "failed_pending_refund", "refunded_but_success")
+    REG = {
+        ("core", "txn"):       (Transaction, None, None, None),
+        ("evalue", "bank"):    (EvalueBankTxn, EvalueWalletLoad, "unmatched_load", _EV_PAIRED),
+        ("evalue", "internal"):(EvalueWalletLoad, EvalueBankTxn, "unmatched_bank", _EV_PAIRED),
+        ("bbps", "bank"):      (BbpsBankTxn, BbpsInternal, "unmatched_internal", _BBPS_PAIRED),
+        ("bbps", "internal"):  (BbpsInternal, BbpsBankTxn, "unmatched_bank", _BBPS_PAIRED),
+        ("sbi", "bank"):       (SBIBankTransaction, None, None, None),
+        ("sbi", "txn"):        (SBITxnReport, None, None, None),
+    }
+    key = (module, table)
+    if key not in REG:
+        raise HTTPException(status_code=400, detail=f"Unknown module/table: {module}/{table}")
+    model, partner_model, partner_unmatched, paired = REG[key]
+
+    q = db.query(model).filter(model.id.in_(ids))
+    cascaded = 0
+    sbi_dates = set()
+    if module == "core":
+        # same cascade as clear-selected (matched_with_id + EVIBT- cross-product)
+        cascaded = db.query(Transaction).filter(Transaction.matched_with_id.in_(ids)).update(
+            {"recon_status": "unmatched", "matched_with_id": None, "match_id": None},
+            synchronize_session=False)
+        _ev = {m for (m,) in db.query(Transaction.match_id)
+               .filter(Transaction.id.in_(ids), Transaction.match_id.like("EVIBT-%")).all() if m}
+        if _ev:
+            cascaded += db.query(EvalueBankTxn).filter(EvalueBankTxn.match_id.in_(_ev)).update(
+                {"recon_status": "unmatched_bank", "match_id": None,
+                 "match_note": "core interbank leg deleted — auto-reverted"},
+                synchronize_session=False)
+    elif partner_model is not None:
+        mids = {m for (m,) in q.with_entities(model.match_id)
+                .filter(model.match_id.isnot(None)).all()}
+        if mids:
+            # partner table + same-table siblings (EVX- links two bank rows) + EVIBT core legs
+            for pm, unm in ((partner_model, partner_unmatched),
+                            (model, "unmatched_bank" if table == "bank" else
+                             ("unmatched_load" if module == "evalue" else "unmatched_internal"))):
+                cascaded += (db.query(pm)
+                             .filter(pm.match_id.in_(mids), pm.recon_status.in_(paired),
+                                     ~pm.id.in_(ids))
+                             .update({"recon_status": unm, "match_id": None,
+                                      "match_note": "partner row deleted — auto-reverted"},
+                                     synchronize_session=False))
+            _ev = {m for m in mids if str(m).startswith("EVIBT-")}
+            if _ev:
+                cascaded += db.query(Transaction).filter(Transaction.match_id.in_(_ev)).update(
+                    {"recon_status": "unmatched", "match_id": None, "matched_with_id": None},
+                    synchronize_session=False)
+    elif module == "sbi":
+        datecol = SBIBankTransaction.txn_date if table == "bank" else SBITxnReport.txn_date
+        sbi_dates = {d for (d,) in q.with_entities(datecol).distinct().all() if d}
+
+    deleted = recycle_bin.soft_delete(
+        db, q, model, module=module, user=current_user.username,
+        filters={"table": table, "ids_count": len(ids)}, reason="delete selected rows")
+    db.commit()
+
+    sbi_rerun = []
+    if sbi_dates:
+        # regenerate the affected dates' results so they never point at deleted rows
+        try:
+            from routes.sbi_kiosk import _run_all_dates
+            _run_all_dates(db, current_user, sorted(sbi_dates))
+            sbi_rerun = sorted(sbi_dates)
+        except Exception as _e:
+            logger.warning(f"delete-rows sbi re-run failed: {_e}")
+
+    try:
+        db.add(AuditLog(user_id=current_user.id, username=current_user.username,
+                        action="delete_rows", action_type="human", entity_type=f"{module}:{table}",
+                        detail=json.dumps({"deleted": deleted, "counterparts_unmatched": cascaded,
+                                           "sbi_rerun_dates": sbi_rerun})))
+        db.commit()
+    except Exception:
+        db.rollback()
+    return {"deleted": deleted, "counterparts_unmatched": cascaded,
+            "sbi_rerun_dates": sbi_rerun}
+
+
 def _parse_recon_date(date_str: str) -> Optional[str]:
     """
     Parse a date string from a transaction row and return YYYY-MM-DD.
