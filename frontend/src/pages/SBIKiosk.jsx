@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Upload, Play, RefreshCw, X, ChevronLeft, ChevronRight, ArrowLeftRight, ChevronDown, Check, AlertTriangle, Download } from 'lucide-react'
+import { Upload, Play, RefreshCw, X, ChevronLeft, ChevronRight, ArrowLeftRight, ChevronDown, Check, AlertTriangle, Download, Trash2 } from 'lucide-react'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
+import { hasPermission } from '../utils/permissions'
 
 // ── Money / date helpers ────────────────────────────────────────────────────────
 
@@ -1047,7 +1048,14 @@ function UnifiedTab({ reconDate, setReconDate }) {
   const [page, setPage] = useState(1)
   const [srcModal, setSrcModal] = useState(null)
   const [mmModal, setMmModal] = useState(null)
+  const [sel, setSel] = useState(new Set())        // keys `${source}|${id}` — source picks the table
+  const [deleting, setDeleting] = useState(false)
   const PAGE_SIZE = 100
+  const canDelete = hasPermission('clear_data')
+
+  // unified `source` label → /upload/delete-rows table for module 'sbi'
+  const SRC_TABLE = { 'Bank Settlement': 'bank', 'Bank Statement': 'bank',
+                      'Txn Report': 'txn', 'KO Withdrawal': 'ko_limits' }
 
   const load = useCallback(async () => {
     try {
@@ -1061,8 +1069,45 @@ function UnifiedTab({ reconDate, setReconDate }) {
   }, [reconDate, side, statusF, procF, search, page])
   useEffect(() => { load() }, [load])
   useEffect(() => { setPage(1) }, [reconDate, side, statusF, procF, search])
+  useEffect(() => { setSel(new Set()) }, [reconDate, side, statusF, procF, search, page])
 
   const rows = data?.rows || []
+  const rowKey = r => `${r.source}|${r.id}`
+  const selectable = rows.filter(r => SRC_TABLE[r.source])
+  const toggle = r => setSel(s => { const n = new Set(s); const k = rowKey(r); n.has(k) ? n.delete(k) : n.add(k); return n })
+  const toggleAll = () => setSel(s => s.size >= selectable.length && selectable.length > 0
+    ? new Set() : new Set(selectable.map(rowKey)))
+
+  const deleteSelected = async () => {
+    // partition the selected keys by source table — each table goes as one delete-rows call
+    const byTable = {}
+    for (const r of selectable) {
+      if (!sel.has(rowKey(r))) continue
+      const t = SRC_TABLE[r.source]
+      ;(byTable[t] = byTable[t] || []).push(r.id)
+    }
+    const total = Object.values(byTable).reduce((n, a) => n + a.length, 0)
+    if (!total) return
+    if (!window.confirm(
+      `Delete ${total} selected source entr${total === 1 ? 'y' : 'ies'}?\n\n` +
+      `They go to the Recycle Bin (restorable), and the affected dates' P01–P04 results are re-run automatically so nothing points at deleted rows.`)) return
+    setDeleting(true)
+    try {
+      let deleted = 0, rerun = new Set()
+      for (const [table, ids] of Object.entries(byTable)) {
+        const fd = new FormData()
+        fd.append('module', 'sbi'); fd.append('table', table); fd.append('row_ids', ids.join(','))
+        const { data: res } = await api.post('/upload/delete-rows', fd)
+        deleted += res.deleted || 0
+        for (const d of res.sbi_rerun_dates || []) rerun.add(d)
+      }
+      toast.success(`Deleted ${deleted} entr${deleted === 1 ? 'y' : 'ies'} → Recycle Bin` +
+                    (rerun.size ? ` · re-ran ${[...rerun].join(', ')}` : ''))
+      setSel(new Set())
+      load()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Delete failed') }
+    finally { setDeleting(false) }
+  }
   return (
     <div>
       <ProcessHeader process="p02"
@@ -1081,6 +1126,14 @@ function UnifiedTab({ reconDate, setReconDate }) {
         <div><label className="text-xs text-gray-400 block mb-1">Search</label>
           <input className="input w-40 text-sm" placeholder="ref / KO / CSP…" value={search} onChange={e => setSearch(e.target.value)} /></div>
         {(side || statusF || procF || search) && <button onClick={() => { setSide(''); setStatusF(''); setProcF(''); setSearch('') }} className="btn-ghost text-xs">Clear</button>}
+        {canDelete && sel.size > 0 && (
+          <button onClick={deleteSelected} disabled={deleting}
+            className="ml-auto flex items-center gap-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-lg px-3 py-2 hover:bg-red-50 disabled:opacity-50"
+            title="Recycle-binned (restorable); affected dates' results re-run automatically">
+            <Trash2 size={13} />
+            {deleting ? 'Deleting…' : `Delete selected (${sel.size})`}
+          </button>
+        )}
       </div>
 
       {data && (
@@ -1107,6 +1160,11 @@ function UnifiedTab({ reconDate, setReconDate }) {
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
                 <thead><tr className="border-b border-gray-100 bg-gray-50/50 text-gray-400 uppercase tracking-wide">
+                  {canDelete && <th className="px-3 py-2 w-8">
+                    <input type="checkbox" className="accent-primary cursor-pointer"
+                      checked={selectable.length > 0 && sel.size >= selectable.length}
+                      onChange={toggleAll} title="Select all on this page" />
+                  </th>}
                   <th className="text-left px-3 py-2">Side</th>
                   <th className="text-left px-3 py-2">Source</th>
                   <th className="text-left px-3 py-2">Key</th>
@@ -1119,7 +1177,13 @@ function UnifiedTab({ reconDate, setReconDate }) {
                 </tr></thead>
                 <tbody>
                   {rows.map(r => (
-                    <tr key={r.side + r.id} className="border-b border-gray-50 hover:bg-gray-50">
+                    <tr key={rowKey(r)} className={`border-b border-gray-50 hover:bg-gray-50 ${sel.has(rowKey(r)) ? 'bg-red-50/40' : ''}`}>
+                      {canDelete && <td className="px-3 py-2">
+                        {SRC_TABLE[r.source]
+                          ? <input type="checkbox" className="accent-primary cursor-pointer"
+                              checked={sel.has(rowKey(r))} onChange={() => toggle(r)} />
+                          : null}
+                      </td>}
                       <td className="px-3 py-2"><span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${r.side === 'bank' ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700'}`}>{r.side}</span></td>
                       <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{r.source}</td>
                       <td className="px-3 py-2">
@@ -1145,7 +1209,7 @@ function UnifiedTab({ reconDate, setReconDate }) {
                       </td>
                     </tr>
                   ))}
-                  {rows.length === 0 && <tr><td colSpan={9} className="text-center py-10 text-gray-400 text-sm">No entries — pick a date with SBI data.</td></tr>}
+                  {rows.length === 0 && <tr><td colSpan={canDelete ? 10 : 9} className="text-center py-10 text-gray-400 text-sm">No entries — pick a date with SBI data.</td></tr>}
                 </tbody>
               </table>
             </div>

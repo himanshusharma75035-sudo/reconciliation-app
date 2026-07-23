@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { AlertOctagon, CheckCircle, Search, TrendingDown } from 'lucide-react'
+import { AlertOctagon, CheckCircle, Search, TrendingDown, Unlink } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
 import { hasPermission } from '../utils/permissions'
@@ -19,7 +19,8 @@ export default function Mismatches() {
   const [loading, setLoading] = useState(false)
   const [resolving, setResolving] = useState(null)
 
-  const canResolve = hasPermission('src_assign')
+  const canResolve  = hasPermission('src_assign')
+  const canOverride = hasPermission('override')
 
   const upd = patch => setFilters(f => ({ ...f, ...patch }))
 
@@ -46,6 +47,26 @@ export default function Mismatches() {
       toast.success('Resolved — pair marked as Matched')
       setRows(r => r.filter(x => x.bank_txn_id !== bankTxnId))
     } catch { toast.error('Resolve failed') }
+    finally { setResolving(null) }
+  }
+
+  // Break the pair — both legs go back to open. Reversible (nothing is deleted);
+  // remark is mandatory and lands in the audit trail as a human action.
+  const unmatch = async (row) => {
+    const remark = window.prompt(
+      `Unmatch ${row.match_id}?\nBoth sides go back to Open Items — nothing is deleted; they can be re-matched later.\n\nRemark (required, recorded in the audit trail):`)
+    if (remark === null) return
+    if (!remark.trim()) { toast.error('A remark is required to unmatch'); return }
+    setResolving(row.bank_txn_id)
+    try {
+      const { data } = await api.post('/recon/unmatch', { match_id: row.match_id, remark: remark.trim() })
+      if (data?.queued || data?.status === 'pending_approval') {
+        toast('Unmatch sent for checker approval', { icon: '🕐' })
+      } else {
+        toast.success(`Match ${row.match_id} broken — both sides are open again`)
+        setRows(r => r.filter(x => x.match_id !== row.match_id))
+      }
+    } catch (e) { toast.error(e.response?.data?.detail || 'Unmatch failed') }
     finally { setResolving(null) }
   }
 
@@ -175,14 +196,28 @@ export default function Mismatches() {
                         <Link to={row.resolve_in || '#'} className="text-xs text-primary hover:underline whitespace-nowrap">
                           Resolve in {row.product} →
                         </Link>
-                      ) : canResolve ? (
-                        <button
-                          onClick={() => resolve(row.bank_txn_id, row.match_id)}
-                          disabled={resolving === row.bank_txn_id}
-                          className="flex items-center gap-1 text-xs text-green-600 hover:text-green-800 disabled:opacity-50 border border-green-200 rounded-lg px-2 py-0.5 hover:bg-green-50">
-                          <CheckCircle size={12} />
-                          {resolving === row.bank_txn_id ? 'Resolving…' : 'Accept'}
-                        </button>
+                      ) : (canResolve || canOverride) ? (
+                        <div className="flex items-center gap-1.5">
+                          {canResolve && (
+                            <button
+                              onClick={() => resolve(row.bank_txn_id, row.match_id)}
+                              disabled={resolving === row.bank_txn_id}
+                              className="flex items-center gap-1 text-xs text-green-600 hover:text-green-800 disabled:opacity-50 border border-green-200 rounded-lg px-2 py-0.5 hover:bg-green-50">
+                              <CheckCircle size={12} />
+                              {resolving === row.bank_txn_id ? 'Resolving…' : 'Accept'}
+                            </button>
+                          )}
+                          {canOverride && (
+                            <button
+                              onClick={() => unmatch(row)}
+                              disabled={resolving === row.bank_txn_id}
+                              title="Break the pair — both sides go back to Open Items (nothing is deleted)"
+                              className="flex items-center gap-1 text-xs text-amber-600 hover:text-amber-800 disabled:opacity-50 border border-amber-200 rounded-lg px-2 py-0.5 hover:bg-amber-50">
+                              <Unlink size={12} />
+                              Unmatch
+                            </button>
+                          )}
+                        </div>
                       ) : <span className="text-gray-300 text-xs">—</span>}
                     </td>
                   </tr>

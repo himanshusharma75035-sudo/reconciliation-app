@@ -2470,7 +2470,7 @@ def clear_selected(
 @router.post("/delete-rows")
 def delete_rows(
     module: str = Form(...),             # core | evalue | bbps | sbi
-    table: str = Form(...),              # core: txn · evalue/bbps: bank|internal · sbi: bank|txn
+    table: str = Form(...),              # core: txn · evalue/bbps: bank|internal · sbi: bank|txn|ko_limits
     row_ids: str = Form(...),            # comma-separated ids
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("clear_data")),
@@ -2487,7 +2487,8 @@ def delete_rows(
         return {"deleted": 0}
     from core import recycle_bin
     from models.database import (BbpsBankTxn, BbpsInternal, EvalueBankTxn,
-                                 EvalueWalletLoad, SBIBankTransaction, SBITxnReport)
+                                 EvalueWalletLoad, SBIBankTransaction, SBIKOLimits,
+                                 SBITxnReport)
     _EV_PAIRED = ("matched_online", "matched_cash", "matched_manual", "wrong_amount",
                   "twice_credit", "interbank_matched")
     _BBPS_PAIRED = ("matched", "amount_mismatch", "failed_refunded",
@@ -2500,6 +2501,7 @@ def delete_rows(
         ("bbps", "internal"):  (BbpsInternal, BbpsBankTxn, "unmatched_bank", _BBPS_PAIRED),
         ("sbi", "bank"):       (SBIBankTransaction, None, None, None),
         ("sbi", "txn"):        (SBITxnReport, None, None, None),
+        ("sbi", "ko_limits"):  (SBIKOLimits, None, None, None),   # KO Withdrawal rows in All Entries
     }
     key = (module, table)
     if key not in REG:
@@ -2541,7 +2543,8 @@ def delete_rows(
                     {"recon_status": "unmatched", "match_id": None, "matched_with_id": None},
                     synchronize_session=False)
     elif module == "sbi":
-        datecol = SBIBankTransaction.txn_date if table == "bank" else SBITxnReport.txn_date
+        datecol = {"bank": SBIBankTransaction.txn_date, "txn": SBITxnReport.txn_date,
+                   "ko_limits": SBIKOLimits.txn_date}[table]
         sbi_dates = {d for (d,) in q.with_entities(datecol).distinct().all() if d}
 
     deleted = recycle_bin.soft_delete(
