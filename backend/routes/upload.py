@@ -2023,6 +2023,16 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
     from core import recycle_bin
     batch_id = batch_id or generate_id()
     deleted = {}
+    # Pair tables whose rows carry (recon_status, match_id) linking legs of a match, with
+    # each table's own "unmatched" literal. Used by the cascade below.
+    from models.database import BbpsBankTxn, BbpsInternal, EvalueBankTxn, EvalueWalletLoad
+    _PAIR_STATUS = {
+        "evalue": [(EvalueBankTxn, "unmatched_bank"), (EvalueWalletLoad, "unmatched_load")],
+        "bbps":   [(BbpsBankTxn, "unmatched_bank"), (BbpsInternal, "unmatched_internal")],
+    }
+    _pair_models = {m for m, _ in _PAIR_STATUS.get(module, [])}
+    _deleted_mids = set()                 # match_ids whose rows are being deleted
+
     for model, date_expr, tside in _module_tables(module):
         if side and tside != side:
             continue                      # not this side's table → leave it alone
@@ -2031,11 +2041,30 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
             if date_expr is None:
                 continue                  # no business date → refuse to wipe it
             q = q.filter(date_expr(model) == recon_date)
+        if model in _pair_models:
+            _deleted_mids.update(m for (m,) in q.with_entities(model.match_id)
+                                 .filter(model.match_id.isnot(None)).all())
         n = recycle_bin.soft_delete(db, q, model, module=module, user=user,
                                     filters=filters, reason=f"clear {module}",
                                     batch_id=batch_id)
         if n:
             deleted[model.__tablename__] = n
+
+    # ── Match-integrity cascade ────────────────────────────────────────────────
+    # Deleting one leg of a matched pair must revert every SURVIVING leg sharing its
+    # match_id to unmatched. Auto matches self-heal on the next run, but manual /
+    # preserved dispositions (EVMAN-/EVX-/EVIBT-) survive re-runs by design — without
+    # this they stay "matched" forever, pointing at deleted rows (live incident: five
+    # stale matched_manual wallet loads after a bank-side clear, 2026-07-22).
+    cascaded = 0
+    if _deleted_mids:
+        for pm, unmatched_status in _PAIR_STATUS.get(module, []):
+            cascaded += (db.query(pm)
+                         .filter(pm.match_id.in_(_deleted_mids),
+                                 pm.recon_status.like("matched%"))
+                         .update({"recon_status": unmatched_status, "match_id": None,
+                                  "match_note": "partner leg deleted by clear — auto-reverted"},
+                                 synchronize_session=False))
 
     # The upload-hash guard only blocks re-uploading an identical FILE. Dropping it is
     # correct ONLY for a full, unfiltered product clear.
@@ -2044,7 +2073,8 @@ def _clear_module(module: str, db, *, recon_date=None, side=None,
         db.query(ModuleUploadHash).filter(
             ModuleUploadHash.module == module).delete(synchronize_session=False)
 
-    return {"deleted": deleted, "total": sum(deleted.values()), "batch_id": batch_id}
+    return {"deleted": deleted, "total": sum(deleted.values()),
+            "counterparts_unmatched": cascaded, "batch_id": batch_id}
 
 
 # product slug → module key (kiosk and sbi both map to the SBI tables)
