@@ -1227,9 +1227,12 @@ def confirm_mapping(
 
     _ingest_t0 = time.monotonic()   # roadmap 1.4: ingestion-ledger duration timer
 
-    # ── Hard-block re-upload (admin override only) ───────────────────────────
-    # Duplicate ingests caused a real double-counting incident (Jun 2026). For a fixed-date slot that
-    # already has data, block ingestion unless an admin explicitly passes force=true.
+    # ── Hard-block re-upload (Re-upload/replace override) ────────────────────
+    # Duplicate ingests caused a real double-counting incident (Jun 2026). For a fixed-date
+    # slot that already has data, block ingestion unless force=true — which now means
+    # REPLACE, not append: the slot's existing rows are recycle-binned and their matched
+    # counterparts reverted before this file's rows land (see the force block below), so
+    # the override is safe for any user with upload permission, not only admins.
     if session.recon_date and session.recon_date != "auto":
         _existing = db.query(Transaction).filter(
             Transaction.partner == session.partner,
@@ -1237,8 +1240,7 @@ def confirm_mapping(
             Transaction.recon_date == session.recon_date,
         ).count()
         if _existing > 0:
-            _is_admin = getattr(current_user, "role", "") == "admin"
-            if not (_is_admin and force):
+            if not force:
                 # roadmap 1.4: record the blocked re-upload attempt (isolated txn)
                 try:
                     from core.ingestion_ledger import record_ingestion_event
@@ -1255,10 +1257,11 @@ def confirm_mapping(
                     pass
                 raise HTTPException(
                     status_code=409,
-                    detail=(f"{_existing} transactions already exist for "
+                    detail=(f"[DUPLICATE] {_existing} transactions already exist for "
                             f"{session.partner}/{session.side}/{session.recon_date}. "
-                            "Re-uploading would create duplicates — clear the existing data first. "
-                            "(An admin can override this block.)"),
+                            "Use Re-upload (replace) to supersede them — the existing rows "
+                            "go to the Recycle Bin and their matches are safely reverted, "
+                            "so nothing is duplicated."),
                 )
 
     mapping_dict: dict = json.loads(mapping)
@@ -1619,6 +1622,42 @@ def confirm_mapping(
         )
         txns.append(txn)
 
+    # ── force = REPLACE, not append ────────────────────────────────────────────
+    # A forced re-upload supersedes this file's OWN scope: every (partner, side,
+    # recon_date) triple its parsed rows cover — nothing outside the file is touched.
+    # Existing rows in those scopes are recycle-binned (recoverable) and their matched
+    # counterparts reverted first (same cascade as /upload/clear), so re-applying a
+    # file can never double-count and never leaves a stale match.
+    replaced_rows = 0
+    if force and txns:
+        from core import recycle_bin as _rb
+        _scopes = {(t.partner, t.side, t.recon_date) for t in txns
+                   if t.partner and t.side and t.recon_date}
+        _rep_batch = generate_id()
+        for _p, _s, _d in sorted(_scopes):
+            q_old = db.query(Transaction).filter(Transaction.partner == _p,
+                                                 Transaction.side == _s,
+                                                 Transaction.recon_date == _d)
+            old_ids = [t.id for t in q_old.with_entities(Transaction.id).all()]
+            if not old_ids:
+                continue
+            db.query(Transaction).filter(Transaction.matched_with_id.in_(old_ids)).update(
+                {"recon_status": "unmatched", "matched_with_id": None, "match_id": None},
+                synchronize_session=False)
+            _evibt = {m for (m,) in db.query(Transaction.match_id)
+                      .filter(Transaction.id.in_(old_ids),
+                              Transaction.match_id.like("EVIBT-%")).all() if m}
+            if _evibt:
+                from models.database import EvalueBankTxn as _EvB2
+                db.query(_EvB2).filter(_EvB2.match_id.in_(_evibt)).update(
+                    {"recon_status": "unmatched_bank", "match_id": None,
+                     "match_note": "core interbank leg replaced by re-upload — auto-reverted"},
+                    synchronize_session=False)
+            replaced_rows += _rb.soft_delete(
+                db, q_old, Transaction, module="core", user=current_user.username,
+                filters={"partner": _p, "side": _s, "recon_date": _d},
+                reason="re-upload (replace)", batch_id=_rep_batch)
+
     db.bulk_save_objects(txns)
     session.status = UploadStatus.done
     session.column_mapping = mapping
@@ -1878,6 +1917,7 @@ def confirm_mapping(
         # roadmap 1.6: read-only data-quality profile (new Step-3 field, additive #25)
         "data_quality": _dq,
         "message": "Ingested successfully",
+        "replaced_rows": replaced_rows,   # force=true: prior rows superseded (recycle-binned)
         "row_count": txn_count,
         "fee_charge_count": fee_count,
         "settlement_credit_count": cred_count,

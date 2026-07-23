@@ -90,6 +90,7 @@ def _read_excel_with_header(content: bytes) -> pd.DataFrame:
 @router.post("/upload/tplus")
 def upload_tplus(
     file: UploadFile = File(...),
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
@@ -98,6 +99,11 @@ def upload_tplus(
     One row per settlement batch; captures the complete deduction breakdown.
     """
     content = file.file.read()
+    # SHA-256 duplicate guard + Re-upload (replace). Re-applying is idempotent: the
+    # ingest below dedups on content keys, so a forced re-apply skips existing rows and
+    # inserts only additional entries — replace-not-duplicate by construction.
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "aeps", "tplus", content, file.filename or "", current_user, force=force)
     try:
         df = _read_excel_with_header(content)
     except Exception as e:
@@ -185,6 +191,7 @@ def upload_tplus(
 @router.post("/upload/anomaly")
 def upload_anomaly(
     file: UploadFile = File(...),
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
@@ -193,6 +200,11 @@ def upload_anomaly(
     Each row = one unsettled transaction; RRN links to bank tracking_number.
     """
     content = file.file.read()
+    # SHA-256 duplicate guard + Re-upload (replace). Re-applying is idempotent: the
+    # ingest below dedups on content keys, so a forced re-apply skips existing rows and
+    # inserts only additional entries — replace-not-duplicate by construction.
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "aeps", "anomaly", content, file.filename or "", current_user, force=force)
     try:
         df = _read_excel_with_header(content)
     except Exception as e:
@@ -250,6 +262,7 @@ def upload_anomaly(
 @router.post("/upload/cib")
 def upload_cib(
     file: UploadFile = File(...),
+    force: bool = False,
     db: Session = Depends(get_db),
     current_user=Depends(require_permission("upload")),
 ):
@@ -258,6 +271,11 @@ def upload_cib(
     Each row = one chargeback or penalty deduction; RRN links to bank tracking_number.
     """
     content = file.file.read()
+    # SHA-256 duplicate guard + Re-upload (replace). Re-applying is idempotent: the
+    # ingest below dedups on content keys, so a forced re-apply skips existing rows and
+    # inserts only additional entries — replace-not-duplicate by construction.
+    from core.file_hash_guard import guard_duplicate_file
+    guard_duplicate_file(db, "aeps", "cib", content, file.filename or "", current_user, force=force)
     try:
         df = _read_excel_with_header(content)
     except Exception as e:

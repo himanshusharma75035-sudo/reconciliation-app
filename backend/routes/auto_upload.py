@@ -183,6 +183,7 @@ def test_folder_path(
 @router.post("/trigger/{config_id}")
 def trigger_upload(
     config_id: str,
+    force: bool = False,   # Re-upload (replace) — threaded to the module handlers' guards
     db: Session = Depends(get_db),
     current_user: User = Depends(require_permission("upload")),
 ):
@@ -471,10 +472,10 @@ def _trigger_sbi_upload(config, current_user, db):
         # The bank_statement handler is async; others are sync
         if asyncio.iscoroutinefunction(handler):
             result = asyncio.get_event_loop().run_until_complete(
-                handler(file=fake_file, db=db, current_user=current_user)
+                handler(file=fake_file, force=force, db=db, current_user=current_user)
             )
         else:
-            result = handler(file=fake_file, db=db, current_user=current_user)
+            result = handler(file=fake_file, force=force, db=db, current_user=current_user)
     except HTTPException as e:
         # Preserve the real status — a guard 409 [DUPLICATE] must reach the client as a
         # 409 (so the UI can offer Re-upload/replace), not be flattened into a 500.
@@ -542,7 +543,7 @@ def _trigger_bbps_upload(config, current_user, db):
     try:
         # routes.bbps upload handlers' auth param is `user=`, not `current_user=`.
         result = asyncio.get_event_loop().run_until_complete(
-            handler(file=fake_file, db=db, user=current_user)
+            handler(file=fake_file, force=force, db=db, user=current_user)
         )
     except HTTPException as e:
         config.last_triggered_at   = datetime.datetime.utcnow()
@@ -603,7 +604,7 @@ def _trigger_evalue_upload(config, current_user, db):
         # routes.evalue.upload_internal's auth param is `user=`, not `current_user=` —
         # passing current_user= raised TypeError, so E-Value auto-upload always failed.
         result = asyncio.get_event_loop().run_until_complete(
-            upload_internal(file=fake_file, db=db, user=current_user)
+            upload_internal(file=fake_file, force=force, db=db, user=current_user)
         )
     except HTTPException as e:
         config.last_triggered_at   = datetime.datetime.utcnow()

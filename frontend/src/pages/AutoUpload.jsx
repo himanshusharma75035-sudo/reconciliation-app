@@ -111,8 +111,24 @@ function ConfigCard({ config: initialConfig, onRefresh }) {
   const handleTrigger = async () => {
     setTriggering(true)
     setTriggerResult(null)
+    const attempt = force => axios.post(`/auto-upload/trigger/${config.id}${force ? '?force=true' : ''}`)
     try {
-      const { data } = await axios.post(`/auto-upload/trigger/${config.id}`)
+      let res
+      try { res = await attempt(false) }
+      catch (e) {
+        const msg = e.response?.data?.detail || 'Upload failed'
+        // 409 [DUPLICATE] → Re-upload (replace): the module handler re-applies the file
+        // with replace/upsert semantics — rows it already covers are superseded.
+        if (e.response?.status === 409 &&
+            window.confirm(`${msg}\n\nRe-trigger anyway and re-apply the file? Rows it already covers are replaced, not duplicated.`)) {
+          res = await attempt(true)
+        } else {
+          setTriggerResult({ ok: false, msg })
+          toast.error(msg)
+          return
+        }
+      }
+      const data = res.data
       setTriggerResult({ ok: true, data })
       toast.success(`Ingested ${data.row_count} rows from ${data.filename}`)
       onRefresh()

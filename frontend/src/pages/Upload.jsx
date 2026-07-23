@@ -39,10 +39,20 @@ function AepsSettlementUpload() {
   const handleSettlementUpload = async (card, file) => {
     if (!file) return
     setUploading(card.key)
+    const attempt = force => { const fd = new FormData(); fd.append('file', file); return api.post(`${card.endpoint}${force ? '?force=true' : ''}`, fd) }
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const { data } = await api.post(card.endpoint, fd)
+      let res
+      try { res = await attempt(false) }
+      catch (err) {
+        const detail = err.response?.data?.detail || `${card.label} upload failed`
+        // 409 [DUPLICATE] → Re-upload (replace): the ingest dedups on content keys, so a
+        // re-apply skips existing rows and only adds new entries — never doubles.
+        if (err.response?.status === 409 &&
+            window.confirm(`${detail}\n\nRe-upload anyway and re-apply this file? Existing rows are skipped, only new entries are added.`)) {
+          res = await attempt(true)
+        } else { toast.error(detail); return }
+      }
+      const data = res.data
       const dup = data.duplicates || 0
       toast.success(`${card.label}: ${data.inserted} rows uploaded${dup ? ` · ${dup} duplicate${dup > 1 ? 's' : ''} skipped` : ''}`,
         { duration: dup ? 7000 : 4000 })
@@ -433,12 +443,24 @@ export default function Upload({ forcedProduct = null, embedded = false }) {
         fd.append('side', 'bank')
         fd.append('recon_date', dateMode === 'auto' ? 'auto' : config.recon_date)
         const { data } = await api.post('/upload/file', fd)
-        const fd2 = new FormData()
-        fd2.append('session_id', data.session_id)
-        fd2.append('mapping', JSON.stringify(data.suggested_mapping || {}))
-        fd2.append('save_template', false); fd2.append('template_name', '')
-        fd2.append('filter_column', ''); fd2.append('filter_value', ''); fd2.append('source_column', '')
-        await api.post('/upload/confirm-mapping', fd2)
+        const confirm2 = force => {
+          const fd2 = new FormData()
+          fd2.append('session_id', data.session_id)
+          fd2.append('mapping', JSON.stringify(data.suggested_mapping || {}))
+          fd2.append('save_template', false); fd2.append('template_name', '')
+          fd2.append('filter_column', ''); fd2.append('filter_value', ''); fd2.append('source_column', '')
+          if (force) fd2.append('force', 'true')
+          return api.post('/upload/confirm-mapping', fd2)
+        }
+        try { await confirm2(false) }
+        catch (err) {
+          const detail = err.response?.data?.detail || 'failed'
+          // 409 [DUPLICATE] → per-file Re-upload (replace) confirm
+          if (err.response?.status === 409 &&
+              window.confirm(`${f.name}:\n${detail}\n\nRe-upload anyway and REPLACE the existing rows? (Recycle-binned; matches safely reverted.)`)) {
+            await confirm2(true)
+          } else { throw err }
+        }
         ok++
       } catch (err) {
         fail++
@@ -525,7 +547,7 @@ export default function Upload({ forcedProduct = null, embedded = false }) {
 
   const handleConfirmMapping = async () => {
     setConfirming(true)
-    try {
+    const attempt = force => {
       const fd = new FormData()
       fd.append('session_id', sessionData.session_id)
       fd.append('mapping', JSON.stringify(mapping))
@@ -534,12 +556,27 @@ export default function Upload({ forcedProduct = null, embedded = false }) {
       fd.append('filter_column', rowFilter.column || '')
       fd.append('filter_value', rowFilter.value || '')
       fd.append('source_column', sourceColumn || '')
-      const { data } = await api.post('/upload/confirm-mapping', fd)
+      if (force) fd.append('force', 'true')
+      return api.post('/upload/confirm-mapping', fd)
+    }
+    try {
+      let res
+      try { res = await attempt(false) }
+      catch (err) {
+        const detail = err.response?.data?.detail || 'Failed to confirm mapping'
+        // 409 [DUPLICATE] → Re-upload (replace): the slot's existing rows go to the
+        // Recycle Bin and their matches revert before this file's rows land.
+        if (err.response?.status === 409 &&
+            window.confirm(`${detail}\n\nRe-upload anyway and REPLACE the existing rows for this file's dates? (They go to the Recycle Bin; matches are safely reverted — nothing is duplicated.)`)) {
+          res = await attempt(true)
+        } else { toast.error(detail); return }
+      }
+      const data = res.data
       setIngestResult(data)
       const partnerInfo = data.partner_counts
         ? Object.entries(data.partner_counts).map(([p, c]) => `${p}: ${c}`).join(', ')
         : ''
-      toast.success(`Ingested ${data.row_count} txns${partnerInfo ? ` (${partnerInfo})` : ''}${data.skipped ? ` — ${data.skipped} skipped` : ''}`)
+      toast.success(`Ingested ${data.row_count} txns${data.replaced_rows ? ` (replaced ${data.replaced_rows})` : ''}${partnerInfo ? ` (${partnerInfo})` : ''}${data.skipped ? ` — ${data.skipped} skipped` : ''}`)
       setStep(3)
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Failed to confirm mapping')
