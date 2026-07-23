@@ -32,9 +32,10 @@ function ThemePicker({ collapsed }) {
               onClick={() => { setTheme(t.id); setOpen(false) }}
               className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-md text-xs text-left transition-colors
                           ${theme === t.id ? 'bg-gray-100 font-semibold text-gray-800' : 'text-gray-600 hover:bg-gray-50'}`}>
-              <span className="inline-flex -space-x-1">
-                <span className="w-3.5 h-3.5 rounded-full ring-1 ring-white" style={{ background: t.primary }} />
-                <span className="w-3.5 h-3.5 rounded-full ring-1 ring-white" style={{ background: t.accent }} />
+              <span className="inline-flex items-center rounded px-1 py-0.5"
+                    style={{ background: t.bg, border: '1px solid rgba(128,128,128,.25)' }}>
+                <span className="w-3 h-3 rounded-full" style={{ background: t.primary }} />
+                <span className="w-3 h-3 rounded-full -ml-1" style={{ background: t.accent }} />
               </span>
               {t.label}
               {theme === t.id && <span className="ml-auto text-emerald-500">✓</span>}

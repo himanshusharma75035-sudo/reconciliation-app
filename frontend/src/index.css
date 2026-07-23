@@ -21,34 +21,16 @@
   --c-accent-600: 219 146 10;  --c-accent-700: 183 118 7;     --c-accent-800: 147 92 8;
   --c-accent-900: 122 75 12;
   --c-surface: 248 249 252;    --c-surface-dark: 241 243 248;
+  /* neutral ramp = stock Tailwind gray (light themes read dark-text-on-light) */
+  --c-gray-50: 249 250 251;  --c-gray-100: 243 244 246; --c-gray-200: 229 231 235;
+  --c-gray-300: 209 213 219; --c-gray-400: 156 163 175; --c-gray-500: 107 114 128;
+  --c-gray-600: 75 85 99;    --c-gray-700: 55 65 81;    --c-gray-800: 31 41 55;
+  --c-gray-900: 17 24 39;    --c-gray-950: 3 7 18;
+  --c-card: 255 255 255;     /* card / input / white-panel surface */
 }
-[data-theme="indigo"] {
-  --c-primary: 55 48 163;      --c-primary-light: 79 70 229;  --c-primary-dark: 49 46 129;
-  --c-primary-50: 238 242 255; --c-primary-100: 224 231 255;  --c-primary-200: 199 210 254;
-  --c-primary-300: 165 180 252;--c-primary-400: 129 140 248;  --c-primary-500: 99 102 241;
-  --c-primary-600: 79 70 229;  --c-primary-700: 67 56 202;    --c-primary-800: 55 48 163;
-  --c-primary-900: 49 46 129;  --c-primary-950: 30 27 75;
-  --c-accent: 245 158 11;      --c-accent-light: 251 191 36;
-  --c-accent-50: 255 251 235;  --c-accent-100: 254 243 199;   --c-accent-200: 253 230 138;
-  --c-accent-300: 252 211 77;  --c-accent-400: 251 191 36;    --c-accent-500: 245 158 11;
-  --c-accent-600: 217 119 6;   --c-accent-700: 180 83 9;      --c-accent-800: 146 64 14;
-  --c-accent-900: 120 53 15;
-  --c-surface: 248 250 255;    --c-surface-dark: 241 243 252;
-}
-[data-theme="forest"] {
-  --c-primary: 22 101 52;      --c-primary-light: 21 128 61;  --c-primary-dark: 20 83 45;
-  --c-primary-50: 240 253 244; --c-primary-100: 220 252 231;  --c-primary-200: 187 247 208;
-  --c-primary-300: 134 239 172;--c-primary-400: 74 222 128;   --c-primary-500: 34 197 94;
-  --c-primary-600: 22 163 74;  --c-primary-700: 21 128 61;    --c-primary-800: 22 101 52;
-  --c-primary-900: 20 83 45;   --c-primary-950: 5 46 22;
-  --c-accent: 249 115 22;      --c-accent-light: 251 146 60;
-  --c-accent-50: 255 247 237;  --c-accent-100: 255 237 213;   --c-accent-200: 254 215 170;
-  --c-accent-300: 253 186 116; --c-accent-400: 251 146 60;    --c-accent-500: 249 115 22;
-  --c-accent-600: 234 88 12;   --c-accent-700: 194 65 12;     --c-accent-800: 154 52 18;
-  --c-accent-900: 124 45 18;
-  --c-surface: 247 250 248;    --c-surface-dark: 240 245 242;
-}
-[data-theme="slate"] {
+
+/* GREY — professional neutral light theme: slate primary, sky accent, grey surfaces */
+[data-theme="grey"] {
   --c-primary: 51 65 85;       --c-primary-light: 71 85 105;  --c-primary-dark: 30 41 59;
   --c-primary-50: 248 250 252; --c-primary-100: 241 245 249;  --c-primary-200: 226 232 240;
   --c-primary-300: 203 213 225;--c-primary-400: 148 163 184;  --c-primary-500: 100 116 139;
@@ -59,7 +41,70 @@
   --c-accent-300: 125 211 252; --c-accent-400: 56 189 248;    --c-accent-500: 14 165 233;
   --c-accent-600: 2 132 199;   --c-accent-700: 3 105 161;     --c-accent-800: 7 89 133;
   --c-accent-900: 12 74 110;
-  --c-surface: 248 249 251;    --c-surface-dark: 241 243 246;
+  --c-surface: 244 245 247;    --c-surface-dark: 235 237 240;
+}
+
+/* DARK — slate dark mode, Eko brand kept. The neutral ramp is INVERTED so every
+   text-gray-700/800 in the app automatically becomes light-on-dark; primary/accent
+   tints invert too so pale chips (bg-primary-50 etc.) become dark tints. */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --c-primary: 42 122 154;     --c-primary-light: 74 148 176; --c-primary-dark: 6 45 58;
+  --c-primary-50: 4 31 41;     --c-primary-100: 6 45 58;      --c-primary-200: 9 64 83;
+  --c-primary-300: 17 90 117;  --c-primary-400: 30 112 144;   --c-primary-500: 74 148 176;
+  --c-primary-600: 124 185 206;--c-primary-700: 171 212 226;  --c-primary-800: 215 234 241;
+  --c-primary-900: 237 246 249;--c-primary-950: 237 246 249;
+  --c-accent: 249 171 16;      --c-accent-light: 251 188 56;
+  --c-accent-50: 66 42 6;      --c-accent-100: 122 75 12;     --c-accent-200: 147 92 8;
+  --c-accent-300: 183 118 7;   --c-accent-400: 219 146 10;    --c-accent-500: 249 171 16;
+  --c-accent-600: 250 186 44;  --c-accent-700: 251 202 80;    --c-accent-800: 251 221 140;
+  --c-accent-900: 253 239 200;
+  --c-surface: 15 23 42;       --c-surface-dark: 2 6 23;
+  --c-gray-50: 30 41 59;   --c-gray-100: 51 65 85;    --c-gray-200: 71 85 105;
+  --c-gray-300: 100 116 139;--c-gray-400: 148 163 184; --c-gray-500: 203 213 225;
+  --c-gray-600: 226 232 240;--c-gray-700: 241 245 249; --c-gray-800: 248 250 252;
+  --c-gray-900: 255 255 255;--c-gray-950: 255 255 255;
+  --c-card: 30 41 59;
+}
+
+/* MIDNIGHT — deep navy dark mode with blue primary and gold accent */
+[data-theme="midnight"] {
+  color-scheme: dark;
+  --c-primary: 59 130 246;     --c-primary-light: 96 165 250; --c-primary-dark: 29 78 216;
+  --c-primary-50: 23 37 84;    --c-primary-100: 30 58 138;    --c-primary-200: 29 78 216;
+  --c-primary-300: 37 99 235;  --c-primary-400: 59 130 246;   --c-primary-500: 96 165 250;
+  --c-primary-600: 147 197 253;--c-primary-700: 191 219 254;  --c-primary-800: 219 234 254;
+  --c-primary-900: 239 246 255;--c-primary-950: 239 246 255;
+  --c-accent: 245 158 11;      --c-accent-light: 251 191 36;
+  --c-accent-50: 69 44 8;      --c-accent-100: 120 53 15;     --c-accent-200: 146 64 14;
+  --c-accent-300: 180 83 9;    --c-accent-400: 217 119 6;     --c-accent-500: 245 158 11;
+  --c-accent-600: 251 191 36;  --c-accent-700: 252 211 77;    --c-accent-800: 253 230 138;
+  --c-accent-900: 254 243 199;
+  --c-surface: 10 15 30;       --c-surface-dark: 5 8 18;
+  --c-gray-50: 26 35 66;   --c-gray-100: 40 53 92;    --c-gray-200: 62 76 119;
+  --c-gray-300: 96 110 150; --c-gray-400: 140 152 185; --c-gray-500: 180 190 214;
+  --c-gray-600: 208 216 233;--c-gray-700: 228 233 244; --c-gray-800: 240 244 252;
+  --c-gray-900: 255 255 255;--c-gray-950: 255 255 255;
+  --c-card: 22 32 58;
+}
+
+/* Dark-theme surface overrides: `white` is deliberately NOT remapped globally (sidebar
+   text-white must stay white), so the white SURFACES are re-skinned here instead —
+   the bg-white utility plus the component classes that @apply it. */
+[data-theme="dark"] .bg-white, [data-theme="midnight"] .bg-white,
+[data-theme="dark"] .card, [data-theme="midnight"] .card,
+[data-theme="dark"] .input, [data-theme="midnight"] .input,
+[data-theme="dark"] .select, [data-theme="midnight"] .select,
+[data-theme="dark"] .btn-ghost, [data-theme="midnight"] .btn-ghost {
+  background-color: rgb(var(--c-card));
+}
+[data-theme="dark"] .input, [data-theme="midnight"] .input,
+[data-theme="dark"] .select, [data-theme="midnight"] .select {
+  color: rgb(var(--c-gray-800));
+}
+/* Chart inks (SVG axis/legend text uses presentation attributes, which any CSS wins over) */
+[data-theme="dark"] .card svg text, [data-theme="midnight"] .card svg text {
+  fill: rgb(203 213 225);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
