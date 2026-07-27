@@ -4,7 +4,7 @@ import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from models.database import (
     get_db, Transaction, ReconRun, MatchRule, ReconStatus, User,
     AuditLog, generate_id
@@ -47,12 +47,23 @@ class RunRangeRequest(BaseModel):
     date_from: str
     date_to: str
 
+_VALID_SCOPES = {"bank_internal", "bank_bank", "internal_internal"}
+
 class RuleCreate(BaseModel):
     name: str
     partner: str
     priority: int = 1
     match_fields: List[str]
     description: Optional[str] = ""
+    # bank_internal (default, = current behaviour) | bank_bank | internal_internal
+    scope: str = "bank_internal"
+
+    @validator("scope")
+    def _scope_valid(cls, v):
+        v = (v or "bank_internal")
+        if v not in _VALID_SCOPES:
+            raise ValueError(f"scope must be one of {sorted(_VALID_SCOPES)}")
+        return v
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
 def _log(db: Session, user: User, action: str, entity_type: str = None,
@@ -1509,7 +1520,7 @@ def list_rules(db: Session = Depends(get_db), current_user: User = Depends(get_c
     rules = db.query(MatchRule).order_by(MatchRule.partner, MatchRule.priority).all()
     return [{"id": r.id, "name": r.name, "partner": r.partner, "priority": r.priority,
              "match_fields": json.loads(r.match_fields), "is_active": r.is_active,
-             "description": r.description} for r in rules]
+             "description": r.description, "scope": r.scope or "bank_internal"} for r in rules]
 
 @router.post("/rules")
 def create_rule(data: RuleCreate, db: Session = Depends(get_db),
@@ -1520,6 +1531,7 @@ def create_rule(data: RuleCreate, db: Session = Depends(get_db),
         priority=data.priority,
         match_fields=json.dumps(data.match_fields),
         description=data.description,
+        scope=(data.scope or "bank_internal"),
         created_by=current_user.id
     )
     db.add(rule)
@@ -1539,6 +1551,7 @@ def update_rule(rule_id: str, data: RuleCreate, db: Session = Depends(get_db),
     rule.priority = data.priority
     rule.match_fields = json.dumps(data.match_fields)
     rule.description = data.description
+    rule.scope = (data.scope or "bank_internal")
     db.commit()
     return {"id": rule.id, "message": "Rule updated"}
 

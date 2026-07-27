@@ -6,10 +6,20 @@ import { isCoreLedgerPartner, MATCH_FIELDS } from '../productRegistry'
 
 const FIELDS = MATCH_FIELDS
 
+// Side-pairing scope. Default preserves the only historical behaviour. Same-side
+// scopes pair an opposite debit + credit (a reversal / net-zero contra) — the labels
+// say "Simplibank" (user-facing name) while the stored token stays 'internal'.
+const SCOPES = [
+  { value: 'bank_internal',     label: 'Bank ↔ Simplibank' },
+  { value: 'bank_bank',         label: 'Bank ↔ Bank' },
+  { value: 'internal_internal', label: 'Simplibank ↔ Simplibank' },
+]
+const SCOPE_LABEL = Object.fromEntries(SCOPES.map(s => [s.value, s.label]))
+
 export default function Rules() {
   const [rules, setRules] = useState([])
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState({ name: '', partner: '', priority: 1, match_fields: ['eko_tid'], description: '' })
+  const [form, setForm] = useState({ name: '', partner: '', priority: 1, match_fields: ['eko_tid'], description: '', scope: 'bank_internal' })
   const [editingId, setEditingId] = useState(null)
   const [partnerList, setPartnerList] = useState([])
   const user = JSON.parse(localStorage.getItem('user') || '{}')
@@ -26,13 +36,14 @@ export default function Rules() {
 
   const startNew = () => {
     setEditingId(null)
-    setForm({ name: '', partner: '', priority: 1, match_fields: ['eko_tid'], description: '' })
+    setForm({ name: '', partner: '', priority: 1, match_fields: ['eko_tid'], description: '', scope: 'bank_internal' })
     setShowForm(true)
   }
   const startEdit = (r) => {
     setEditingId(r.id)
     setForm({ name: r.name, partner: r.partner, priority: r.priority,
-              match_fields: r.match_fields, description: r.description || '' })
+              match_fields: r.match_fields, description: r.description || '',
+              scope: r.scope || 'bank_internal' })
     setShowForm(true)
   }
   const closeForm = () => { setShowForm(false); setEditingId(null) }
@@ -101,6 +112,11 @@ export default function Rules() {
                     <span className="font-medium text-sm text-gray-800">{rule.name}</span>
                     <span className="badge-blue capitalize">{rule.partner}</span>
                     <span className="badge-gray">P{rule.priority}</span>
+                    {rule.scope && rule.scope !== 'bank_internal' && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                        {SCOPE_LABEL[rule.scope] || rule.scope}
+                      </span>
+                    )}
                     {!rule.is_active && <span className="badge-gray">Inactive</span>}
                   </div>
                   <div className="flex gap-1 mt-1">
@@ -154,6 +170,19 @@ export default function Rules() {
                   <input type="number" className="input" min={1} max={99}
                     value={form.priority} onChange={e => setForm({...form, priority: parseInt(e.target.value)})} />
                 </div>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Match Direction</label>
+                <select className="select" value={form.scope}
+                  onChange={e => setForm({...form, scope: e.target.value})}>
+                  {SCOPES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
+                {form.scope !== 'bank_internal' && (
+                  <p className="text-[11px] text-amber-600 mt-1 leading-snug">
+                    Same-side rule: pairs an opposite debit + credit (a reversal / net-zero)
+                    on the chosen fields — it will not affect bank-vs-Simplibank totals.
+                  </p>
+                )}
               </div>
               <div>
                 <label className="text-xs text-gray-500 block mb-2">Match Fields (select all that must match)</label>

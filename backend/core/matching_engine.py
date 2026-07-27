@@ -188,8 +188,18 @@ def get_rules_for_partner(partner: str, db: Session) -> List[Dict]:
     ).order_by(MatchRule.priority).all()
 
     if db_rules:
-        return [{"name": r.name, "fields": json.loads(r.match_fields), "priority": r.priority} for r in db_rules]
+        out = [{"name": r.name, "fields": json.loads(r.match_fields), "priority": r.priority,
+                "scope": r.scope or "bank_internal"} for r in db_rules]
+        # Safety: adding a SAME-SIDE-only rule to a partner must never silently disable
+        # its bank↔internal matching. If the persisted rules contain no cross rule, fall
+        # the cross behaviour back to the built-in defaults (same as an unseeded partner).
+        if not any(r["scope"] == "bank_internal" for r in out):
+            defaults = DEFAULT_RULES.get(partner, DEFAULT_RULES["airtel"])
+            out += [{**d, "scope": "bank_internal"} for d in defaults]
+        return out
 
+    # DEFAULT_RULES entries carry no scope → they are all the historical bank↔internal
+    # behaviour; the consumer coalesces a missing scope to 'bank_internal'.
     return DEFAULT_RULES.get(partner, DEFAULT_RULES["airtel"])
 
 
@@ -255,6 +265,89 @@ def _repair_orphaned_matches(partner: str, recon_date: str, db: Session) -> int:
     return repaired
 
 
+def _match_same_side_rules(rows, rules, opposite_side, partner, recon_date, db,
+                           matched_status, seq):
+    """Apply user-defined SAME-SIDE matching rules (scope bank_bank / internal_internal).
+
+    Net-zero contra semantics (finance-ops decision 2026-07-27): within `rows` (one side),
+    pair two rows that share a rule's key AND are OPPOSITE dr_cr AND equal amount (±₹1) —
+    i.e. a debit and its reversing credit. Priority order, first-match-wins, one row used
+    once (single `used` set, and a row can never pair with itself). Writes `matched_status`
+    (reversal_matched for bank↔bank, internal_matched for internal↔internal) so same-side
+    pairs stay OUT of the two-sided bank-vs-internal 'matched' money totals.
+
+    Two guards make it safe regardless of upload order (mirroring run_bank_reversal_match):
+      * Guard A — defer entirely until the OPPOSITE side for this date exists, so the cross
+        loop that ran just before this actually had a counterpart to match against. On a
+        one-sided upload we net nothing (else a real leg gets locked into a same-side
+        reversal, invisible to the later dump which loads only 'unmatched').
+      * Guard B — never net a key an OPEN row on the opposite side still carries on ANY
+        date (a live cross / cross-date / NEFT candidate). Keyed with the SAME _build_key
+        over the rule's fields so it works for composite keys too, and computed after a
+        flush so it reflects the cross matches THIS run just made in memory.
+
+    Runs INSIDE run_reconciliation (which holds _RECON_LOCK and owns the seq counter), so
+    it is NOT decorated and never calls _next_seq itself (autoflush=False duplicate-ID trap).
+    Returns (pairs_matched, next_seq)."""
+    if not rows or not rules:
+        return 0, seq
+
+    # Guard A — opposite side for this date must exist (see docstring).
+    if not db.query(Transaction.id).filter(
+        Transaction.partner == partner,
+        Transaction.side == opposite_side,
+        Transaction.recon_date == recon_date,
+    ).first():
+        return 0, seq
+
+    # Flush so the opposite-open query below sees rows the cross loop just matched in
+    # memory this run (autoflush=False would otherwise read stale committed state).
+    db.flush()
+    # OPEN opposite-side rows (any date) — Guard B keys these with the SAME _build_key
+    # per rule, so composite keys compare like-for-like.
+    opp_open_rows = db.query(Transaction).filter(
+        Transaction.partner == partner,
+        Transaction.side == opposite_side,
+        Transaction.recon_status == ReconStatus.unmatched,
+    ).all()
+
+    used: set = set()
+    matched = 0
+    for rule in sorted(rules, key=lambda r: r.get("priority", 1)):
+        fields = rule["fields"]
+        opp_keys = {k for k in (_build_key(o, fields) for o in opp_open_rows) if k}
+        buckets: Dict[str, list] = {}
+        for r in rows:
+            if r.id in used:
+                continue
+            key = _build_key(r, fields)
+            if key:
+                buckets.setdefault(key, []).append(r)
+        for key, group in buckets.items():
+            # Guard B — leave any key a live opposite-side row could still cross-match.
+            if key in opp_keys:
+                continue
+            debits  = [r for r in group if r.id not in used and (r.dr_cr or "").strip().upper() == "DR"]
+            credits = [r for r in group if r.id not in used and (r.dr_cr or "").strip().upper() == "CR"]
+            for dr in debits:
+                if dr.id in used:
+                    continue
+                for cr in credits:
+                    if cr.id in used or cr.id == dr.id:
+                        continue
+                    if abs((dr.amount or 0) - (cr.amount or 0)) <= 1.0:
+                        mid = _make_match_id(partner, recon_date, seq)
+                        seq += 1
+                        for a, b in ((dr, cr), (cr, dr)):
+                            a.recon_status    = matched_status
+                            a.matched_with_id = b.id
+                            a.match_id        = mid
+                        used.add(dr.id); used.add(cr.id)
+                        matched += 1
+                        break
+    return matched, seq
+
+
 @_serialized
 def run_reconciliation(partner: str, recon_date: str, db: Session, user_id: str) -> Dict:
     """
@@ -290,7 +383,14 @@ def run_reconciliation(partner: str, recon_date: str, db: Session, user_id: str)
             "total_bank": 0, "total_internal": 0, "rules_applied": []
         }
 
-    rules = get_rules_for_partner(partner, db)
+    all_rules = get_rules_for_partner(partner, db)
+    # Split by side-pairing scope. The cross (bank↔internal) loop below is UNCHANGED and
+    # sees only cross rules — every legacy/default rule is bank_internal, so this is
+    # behaviour-preserving. Same-side rules (bank_bank / internal_internal) are applied
+    # afterward by _match_same_side_rules (net-zero contra pairing). (Rajendra 2026-07-27)
+    rules          = [r for r in all_rules if (r.get("scope") or "bank_internal") == "bank_internal"]
+    bank_side_rules     = [r for r in all_rules if r.get("scope") == "bank_bank"]
+    internal_side_rules = [r for r in all_rules if r.get("scope") == "internal_internal"]
     rules_applied = []
     matched_count = 0
 
@@ -390,10 +490,26 @@ def run_reconciliation(partner: str, recon_date: str, db: Session, user_id: str)
             txn.recon_status = ReconStatus.duplicate
             duplicate_count += 1
 
+    # ── Same-side rules (net-zero contra) — run AFTER the cross loop so a genuine
+    # bank↔internal match always wins the row first. Only touches rows still unmatched.
+    same_side_matched = 0
+    if bank_side_rules:
+        n, seq = _match_same_side_rules(
+            [t for t in bank_txns if t.recon_status == ReconStatus.unmatched],
+            bank_side_rules, "internal", partner, recon_date, db,
+            ReconStatus.reversal_matched, seq)
+        same_side_matched += n
+    if internal_side_rules:
+        n, seq = _match_same_side_rules(
+            [t for t in internal_txns if t.recon_status == ReconStatus.unmatched],
+            internal_side_rules, "bank", partner, recon_date, db,
+            ReconStatus.internal_matched, seq)
+        same_side_matched += n
+
     db.commit()
 
-    unmatched_bank      = len([t for t in bank_txns     if t.id not in matched_bank_ids     and t.recon_status != ReconStatus.duplicate])
-    unmatched_internal  = len([t for t in internal_txns if t.id not in matched_internal_ids and t.recon_status != ReconStatus.duplicate])
+    unmatched_bank      = len([t for t in bank_txns     if t.id not in matched_bank_ids     and t.recon_status not in (ReconStatus.duplicate, ReconStatus.reversal_matched)])
+    unmatched_internal  = len([t for t in internal_txns if t.id not in matched_internal_ids and t.recon_status not in (ReconStatus.duplicate, ReconStatus.internal_matched)])
 
     # Record run
     run = ReconRun(
@@ -415,6 +531,7 @@ def run_reconciliation(partner: str, recon_date: str, db: Session, user_id: str)
         "unmatched_bank": unmatched_bank,
         "unmatched_internal": unmatched_internal,
         "duplicate": duplicate_count,
+        "same_side_matched": same_side_matched,
         "total_bank": len(bank_txns),
         "total_internal": len(internal_txns),
         "rules_applied": rules_applied,

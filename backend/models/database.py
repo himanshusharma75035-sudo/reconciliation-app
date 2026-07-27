@@ -375,6 +375,13 @@ class MatchRule(Base):
     created_by   = Column(String(36),  ForeignKey("users.id"))
     created_at   = Column(DateTime,    default=datetime.datetime.utcnow)
     description  = Column(Text,        nullable=True)
+    # Which two sides this rule pairs. Default preserves the only historical behaviour
+    # (bank statement ↔ Simplibank internal dump). Same-side scopes pair OPPOSITE
+    # DR/CR net-zero rows (a reversal/contra) and write reversal_matched / internal_matched:
+    #   'bank_internal'     — bank ↔ Simplibank  (the normal recon; every legacy rule)
+    #   'bank_bank'         — bank ↔ bank         (a payout debit and its reversal credit)
+    #   'internal_internal' — Simplibank ↔ Simplibank (a dump debit and its reversing credit)
+    scope        = Column(String(30),  default="bank_internal")
 
 
 class ColumnMappingTemplate(Base):
@@ -1741,6 +1748,10 @@ def _run_migrations():
         "api_keys": [("allowed_ips", "VARCHAR(500)")],
         "partner_configs": [("settlement_carry_days", "INTEGER")],
         "users": [("allowed_products", "TEXT")],
+        # Per-rule side-pairing scope (Rajendra 2026-07-27). Existing rows ALTER-in
+        # as NULL → read as 'bank_internal' everywhere (coalesced); backfilled tidy
+        # in seed_match_rules so the whole column is non-NULL after first startup.
+        "match_rules": [("scope", "VARCHAR(30)")],
         # roadmap 1.6: data-quality profile on the 1.4 ingestion ledger
         "ingestion_events": [("dq_profile", "TEXT")],
         # Developer Portal request workflow (additive governance columns)
@@ -2019,6 +2030,14 @@ def seed_match_rules(db):
     # Lazy import (inside the function) avoids a circular import at module load.
     from core.matching_engine import DEFAULT_RULES as default_rules
     from models.database import MatchRule
+    # Backfill: rows that pre-date the `scope` column ALTER-in as NULL → set them to
+    # the historical behaviour. Idempotent (no NULLs remain after the first run).
+    try:
+        db.query(MatchRule).filter(MatchRule.scope.is_(None)).update(
+            {"scope": "bank_internal"}, synchronize_session=False)
+        db.commit()
+    except Exception:
+        db.rollback()
     for partner, rules in default_rules.items():
         existing = db.query(MatchRule).filter(MatchRule.partner == partner).first()
         if not existing:

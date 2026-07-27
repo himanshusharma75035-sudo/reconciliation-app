@@ -239,6 +239,7 @@ class MatchRuleIn(BaseModel):
     priority:     int
     match_fields: str   # JSON list: ["eko_tid", "tracking_number"]
     description:  Optional[str] = None
+    scope:        str = "bank_internal"   # bank_internal | bank_bank | internal_internal
 
 
 def _rule_out(r: MatchRule) -> dict:
@@ -250,6 +251,7 @@ def _rule_out(r: MatchRule) -> dict:
         "match_fields": json.loads(r.match_fields or "[]"),
         "is_active":    r.is_active,
         "description":  r.description,
+        "scope":        r.scope or "bank_internal",
         "created_at":   r.created_at.isoformat() if r.created_at else None,
     }
 
@@ -277,6 +279,8 @@ def create_match_rule(
             raise ValueError()
     except Exception:
         raise HTTPException(status_code=400, detail="match_fields must be a non-empty JSON array")
+    if (body.scope or "bank_internal") not in ("bank_internal", "bank_bank", "internal_internal"):
+        raise HTTPException(status_code=400, detail="scope must be bank_internal | bank_bank | internal_internal")
 
     rule = MatchRule(
         name=body.name,
@@ -285,6 +289,7 @@ def create_match_rule(
         match_fields=json.dumps(fields),
         is_active=True,
         description=body.description,
+        scope=(body.scope or "bank_internal"),
     )
     db.add(rule)
     db.commit()
@@ -306,11 +311,14 @@ def update_match_rule(
             raise ValueError()
     except Exception:
         raise HTTPException(status_code=400, detail="match_fields must be a non-empty JSON array")
+    if (body.scope or "bank_internal") not in ("bank_internal", "bank_bank", "internal_internal"):
+        raise HTTPException(status_code=400, detail="scope must be bank_internal | bank_bank | internal_internal")
     rule.name         = body.name
     rule.partner      = body.partner.lower()
     rule.priority     = body.priority
     rule.match_fields = json.dumps(fields)
     rule.description  = body.description
+    rule.scope        = (body.scope or "bank_internal")
     db.commit()
     db.refresh(rule)
     return _rule_out(rule)

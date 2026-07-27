@@ -44,6 +44,14 @@ Reviewers: cite this file by item number.
    Re-upload (replace)/force path is idempotent everywhere it is offered.
 5. **`_normalize` float canonicalization** (`core/matching_engine.py`) — `700.0 → '700'`,
    else 2-decimal string. Amount-keyed rules (PG, Digikhata) depend on this exact string.
+   *(2026-07-27)* `MatchRule.scope` (default `bank_internal`) selects the side-pairing:
+   `bank_internal` feeds the unchanged cross loop; `bank_bank` / `internal_internal` are
+   applied by `_match_same_side_rules` AFTER the cross loop (net-zero contra: opposite
+   DR/CR, ±₹1, self-match-guarded, Guard A defer-until-opposite-side-exists + Guard B
+   don't-steal-an-open-opposite-key) and write `reversal_matched` / `internal_matched` so
+   same-side pairs never enter the bank-vs-internal `matched` totals. Every legacy rule is
+   `bank_internal`; `get_rules_for_partner` merges the default cross rules back when a
+   partner has NO persisted cross rule so a same-side rule can't disable cross matching.
 6. **`_build_key` returns None when ANY field is empty** — this is what lets fallback
    rules fire. Tolerating empties = over-matching.
 7. **Tolerances differ by engine on purpose** — ₹1 core/BBPS, exact E-Value, 0.01 SBI,

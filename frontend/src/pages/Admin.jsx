@@ -443,13 +443,14 @@ function RulesTab() {
   }
   useEffect(() => { load() }, [])
 
-  const blankForm = { name: '', partner: filter || '', priority: 1, match_fields: '[]', description: '' }
+  const blankForm = { name: '', partner: filter || '', priority: 1, match_fields: '[]', description: '', scope: 'bank_internal' }
 
   const startNew  = () => { setForm({...blankForm, partner: filter || ''}); setEditing('new') }
   const startEdit = (r) => {
     setForm({
       name: r.name, partner: r.partner, priority: r.priority,
-      match_fields: JSON.stringify(r.match_fields), description: r.description || ''
+      match_fields: JSON.stringify(r.match_fields), description: r.description || '',
+      scope: r.scope || 'bank_internal'
     })
     setEditing(r)
   }
@@ -508,6 +509,14 @@ function RulesTab() {
     return <Badge key={f} label={f.replace('_', ' ')} color={colors[f] || 'gray'} />
   }
 
+  // Side-pairing scope (Rajendra 2026-07-27). Same-side = net-zero opposite DR/CR.
+  const SCOPES = [
+    { value: 'bank_internal',     label: 'Bank ↔ Simplibank' },
+    { value: 'bank_bank',         label: 'Bank ↔ Bank' },
+    { value: 'internal_internal', label: 'Simplibank ↔ Simplibank' },
+  ]
+  const SCOPE_LABEL = Object.fromEntries(SCOPES.map(s => [s.value, s.label]))
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
@@ -550,6 +559,18 @@ function RulesTab() {
             </div>
           </div>
           <div className="mt-3">
+            <label className="text-xs font-medium text-gray-500 block mb-1">Match Direction</label>
+            <select className="select lg:w-64" value={form.scope || 'bank_internal'}
+              onChange={e => setForm(f => ({...f, scope: e.target.value}))}>
+              {SCOPES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+            </select>
+            {form.scope && form.scope !== 'bank_internal' && (
+              <p className="text-[11px] text-amber-600 mt-1">
+                Same-side rule: pairs an opposite debit + credit (reversal / net-zero); does not affect bank-vs-Simplibank totals.
+              </p>
+            )}
+          </div>
+          <div className="mt-3">
             <label className="text-xs font-medium text-gray-500 block mb-2">Match Fields — ALL must match for a hit</label>
             <div className="flex flex-wrap gap-2">
               {MATCH_FIELD_OPTIONS.map(field => {
@@ -589,7 +610,13 @@ function RulesTab() {
               {[...partnerRules].sort((a,b)=>a.priority-b.priority).map((r,i) => (
                 <div key={r.id} className={`flex items-center gap-3 p-2.5 rounded-lg border ${r.is_active ? 'border-gray-200 bg-gray-50' : 'border-gray-100 bg-gray-50 opacity-50'}`}>
                   <span className="text-xs font-bold text-gray-400 w-5 text-center">{r.priority}</span>
-                  <span className="text-sm font-medium text-gray-700 flex-1">{r.name}</span>
+                  <span className="text-sm font-medium text-gray-700 flex-1">{r.name}
+                    {r.scope && r.scope !== 'bank_internal' && (
+                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                        {SCOPE_LABEL[r.scope] || r.scope}
+                      </span>
+                    )}
+                  </span>
                   <div className="flex gap-1">{r.match_fields.map(fieldChip)}</div>
                   {r.description && <span className="text-xs text-gray-400 italic hidden lg:block">{r.description}</span>}
                   <div className="flex items-center gap-2">
