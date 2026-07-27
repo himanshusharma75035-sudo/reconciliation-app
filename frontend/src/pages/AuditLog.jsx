@@ -20,11 +20,15 @@ const ACTION_BADGE = {
   delete_selected:    'bg-red-50 text-red-700',
 }
 
-// action_type icons — visually separates app automation from human decisions
+// action_type icons — visually separates app automation from human decisions.
+// FALLBACK is used for any unrecognised actor type (e.g. 'system' repairs/config
+// tasks) so an unexpected value can NEVER crash the whole page render.
 const ACTION_TYPE_BADGE = {
-  app:   { label: '🤖 App',   cls: 'bg-gray-100 text-gray-500' },
-  human: { label: '👤 Human', cls: 'bg-amber-100 text-amber-700 font-semibold' },
+  app:    { label: '🤖 App',    cls: 'bg-gray-100 text-gray-500' },
+  human:  { label: '👤 Human',  cls: 'bg-amber-100 text-amber-700 font-semibold' },
+  system: { label: '⚙️ System', cls: 'bg-slate-100 text-slate-600' },
 }
+const ACTION_TYPE_FALLBACK = { label: '⚙️ System', cls: 'bg-slate-100 text-slate-600' }
 
 export default function AuditLog() {
   const [logs, setLogs]       = useState([])
@@ -140,7 +144,7 @@ export default function AuditLog() {
                 <tr><td colSpan={6} className="text-center py-10 text-gray-400">No audit events yet</td></tr>
               ) : (
                 logs.map(log => {
-                  const atBadge = ACTION_TYPE_BADGE[log.action_type || 'app']
+                  const atBadge = ACTION_TYPE_BADGE[log.action_type] || ACTION_TYPE_FALLBACK
                   return (
                   <tr key={log.id} className={`hover:bg-gray-50 border-b border-gray-50 ${log.action_type === 'human' ? 'bg-amber-50/30' : ''}`}>
                     <td className="table-td">
