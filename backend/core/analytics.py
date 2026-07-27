@@ -375,12 +375,41 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     totals["match_rate"] = _rate(totals)
     totals["other_statuses"] = other_t
 
+    # SBI Kiosk Bank/Int split: its recs are P02-result rows (single 'bank' side), so
+    # side_tx has no internal count. Source it from the raw SBI tables — bank statement
+    # rows vs BC transaction-report rows — over the same window. Additive only; NOT fed
+    # into totals/by_side/pair-dedup (headline numbers stay untouched).
+    _kiosk_bank = _kiosk_int = 0
+    if product in (None, "", "kiosk"):          # only compute when kiosk is in scope
+        def _sbi_count(model):
+            from sqlalchemy import func as _F
+            qq = db.query(_F.count(model.id)).filter(
+                model.txn_date.isnot(None), model.txn_date.like("20%"))
+            if date_from: qq = qq.filter(model.txn_date >= date_from)
+            if date_to:   qq = qq.filter(model.txn_date <= date_to)
+            return qq.scalar() or 0
+        try:
+            from models.database import SBIBankTransaction, SBITxnReport
+            if side != "internal":              # honour the bank/internal side filter
+                _kiosk_bank = _sbi_count(SBIBankTransaction)
+            if side != "bank":
+                _kiosk_int = _sbi_count(SBITxnReport)
+        except Exception:
+            pass
+
+    def _side_tx(container, key, is_kiosk):
+        # kiosk sides come from the SBI source tables (above); everyone else from side_tx.
+        if is_kiosk:
+            return _kiosk_bank, _kiosk_int
+        d = container.get(key, {})
+        return d.get("bank", 0), d.get("internal", 0)
+
     by_product_list = sorted(
         ({"product": p, "label": prod_meta[p][2],
           "group": prod_meta[p][0], "group_label": prod_meta[p][1],
           **v, "transactions": _total(v), "match_rate": _rate(v),
-          "bank_transactions": side_tx_p.get(p, {}).get("bank", 0),
-          "internal_transactions": side_tx_p.get(p, {}).get("internal", 0),
+          "bank_transactions": _side_tx(side_tx_p, p, p == "sbi_kiosk")[0],
+          "internal_transactions": _side_tx(side_tx_p, p, p == "sbi_kiosk")[1],
           "other_statuses": other_p.get(p, {})}
          for p, v in by_product.items()),
         key=lambda x: (x["group_label"], -x["transactions"]))
@@ -388,8 +417,8 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     by_group_list = sorted(
         ({"group": g, "label": group_meta[g], **v,
           "transactions": _total(v), "match_rate": _rate(v),
-          "bank_transactions": side_tx_g.get(g, {}).get("bank", 0),
-          "internal_transactions": side_tx_g.get(g, {}).get("internal", 0),
+          "bank_transactions": _side_tx(side_tx_g, g, g == "kiosk")[0],
+          "internal_transactions": _side_tx(side_tx_g, g, g == "kiosk")[1],
           "other_statuses": other_g.get(g, {})}
          for g, v in by_group.items()),
         key=lambda x: -x["transactions"])

@@ -128,8 +128,10 @@ export default function Reports() {
   // (max 31 dates with data); neither → the latest date with data.
   const [opBusy, setOpBusy] = useState('')
   const downloadOperatorWorkbook = async (kind) => {
-    const path  = kind === 'recon' ? '/sbi/reports/reconciliation' : '/sbi/reports/source-match'
-    const label = kind === 'recon' ? 'Reconciliation_Report' : 'Source_Files_Match_Status'
+    const path = { recon: '/sbi/reports/reconciliation', src: '/sbi/reports/source-match',
+                   all: '/sbi/reports/all-entries' }[kind]
+    const label = { recon: 'Reconciliation_Report', src: 'Source_Files_Match_Status',
+                    all: 'SBI_All_Entries' }[kind]
     const { from_date: f, to_date: t } = filters
     const params = new URLSearchParams()
     if (f && t && f !== t) { params.append('date_from', f); params.append('date_to', t) }
@@ -867,6 +869,8 @@ export default function Reports() {
                   desc: 'Bank-statement-centric: every bank row annotated with the source product it matched, plus unmatched (both sides) and duplicate/reversal sheets.' },
                 { k: 'src', label: 'Source Match Report',
                   desc: 'Source-file-centric: per product matched / unmatched split by Success vs Failure, plus the Limit & Settlement sheet.' },
+                { k: 'all', label: 'All Entries (Bank vs Internal)',
+                  desc: 'One sheet: every bank row and every internal row (Txn Reports + KO Withdrawals) with each row’s recon status, process and counterpart. Single day or a date range.' },
               ].map(({ k, label, desc }) => (
                 <button key={k} onClick={() => downloadOperatorWorkbook(k)} disabled={!!opBusy}
                   className="border border-gray-100 rounded-lg p-3 text-left hover:border-primary/40 hover:shadow-sm transition-all group disabled:opacity-50">

@@ -2232,6 +2232,69 @@ def sbi_source_match_report(
                  "X-Recon-Date": str(d), "Access-Control-Expose-Headers": "X-Recon-Date"})
 
 
+def _build_sbi_all_entries(db, dates, current_user) -> io.BytesIO:
+    """One 'All Entries' sheet: every BANK row and every INTERNAL row (Txn Reports + KO
+    Withdrawals) across the given business dates, each with its recon status, process and
+    counterpart. Rows are the per-date unified view concatenated (never crosses a date
+    boundary — same guarantee as the operator-workbook range builders). Plus a
+    'Status Counts' summary sheet."""
+    cols = ["date", "side", "source", "ref", "ko_csp", "amount", "drcr", "status",
+            "process", "counterpart", "also_p03", "src_code", "src_note", "narration"]
+    all_rows, sc = [], {}
+    for d in dates:
+        res = get_unified(recon_date=d, upload_date=None, side=None, status=None,
+                          process=None, search=None, page=1, page_size=10 ** 9,
+                          db=db, current_user=current_user)
+        all_rows += res.get("rows", [])
+        for k, v in (res.get("status_counts") or {}).items():
+            sc[k] = sc.get(k, 0) + v
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as w:
+        _sheet(w, "All Entries", all_rows, cols)
+        _sheet(w, "Status Counts",
+               [{"status": k, "entries": v} for k, v in sorted(sc.items(), key=lambda x: -x[1])],
+               ["status", "entries"])
+    out.seek(0)
+    return out
+
+
+@router.get("/reports/all-entries")
+def sbi_all_entries_report(
+    recon_date: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """One sheet: ALL bank-side rows vs ALL internal rows (Txn Reports + KO Withdrawals)
+    with each row's recon status/process/counterpart. Single date (recon_date, latest
+    with data as fallback) OR a date range (date_from/date_to → concatenated, max 31 days).
+    Covers the full bank↔internal match universe (P01/P02/P03); the P04 wallet-balance
+    sources (KO Deposits / Cash Holding / Limit Failures) have no bank counterpart and are
+    not listed."""
+    if date_from or date_to:
+        dates = _resolve_workbook_dates(db, date_from, date_to)
+        if not dates:
+            raise HTTPException(status_code=404, detail="No SBI data in the selected date range")
+        tag = dates[0] if len(dates) == 1 else f"{dates[0]}_to_{dates[-1]}"
+    else:
+        # single date: use it if it has any SBI data, else the latest date that does
+        if recon_date and _resolve_workbook_dates(db, recon_date, recon_date):
+            d = recon_date
+        else:
+            d = max((x for x in (
+                db.query(func.max(m.txn_date)).filter(m.txn_date.like("20%")).scalar()
+                for m in (SBIBankTransaction, SBITxnReport, SBIKOLimits)) if x), default=None)
+        if not d:
+            raise HTTPException(status_code=404, detail="No SBI data to report on")
+        dates, tag = [d], d
+    out = _build_sbi_all_entries(db, dates, current_user)
+    return StreamingResponse(
+        out, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="SBI_All_Entries_{tag}.xlsx"',
+                 "X-Recon-Date": str(tag), "Access-Control-Expose-Headers": "X-Recon-Date"})
+
+
 # ── Run all four processes in sequence (QoL orchestration — same code paths) ──
 
 def _run_all_dates(db, current_user, dates):
