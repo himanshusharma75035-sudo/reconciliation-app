@@ -1713,7 +1713,8 @@ def confirm_mapping(
     # Bidirectional: uploading the bank triggers matching against existing internal rows,
     # and vice versa. This ensures correct matching regardless of upload order.
     auto_recon_results = {}
-    from core.matching_engine import run_reconciliation
+    bank_reversal_results = {}
+    from core.matching_engine import run_reconciliation, run_bank_reversal_match
     _recon_pairs = set((t.partner, t.recon_date) for t in txns if t.row_type == "txn" and t.recon_date)
 
     # Run auto-recon for EVERY uploaded pair where the counterpart side already exists
@@ -1741,6 +1742,13 @@ def confirm_mapping(
                     "match_rate":         match_rate,
                     "alert":              match_rate < 85,   # flag low match rate
                 }
+                # Bank-side refund netting — runs HERE, immediately after (and only
+                # when) run_reconciliation ran, so genuine bank↔internal matches win
+                # first. Both self-guarded (see run_bank_reversal_match). Fires on
+                # bank AND internal triggers. Mirrored in core/ingest_service.py.
+                br = run_bank_reversal_match(p, d, db, current_user.id)
+                if br.get("bank_reversal_matched", 0) > 0:
+                    bank_reversal_results[f"{p}/{d}"] = br
             except Exception as _e:
                 logger.warning(f"routes/upload.py: {_e}")  # recon errors don't block the upload response
 
@@ -1941,6 +1949,7 @@ def confirm_mapping(
         "neft_d1_auto": neft_d1_results if is_internal_side else {},
         "cross_date_auto": cross_date_results,
         "reversal_auto": reversal_results if is_bank_side else {},
+        "bank_reversal_auto": bank_reversal_results,
         # Re-ingested rows flagged as 'duplicate' (per partner/side), if any
         "duplicate_flagged": duplicate_results,
         # AS=SD integrity warnings (non-blocking)
@@ -2360,7 +2369,7 @@ def clear_data(
     # If the deleted side had no surviving counterpart data, this is a no-op.
     auto_recon_results = {}
     if affected_pairs:
-        from core.matching_engine import run_reconciliation
+        from core.matching_engine import run_reconciliation, run_bank_reversal_match
         for (p, d) in sorted(affected_pairs):
             try:
                 has_bank = db.query(Transaction.id).filter(
@@ -2376,6 +2385,7 @@ def clear_data(
                 if has_bank and has_dump:
                     r = run_reconciliation(p, d, db, current_user.id)
                     auto_recon_results[f"{p}/{d}"] = r.get("matched", 0)
+                    run_bank_reversal_match(p, d, db, current_user.id)  # self-guarded; net refund round trips
             except Exception as _e:
                 logger.warning(f"routes/upload.py: {_e}")  # Audit log
     try:

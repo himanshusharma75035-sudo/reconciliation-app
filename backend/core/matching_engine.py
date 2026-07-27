@@ -737,6 +737,109 @@ def run_reversal_match(partner: str, recon_date: str, db: Session, user_id: str)
     return {"reversal_matched": matched_count}
 
 
+def run_bank_reversal_match(partner: str, recon_date: str, db: Session, user_id: str) -> Dict:
+    """
+    Bank-side refund/reversal netting (the mirror of run_internal_match's Pass 2,
+    applied on the BANK side).
+
+    A refunded transaction appears on the bank statement as a DEBIT (money out) and
+    a matching CREDIT (money back) carrying the SAME tracking number and equal amount
+    — a net-zero round trip. When neither leg matched the internal ledger (e.g. the
+    debit's narration carries a customer NAME instead of an Eko TID, so the TID rules
+    can't fire, and the internal legs already self-matched as a refund), both bank
+    legs sit 'unmatched' even though they cancel out.
+
+    Pair a still-unmatched bank DR with a still-unmatched bank CR sharing the same
+    tracking_number, opposite dr_cr, amount within ₹1 → both reversal_matched with a
+    shared match_id. row_type is IGNORED on purpose: a refund credit is often
+    classified 'settlement_credit' (its narration credits the settlement account) yet
+    is really the reversal of the same-tracking debit.
+
+    Two safety guards make this correct at EVERY call site, independent of upload
+    order (bank-first or internal-first) — both proven necessary by adversarial review:
+      * Guard A — defer until the internal ledger for this date exists, so genuine
+        bank↔internal matching (run_reconciliation) has actually had its chance. On a
+        bank-first upload the internal side is absent → net nothing (else a real debit
+        gets locked into a reversal and is invisible to the later dump, which loads
+        only 'unmatched' rows).
+      * Guard B — never net a tracking that an OPEN (unmatched) internal row still
+        carries on ANY date. That debit may legitimately belong to the internal ledger
+        (e.g. its refund landed on another date so it never self-matched) — leave it
+        for the cross-date / NEFT D+1 passes rather than stealing it into a reversal.
+
+    Because it acts on 'unmatched' bank rows exclusively, it can never disturb matched
+    pairs, human src_assigned rows, or genuine settlement inflows (auto-closed
+    'fund_transfer', not 'unmatched'). Same recon_date for the two bank legs.
+    [Added 2026-07-27 with finance-ops sign-off — axis AePS-cashout refunds were
+    showing both legs open. See docs/skills.md.]
+    """
+    # Guard A — internal side for this date must exist first (see docstring).
+    if not db.query(Transaction.id).filter(
+        Transaction.partner == partner, Transaction.side == "internal",
+        Transaction.recon_date == recon_date,
+    ).first():
+        return {"bank_reversal_matched": 0}
+
+    _NULLK = {"", "\\n", "null", "none", "na", "n/a"}
+    rows = db.query(Transaction).filter(
+        Transaction.partner == partner,
+        Transaction.side == "bank",
+        Transaction.recon_date == recon_date,
+        Transaction.recon_status == ReconStatus.unmatched,
+        Transaction.tracking_number.isnot(None),
+        Transaction.dr_cr.isnot(None),
+    ).all()
+    if not rows:
+        return {"bank_reversal_matched": 0}
+
+    # Guard B — trackings still carried by an OPEN internal row (any date). A bank
+    # leg whose tracking is in this set may still match the internal ledger, so it
+    # must NOT be netted into a bank-side reversal.
+    open_internal_trk = {
+        _normalize(t or "")
+        for (t,) in db.query(Transaction.tracking_number).filter(
+            Transaction.partner == partner,
+            Transaction.side == "internal",
+            Transaction.recon_status == ReconStatus.unmatched,
+            Transaction.tracking_number.isnot(None),
+        ).all()
+    }
+
+    # group by normalised tracking — the placeholder/null trap: a blank/sentinel
+    # tracking must never become a grouping key (see the reversal-grouping lesson).
+    by_key: Dict[str, list] = {}
+    for t in rows:
+        key = _normalize(t.tracking_number or "")
+        if key and key not in _NULLK:
+            by_key.setdefault(key, []).append(t)
+
+    seq = _next_seq(partner, recon_date, db)
+    matched_count = 0
+    for key, group in by_key.items():
+        if key in open_internal_trk:
+            continue   # Guard B — leave for genuine (possibly cross-date) matching
+        debits  = [r for r in group if (r.dr_cr or "").strip().upper() == "DR"]
+        credits = [r for r in group if (r.dr_cr or "").strip().upper() == "CR"]
+        used_cr: set = set()
+        for dr in debits:
+            for cr in credits:
+                if cr.id in used_cr:
+                    continue
+                if abs((dr.amount or 0) - (cr.amount or 0)) <= 1.0:
+                    mid = _make_match_id(partner, recon_date, seq)
+                    seq += 1
+                    for row, other in ((dr, cr), (cr, dr)):
+                        row.recon_status    = ReconStatus.reversal_matched
+                        row.matched_with_id = other.id
+                        row.match_id        = mid
+                    used_cr.add(cr.id)
+                    matched_count += 1
+                    break
+    if matched_count:
+        db.commit()
+    return {"bank_reversal_matched": matched_count}
+
+
 def run_internal_match(partner: str, recon_date: str, db: Session, user_id: str) -> Dict:
     """
     Internal-to-Internal matching.

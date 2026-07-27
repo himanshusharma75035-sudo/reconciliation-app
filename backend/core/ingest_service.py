@@ -546,6 +546,7 @@ def _ingest_dataframe_inner(
 
     # ── Auto-recon: runs after BOTH bank AND internal uploads ─────────────────
     auto_recon_results = {}
+    bank_reversal_results = {}
     neft_d1_results    = {}
     if do_auto_recon:
         from core.matching_engine import run_reconciliation, run_neft_d1_match
@@ -559,6 +560,13 @@ def _ingest_dataframe_inner(
                         "unmatched_bank":      r["unmatched_bank"],
                         "unmatched_internal":  r["unmatched_internal"],
                     }
+                    # Bank-side refund netting — immediately after (and only when)
+                    # run_reconciliation ran, both triggers. Self-guarded. Mirrors
+                    # routes/upload.py (contract #10).
+                    from core.matching_engine import run_bank_reversal_match
+                    br = run_bank_reversal_match(p, d, db, user_id)
+                    if br.get("bank_reversal_matched", 0) > 0:
+                        bank_reversal_results[f"{p}/{d}"] = br
                 except Exception:
                     pass
                 if is_internal_side:   # NEFT D+1 only makes sense after internal upload
@@ -657,5 +665,6 @@ def _ingest_dataframe_inner(
         "auto_recon":              auto_recon_results if is_internal_side else {},
         "neft_d1_auto":            neft_d1_results    if is_internal_side else {},
         "reversal_auto":           reversal_results   if is_bank_side     else {},
+        "bank_reversal_auto":      bank_reversal_results,
         "duplicate_flagged":       duplicate_results,
     }

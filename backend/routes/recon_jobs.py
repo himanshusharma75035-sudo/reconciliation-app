@@ -31,12 +31,16 @@ class RunAsyncIn(BaseModel):
 
 def _run_recon_worker(partner: str, dates: list, user_id: str) -> dict:
     """Runs in a background thread with its own DB session."""
-    from core.matching_engine import run_reconciliation
+    from core.matching_engine import run_reconciliation, run_bank_reversal_match
     db = SessionLocal()
     try:
         out = {"partner": partner, "dates": [], "total_matched": 0}
         for d in dates:
             r = run_reconciliation(partner, d, db, user_id)
+            try:
+                run_bank_reversal_match(partner, d, db, user_id)  # self-guarded; nets refund round trips
+            except Exception:
+                pass
             out["dates"].append({"date": d, "matched": r.get("matched", 0)})
             out["total_matched"] += r.get("matched", 0)
         return out

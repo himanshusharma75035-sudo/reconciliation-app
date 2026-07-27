@@ -29,7 +29,14 @@ Do not "fix" these casually in a drive-by PR; open an issue and get sign-off fir
 
 - **Match-ID prefix/sequence quirks** — interbank pass scans `INT-` but mints `IBT-` IDs;
   internal self-match series naming is inconsistent. Existing IDs are audit references;
-  changing the scheme retroactively breaks them.
+  changing the scheme retroactively breaks them. Also: `_next_seq` resolves the prefix
+  WITH the db (so it can read `PartnerConfig.match_prefix`) but `_make_match_id` resolves
+  it WITHOUT the db (`partner[:3].upper()` fallback). For an admin-added partner whose
+  `match_prefix` ≠ `slug[:3].upper()`, the two disagree: `_next_seq` scans an always-empty
+  series and every pass reissues seq 1, so IDs collide. Affects only custom-prefix admin
+  partners (all shipped partners resolve identically, e.g. axis→AXI); latent across every
+  pass. Fix = give `_make_match_id` the db, but that touches all passes → needs its own
+  characterization first.
 - **NEFT D+1 ignores amount** despite its docstring (see behavior contract #8).
 - **Three ageing-bucket definitions** disagree slightly between dashboard, Open Items and
   Excel export (contract #19).

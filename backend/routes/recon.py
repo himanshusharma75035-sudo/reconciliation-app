@@ -83,6 +83,14 @@ def run_recon(req: RunReconRequest, db: Session = Depends(get_db),
               current_user: User = Depends(require_permission("run_recon"))):
     check_product_access(db, current_user, req.partner)
     result = run_reconciliation(req.partner, req.recon_date, db, current_user.id)
+    # Bank-side reversal netting: refund round trips (DR out + CR back, same tracking,
+    # net zero) that neither leg matched to internal. Runs AFTER run_reconciliation so
+    # genuine bank↔internal matches always win; only leftover round trips are netted.
+    try:
+        from core.matching_engine import run_bank_reversal_match
+        result.update(run_bank_reversal_match(req.partner, req.recon_date, db, current_user.id))
+    except Exception:
+        pass
     # Cross-date RRN pass (QR T+1): pairs split across recon dates — scoped partners only.
     try:
         from core.matching_engine import run_cross_date_rrn_match, CROSS_DATE_RRN_PARTNERS
@@ -125,10 +133,15 @@ def run_recon_range(req: RunRangeRequest, db: Session = Depends(get_db),
     ).distinct().order_by(Transaction.recon_date).all()
     dates = [d[0] for d in dates if d[0]]
 
+    from core.matching_engine import run_bank_reversal_match
     results = []
     total_matched = 0
     for date in dates:
         r = run_reconciliation(req.partner, date, db, current_user.id)
+        try:
+            run_bank_reversal_match(req.partner, date, db, current_user.id)  # self-guarded; nets refund round trips
+        except Exception:
+            pass
         total_matched += r.get("matched", 0)
         results.append({"date": date, "matched": r.get("matched", 0),
                         "unmatched_bank": r.get("unmatched_bank", 0),
