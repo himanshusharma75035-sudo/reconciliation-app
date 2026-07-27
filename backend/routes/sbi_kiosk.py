@@ -8,7 +8,7 @@ SBI Kiosk Banking — Full Reconciliation Module (4 Processes)
 
 P01 — SBI Settlement Reconciliation
    KO Limits Config (KO Withdrawal) ↔ Bank Statement (EKOSETTLEMENT)
-   Match per KO ID; surface CREDITED / PENDING / PARTIAL
+   Match each withdrawal by amount + the settlement's deduct (business) date; per KO → matched / unmatched
 
 P02 — Bank Statement & Transaction Report Reconciliation
    7 Transaction Report files ↔ Bank Statement
@@ -185,7 +185,12 @@ def _sbi_business_dates(db):
     'reconcile all dates' orchestration so a single bulk upload reconciles each day it
     contains — instead of everything collapsing under one upload-batch recon_date."""
     dates = set()
-    for col in (SBIBankTransaction.txn_date, SBITxnReport.txn_date):
+    # Include KO-Limits business dates and settlement DEDUCT dates: a D+1 settlement's
+    # original business date may have no bank/txn rows of its own, but P01 must still
+    # reconcile it there (match by deduct_date). Without these, "reconcile all dates"
+    # would skip that day.
+    for col in (SBIBankTransaction.txn_date, SBITxnReport.txn_date,
+                SBIBankTransaction.deduct_date, SBIKOLimits.txn_date):
         for (d,) in db.query(col).filter(col.isnot(None)).distinct().all():
             if d and len(d) >= 10 and d[:4].isdigit():
                 dates.add(d[:10])
@@ -358,9 +363,15 @@ async def upload_bank_statement(
         SBIBankTransaction.upload_date == today,
         SBIBankTransaction.is_settlement == True
     ).count()
-    # Reconcile only the business dates this statement actually contains (efficient +
-    # correct); a re-upload re-reconciles just its own days.
-    auto_recon = _auto_run_after_upload(db, current_user, dates=sorted(file_dates))
+    # Reconcile the business dates this statement contains — PLUS the settlement DEDUCT
+    # dates (a settlement posted today may belong to an earlier business date; P01 now
+    # matches by deduct_date, so its original date must be re-run to pick up the match).
+    settle_dd = {d for (d,) in db.query(SBIBankTransaction.deduct_date).filter(
+        SBIBankTransaction.upload_date == today,
+        SBIBankTransaction.is_settlement == True,
+        SBIBankTransaction.deduct_date.isnot(None),
+        SBIBankTransaction.deduct_date != '').distinct().all() if d}
+    auto_recon = _auto_run_after_upload(db, current_user, dates=sorted(set(file_dates) | settle_dd))
     return {
         "inserted": inserted,
         "settlement_rows": settlement_count,
@@ -761,86 +772,79 @@ def run_p01(
     current_user=Depends(require_permission("run_recon")),
 ):
     """
-    P01 — SBI Settlement Reconciliation.
-    Compares KO wallet withdrawals (KO Limits Config) against
-    bank settlement credits (EKOSETTLEMENT rows in bank statement).
-    Match key: KO ID. Handles D+1 via deduction_date field.
-    Statuses: CREDITED | PENDING | PARTIAL | EXCESS
-    """
-    # Source by the transaction's BUSINESS date (recon_date) — NOT the upload batch. The
-    # old `upload_date or today()` default silently reconciled "today's upload" regardless
-    # of the date the operator picked, so running on the wrong day wiped good results.
-    # Load KO Limits — KO Withdrawals (money leaving CSP wallet = settlement request)
-    ko_wdl_q = db.query(SBIKOLimits).filter(
-        SBIKOLimits.txn_type == 'KO Withdrawal',
-        SBIKOLimits.txn_date == recon_date,
-    )
-    ko_withdrawals = {}  # ko_id → total amount withdrawn
-    ko_dates = {}        # ko_id → txn_date
-    for r in ko_wdl_q.all():
-        ko_withdrawals[r.ko_id] = ko_withdrawals.get(r.ko_id, 0) + (r.amount or 0)
-        ko_dates[r.ko_id] = r.txn_date
+    P01 — SBI Settlement Reconciliation → **matched / unmatched** (finance-ops rule,
+    Rajendra 2026-07-27).
 
-    # Load bank settlement transactions (EKOSETTLEMENT filter) for this date
-    bank_settle_q = db.query(SBIBankTransaction).filter(
+    Each KO wallet withdrawal (KO Limits Config, business date = recon_date) is matched
+    to a bank settlement debit by EXACT amount (±0.01, the SBI tolerance) and the
+    settlement's DEDUCT date — the date inside the EKO DEDUCTION description — NOT the
+    bank's posting date. So a settlement that posts a day (or two) later still reconciles
+    on the original business date (fixes the old D+1 → PENDING+EXCESS artifact).
+
+    One result row per KO: 'matched' iff every withdrawal has a settlement AND no
+    settlement is left over (amounts pair up 1:1); otherwise 'unmatched' (some wallet
+    withdrawal not settled, some bank settlement with no withdrawal — e.g. the KO Limits
+    file for that date isn't uploaded, or a real short/excess). No PARTIAL/PENDING/EXCESS.
+    """
+    from collections import defaultdict
+    from sqlalchemy import or_, and_
+    # KO Withdrawals for this BUSINESS date (txn_date IS the deduct/business date).
+    wdl_by_ko = defaultdict(list)   # ko_id → [withdrawal amounts]
+    for r in db.query(SBIKOLimits).filter(
+        SBIKOLimits.txn_type == 'KO Withdrawal', SBIKOLimits.txn_date == recon_date).all():
+        if r.ko_id:
+            wdl_by_ko[r.ko_id].append(round(r.amount or 0, 2))
+
+    # Bank settlements whose DEDUCT date (from the description) is this business date —
+    # regardless of which day the bank posted them. Rows with no parseable deduct date
+    # fall back to their posting date so nothing is silently dropped.
+    setl_by_ko = defaultdict(list)  # ko_id → [(amount, posting_txn_date)]
+    for r in db.query(SBIBankTransaction).filter(
         SBIBankTransaction.is_settlement == True,
-        SBIBankTransaction.txn_date == recon_date,
-    )
-    bank_by_ko = {}      # ko_id → total bank settlement debit
-    bank_dates = {}      # ko_id → bank txn_date
-    bank_deduct = {}     # ko_id → wallet deduct_date (from description)
-    for r in bank_settle_q.all():
-        ko = r.ko_id
-        if not ko: continue
-        bank_by_ko[ko] = bank_by_ko.get(ko, 0) + (r.debit or 0)
-        bank_dates[ko] = r.txn_date
-        bank_deduct[ko] = r.deduct_date
+        or_(SBIBankTransaction.deduct_date == recon_date,
+            and_(or_(SBIBankTransaction.deduct_date.is_(None), SBIBankTransaction.deduct_date == ''),
+                 SBIBankTransaction.txn_date == recon_date))).all():
+        if r.ko_id:
+            setl_by_ko[r.ko_id].append((round(r.debit or 0, 2), r.txn_date))
 
     # WIPE-GUARD: nothing to reconcile for this date → do NOT delete existing results.
-    # (Running a date with no source data must never destroy a prior good reconciliation.)
-    if not ko_withdrawals and not bank_by_ko:
+    if not wdl_by_ko and not setl_by_ko:
         return {"recon_date": recon_date, "skipped": True,
                 "reason": "no P01 settlement source data for this date", "total_kos": 0}
     db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date).delete()
 
-    # All KOs that appear in either source
-    all_kos = set(ko_withdrawals.keys()) | set(bank_by_ko.keys())
+    TOL = 0.01
     results = []
-
-    for ko in all_kos:
-        wallet_amt = ko_withdrawals.get(ko, 0)
-        bank_amt   = bank_by_ko.get(ko, 0)
-        diff       = bank_amt - wallet_amt
-
-        if wallet_amt == 0 and bank_amt > 0:
-            status = 'EXCESS'          # bank credit with no wallet withdrawal (manual/error)
-        elif wallet_amt > 0 and bank_amt == 0:
-            status = 'PENDING'         # wallet withdrawn but no bank credit yet
-        elif abs(diff) < 0.01:
-            status = 'CREDITED'        # perfect match
-        else:
-            status = 'PARTIAL'         # amounts differ
-
-        result = SBIP01Result(
-            id              = generate_id(),
-            recon_date      = recon_date,
-            ko_id           = ko,
-            wallet_withdrawn= wallet_amt,
-            bank_settled    = bank_amt,
-            difference      = round(diff, 2),
-            status          = status,
-            deduct_date     = bank_deduct.get(ko, ''),
-            bank_txn_date   = bank_dates.get(ko, ''),
-            notes           = (
-                f"D+1 settlement (wallet deducted {bank_deduct.get(ko, '')}, settled {bank_dates.get(ko, '')})"
-                if bank_deduct.get(ko) and bank_deduct.get(ko) != bank_dates.get(ko) else ''
-            ),
-        )
-        db.add(result)
-        results.append(result)
-
+    for ko in set(wdl_by_ko) | set(setl_by_ko):
+        wdls  = sorted(wdl_by_ko.get(ko, []))
+        setls = sorted(setl_by_ko.get(ko, []), key=lambda x: x[0])
+        used  = [False] * len(setls)
+        unmatched_wdl = 0
+        for a in wdls:                                  # greedy 1:1 by amount
+            hit = next((i for i, (s, _td) in enumerate(setls)
+                        if not used[i] and abs(s - a) <= TOL), None)
+            if hit is not None:
+                used[hit] = True
+            else:
+                unmatched_wdl += 1
+        unmatched_setl = sum(1 for u in used if not u)
+        # matched only when BOTH sides pair up completely (and there was a withdrawal)
+        status = 'matched' if (wdls and unmatched_wdl == 0 and unmatched_setl == 0) else 'unmatched'
+        wallet_amt = round(sum(wdls), 2)
+        bank_amt   = round(sum(s for s, _ in setls), 2)
+        bank_td    = max((td for _, td in setls), default='') if setls else ''
+        results.append(SBIP01Result(
+            id=generate_id(), recon_date=recon_date, ko_id=ko,
+            wallet_withdrawn=wallet_amt, bank_settled=bank_amt,
+            difference=round(bank_amt - wallet_amt, 2), status=status,
+            deduct_date=recon_date, bank_txn_date=bank_td,
+            notes=(f"settled later ({bank_td}) — matched on business date {recon_date}"
+                   if status == 'matched' and bank_td and bank_td != recon_date else ''),
+        ))
+    for r in results:
+        db.add(r)
     db.commit()
-    summary = {s: sum(1 for r in results if r.status == s) for s in ('CREDITED', 'PENDING', 'PARTIAL', 'EXCESS')}
+    summary = {s: sum(1 for r in results if r.status == s) for s in ('matched', 'unmatched')}
     _audit(db, current_user, "sbi_run_p01", {"recon_date": recon_date, **summary})
     return {"recon_date": recon_date, "total_kos": len(results), "summary": summary}
 
@@ -1294,8 +1298,14 @@ def get_p01_lines(
         _g(w.ko_id)["withdrawals"].append({
             "amount": w.amount, "txn_date": w.txn_date, "datetime": w.txn_datetime,
             "configured_by": w.limit_configured_by})
+    from sqlalchemy import or_ as _or, and_ as _and
+    # Settlements belong to the BUSINESS date via their deduct_date (from the description),
+    # not the bank posting date — same key run_p01 matches on, so D+1 settlements show here.
     for s in db.query(SBIBankTransaction).filter(
-            SBIBankTransaction.is_settlement == True, SBIBankTransaction.txn_date == recon_date).all():
+            SBIBankTransaction.is_settlement == True,
+            _or(SBIBankTransaction.deduct_date == recon_date,
+                _and(_or(SBIBankTransaction.deduct_date.is_(None), SBIBankTransaction.deduct_date == ''),
+                     SBIBankTransaction.txn_date == recon_date))).all():
         if not s.ko_id or (wanted and s.ko_id not in wanted):
             continue
         _g(s.ko_id)["settlements"].append({
@@ -1440,8 +1450,10 @@ def get_p04_results(
 
 # ── Unified ledger — every bank & data entry + how each reconciled (P01/P02/P03) ──
 
-_P01_UNIFIED_STATUS = {"CREDITED": "Matched", "PENDING": "Pending",
-                       "PARTIAL": "Partial", "EXCESS": "Excess"}
+_P01_UNIFIED_STATUS = {"matched": "Matched", "unmatched": "Unmatched",
+                       # legacy statuses (pre-2026-07-27) fold into the two-state model
+                       "CREDITED": "Matched", "PENDING": "Unmatched",
+                       "PARTIAL": "Unmatched", "EXCESS": "Unmatched"}
 
 def _r(n) -> str:
     try:
@@ -1474,7 +1486,17 @@ def get_unified(
     Sources by the transaction's BUSINESS date (recon_date == txn_date), matching the runs.
     """
 
-    p01_by_ko = {x.ko_id: x for x in db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date).all()}
+    # P01 results indexed by (business_date, ko). A settlement posted on recon_date may
+    # belong to an EARLIER business date (its deduct_date) where its P01 match now lives,
+    # so load recon_date PLUS those deduct dates. Withdrawal side keys on recon_date;
+    # settlement side keys on the row's deduct_date.
+    _settle_dd = {d for (d,) in db.query(SBIBankTransaction.deduct_date).filter(
+        SBIBankTransaction.txn_date == recon_date, SBIBankTransaction.is_settlement == True,
+        SBIBankTransaction.deduct_date.isnot(None), SBIBankTransaction.deduct_date != '').distinct().all() if d}
+    p01_idx = {}
+    for x in db.query(SBIP01Result).filter(SBIP01Result.recon_date.in_({recon_date} | _settle_dd)).all():
+        p01_idx[(x.recon_date, x.ko_id)] = x
+    p01_by_ko = {k[1]: v for k, v in p01_idx.items() if k[0] == recon_date}
     p02_by_bank, p02_by_report = {}, {}
     for x in db.query(SBIP02Result).filter(SBIP02Result.recon_date == recon_date).all():
         if x.bank_txn_id:   p02_by_bank[x.bank_txn_id] = x
@@ -1508,7 +1530,8 @@ def get_unified(
         amt = (b.debit or 0) if (b.debit or 0) > 0 else (b.credit or 0)
         if b.is_settlement:
             e = _new("bank", "Bank Settlement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description)
-            r = p01_by_ko.get(b.ko_id)
+            # settlement reconciles under its business (deduct) date, not the posting date
+            r = p01_idx.get(((b.deduct_date or recon_date), b.ko_id))
             if r:
                 e.update(status=_P01_UNIFIED_STATUS.get(r.status, r.status), process="P01",
                          counterpart=f"Wallet out {_r(r.wallet_withdrawn)}", result_id=r.id,
@@ -1795,10 +1818,10 @@ def _proc_overview(p: str, recs: list) -> dict:
     """Per-process roll-up row for the Overview sheet."""
     total = len(recs)
     if p == "p01":
-        matched = sum(1 for r in recs if r.get("status") == "CREDITED")
+        matched = sum(1 for r in recs if r.get("status") == "matched")
         amt_all = sum(r.get("wallet_withdrawn") or 0 for r in recs)
-        amt_ok = sum(r.get("wallet_withdrawn") or 0 for r in recs if r.get("status") == "CREDITED")
-        note = "matched = CREDITED; amounts = wallet withdrawals"
+        amt_ok = sum(r.get("wallet_withdrawn") or 0 for r in recs if r.get("status") == "matched")
+        note = "matched = settlement found (by amount + description date); amounts = wallet withdrawals"
     elif p == "p04":
         matched = sum(1 for r in recs if r.get("action_required") == "NONE")
         amt_all = sum(abs(r.get("action_amount") or 0) for r in recs)
@@ -1899,7 +1922,7 @@ def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=Non
             _sheet(w, "P03 CSP-Txn-Bank", recs["p03"], _P03_XCOLS)
             _sheet(w, "P04 Wallet", recs["p04"], _P04_XCOLS)
             _sheet(w, "Exceptions P01",
-                   [r for r in recs["p01"] if r.get("status") != "CREDITED"], _P01_XCOLS)
+                   [r for r in recs["p01"] if r.get("status") != "matched"], _P01_XCOLS)
             _sheet(w, "Exceptions P02",
                    [r for r in recs["p02"] if r.get("match_status") not in ("Matched", "Manual_Matched")], _P02_XCOLS)
             _sheet(w, "Exceptions P03",
@@ -1922,7 +1945,7 @@ def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=Non
                    ["recon_date", "process", "match_key", "counterpart_ref", "remark", "by", "at"])
 
         elif t == "exceptions":
-            p01 = [r for r in _load_process_recs(db, "p01", rd, df_, dt_) if r.get("status") != "CREDITED"]
+            p01 = [r for r in _load_process_recs(db, "p01", rd, df_, dt_) if r.get("status") != "matched"]
             p02 = [r for r in _load_process_recs(db, "p02", rd, df_, dt_, with_bank_desc=True)
                    if r.get("match_status") not in ("Matched", "Manual_Matched")]
             p03 = [r for r in _load_process_recs(db, "p03", rd, df_, dt_)
@@ -1982,7 +2005,7 @@ def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=Non
                 a["bank_settled"] = round(a["bank_settled"] + (r.get("bank_settled") or 0), 2)
                 a["difference"] = round(a["difference"] + (r.get("difference") or 0), 2)
                 a["days"] += 1
-                a["days_credited"] += 1 if r.get("status") == "CREDITED" else 0
+                a["days_credited"] += 1 if r.get("status") == "matched" else 0
             all_kos = sorted(set(p01a) | set(p02a) | set(p03a))
             overview = []
             for k in all_kos:

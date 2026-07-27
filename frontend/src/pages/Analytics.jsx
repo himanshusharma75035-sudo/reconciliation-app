@@ -226,7 +226,10 @@ export default function Analytics({ standalone = false }) {
 
       {/* KPI cards */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-        <Kpi icon={BarChart3} tint="bg-slate-100 text-slate-600" label="Total transactions" value={Number(t.transactions || 0).toLocaleString('en-IN')} sub={`${daily.length} day(s)`} />
+        <Kpi icon={BarChart3} tint="bg-slate-100 text-slate-600" label="Total transactions" value={Number(t.transactions || 0).toLocaleString('en-IN')}
+             sub={Number(t.internal_transactions) > 0
+               ? `Bank ${Number(t.bank_transactions || 0).toLocaleString('en-IN')} · Int ${Number(t.internal_transactions || 0).toLocaleString('en-IN')}`
+               : `${daily.length} day(s)`} />
         <Kpi icon={CheckCircle2} tint="bg-emerald-100 text-emerald-600" label="Matched" value={Number(t.matched || 0).toLocaleString('en-IN')} sub={cr(t.matched_volume)} />
         <Kpi icon={XCircle} tint="bg-red-100 text-red-500" label="Unmatched (open)" value={Number(t.unmatched || 0).toLocaleString('en-IN')} sub={cr(t.open_volume)} />
         <Kpi icon={Percent} tint="bg-indigo-100 text-indigo-600" label="Match rate" value={`${t.match_rate || 0}%`} sub={t.mismatch ? `${t.mismatch} amount-mismatch` : 'both sides'} />
@@ -385,7 +388,14 @@ export default function Analytics({ standalone = false }) {
                         <tr className="border-b border-gray-100 bg-gray-50/40">
                           <td className="py-2 px-4 font-bold text-gray-800">{g.label}</td>
                           <td className="py-2 px-3 text-gray-400">{subLabel}</td>
-                          <td className="py-2 px-3 text-right tabular-nums font-semibold text-gray-700">{g.transactions.toLocaleString('en-IN')}</td>
+                          <td className="py-2 px-3 text-right tabular-nums font-semibold text-gray-700">
+                            {g.transactions.toLocaleString('en-IN')}
+                            {Number(g.internal_transactions) > 0 && (
+                              <div className="text-[10px] font-normal text-gray-400">
+                                Bank {Number(g.bank_transactions || 0).toLocaleString('en-IN')} · Int {Number(g.internal_transactions || 0).toLocaleString('en-IN')}
+                              </div>
+                            )}
+                          </td>
                           <td className="py-2 px-3 text-right tabular-nums text-emerald-600 font-bold">{g.matched.toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-red-500 font-semibold">{g.unmatched.toLocaleString('en-IN')}</td>
                           <td className="py-2 px-3 text-right tabular-nums text-amber-500">{g.mismatch.toLocaleString('en-IN')}</td>
@@ -399,7 +409,14 @@ export default function Analytics({ standalone = false }) {
                           <tr key={(p.product || p.process || i)} className="border-b border-gray-50 hover:bg-emerald-50/40">
                             <td className="py-1.5 px-4"></td>
                             <td className="py-1.5 px-3 text-gray-600 pl-6">↳ {p.label}</td>
-                            <td className="py-1.5 px-3 text-right tabular-nums text-gray-500">{Number(p.transactions).toLocaleString('en-IN')}</td>
+                            <td className="py-1.5 px-3 text-right tabular-nums text-gray-500">
+                              {Number(p.transactions).toLocaleString('en-IN')}
+                              {Number(p.internal_transactions) > 0 && (
+                                <div className="text-[10px] text-gray-400">
+                                  Bank {Number(p.bank_transactions || 0).toLocaleString('en-IN')} · Int {Number(p.internal_transactions || 0).toLocaleString('en-IN')}
+                                </div>
+                              )}
+                            </td>
                             <td className="py-1.5 px-3 text-right tabular-nums text-emerald-600">{Number(p.matched).toLocaleString('en-IN')}</td>
                             <td className="py-1.5 px-3 text-right tabular-nums text-red-400">{Number(p.unmatched).toLocaleString('en-IN')}</td>
                             <td className="py-1.5 px-3 text-right tabular-nums text-amber-400">{Number(p.mismatch).toLocaleString('en-IN')}</td>

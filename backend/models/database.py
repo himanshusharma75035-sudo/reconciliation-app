@@ -1039,8 +1039,8 @@ class SBIP01Result(Base):
     wallet_withdrawn= Column(MONEY, default=0)    # from KO Limits Config KO Withdrawal
     bank_settled    = Column(MONEY, default=0)    # from Bank Statement EKOSETTLEMENT
     difference      = Column(MONEY, default=0)
-    status          = Column(String(20))          # CREDITED / PENDING / PARTIAL / EXCESS
-    deduct_date     = Column(String(10))          # D-1 date extracted from bank description
+    status          = Column(String(20))          # matched / unmatched (since 2026-07-27)
+    deduct_date     = Column(String(10))          # business date (from bank description); P01 matches on this
     bank_txn_date   = Column(String(10))          # actual bank statement date
     notes           = Column(Text)
     created_at      = Column(DateTime, default=datetime.datetime.utcnow)
@@ -2017,6 +2017,25 @@ def seed_bank_format_presets(db):
         if not exists:
             db.add(BankFormatPreset(**p))
     db.commit()
+
+
+def migrate_sbi_p01_statuses(db):
+    """One-time relabel of legacy P01 settlement statuses to the two-state model
+    (matched / unmatched), effective 2026-07-27. Idempotent — after the first run no
+    legacy value remains, so it is a no-op. run_p01 also recomputes each date it runs;
+    this covers dates whose source files were cleared and can no longer be re-run, and
+    guarantees NO consumer ever sees a stale CREDITED/PENDING/PARTIAL/EXCESS."""
+    from models.database import SBIP01Result
+    try:
+        n1 = db.query(SBIP01Result).filter(SBIP01Result.status == "CREDITED").update(
+            {"status": "matched"}, synchronize_session=False)
+        n2 = db.query(SBIP01Result).filter(
+            SBIP01Result.status.in_(["PENDING", "PARTIAL", "EXCESS"])).update(
+            {"status": "unmatched"}, synchronize_session=False)
+        if n1 or n2:
+            db.commit()
+    except Exception:
+        db.rollback()
 
 
 def seed_match_rules(db):

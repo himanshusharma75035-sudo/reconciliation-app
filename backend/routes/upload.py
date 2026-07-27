@@ -2567,6 +2567,12 @@ def delete_rows(
         datecol = {"bank": SBIBankTransaction.txn_date, "txn": SBITxnReport.txn_date,
                    "ko_limits": SBIKOLimits.txn_date}[table]
         sbi_dates = {d for (d,) in q.with_entities(datecol).distinct().all() if d}
+        if table == "bank":
+            # deleted settlement rows may belong to an earlier business date (deduct_date);
+            # P01 matches by deduct_date, so re-run those original dates too.
+            sbi_dates |= {d for (d,) in q.with_entities(SBIBankTransaction.deduct_date)
+                          .filter(SBIBankTransaction.deduct_date.isnot(None),
+                                  SBIBankTransaction.deduct_date != '').distinct().all() if d}
 
     deleted = recycle_bin.soft_delete(
         db, q, model, module=module, user=current_user.username,

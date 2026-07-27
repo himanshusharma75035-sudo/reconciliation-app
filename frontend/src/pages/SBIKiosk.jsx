@@ -18,10 +18,13 @@ function today() { return new Date().toISOString().split('T')[0] }
 // explains what the status actually means (incl. the common "file not uploaded" cases).
 const META = {
   p01: {
-    CREDITED: { label: 'Settled',        tone: 'green',  hint: 'Wallet withdrawal is fully matched by the bank settlement credit.' },
-    PENDING:  { label: 'Awaiting bank',  tone: 'amber',  hint: 'Wallet was withdrawn but no bank settlement appears yet — D+1 timing, or the bank statement for this date isn’t uploaded.' },
-    PARTIAL:  { label: 'Amount differs', tone: 'orange', hint: 'Wallet total and bank-settled total don’t match for this KO.' },
-    EXCESS:   { label: 'Bank extra',     tone: 'purple', hint: 'Bank settled with no matching wallet withdrawal — usually the KO Limits file wasn’t uploaded for this date.' },
+    matched:   { label: 'Matched',   tone: 'green', hint: 'Every wallet withdrawal for this operator matched a bank settlement of the same amount, on its business date (even if the bank posted it a day or two later).' },
+    unmatched: { label: 'Unmatched', tone: 'red',   hint: 'A withdrawal with no matching settlement (not settled yet, or the KO Limits file for that date isn’t uploaded), or a bank settlement with no withdrawal.' },
+    // legacy statuses fold into the two-state model (for any pre-migration rows)
+    CREDITED:  { label: 'Matched',   tone: 'green', hint: '' },
+    PENDING:   { label: 'Unmatched', tone: 'red',   hint: '' },
+    PARTIAL:   { label: 'Unmatched', tone: 'red',   hint: '' },
+    EXCESS:    { label: 'Unmatched', tone: 'red',   hint: '' },
   },
   p02: {
     Matched:        { label: 'Matched',        tone: 'green',  hint: 'Bank line and transaction-report line agree on the 20-digit reference.' },
@@ -500,7 +503,7 @@ function P01Tab({ reconDate, setReconDate }) {
     setRunning(true)
     try {
       const { data: r } = await api.post('/sbi/run/p01', null, { params: { recon_date: reconDate } })
-      toast.success(`P01 complete: ${r.summary.CREDITED || 0} settled, ${r.summary.PENDING || 0} awaiting bank`)
+      toast.success(`P01 complete: ${r.summary.matched || 0} matched, ${r.summary.unmatched || 0} unmatched`)
       loadResults()
     } catch (err) { toast.error(err.response?.data?.detail || 'P01 failed') }
     finally { setRunning(false) }
@@ -531,8 +534,9 @@ function P01Tab({ reconDate, setReconDate }) {
   }, [reconDate, statusFilter, koSearch])
   useEffect(() => { if (viewMode === 'lines') loadLines() }, [viewMode, loadLines])
 
-  // status counts for the cards (from the loaded rows — P01 returns the full set)
-  const counts = {}
+  // status counts for the cards (from the loaded rows — P01 returns the full set).
+  // Seed both states so the two cards always render (a zero bucket still shows).
+  const counts = { matched: 0, unmatched: 0 }
   ;(data?.rows || []).forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1 })
   const g = data?.grand || {}
 

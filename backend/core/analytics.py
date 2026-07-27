@@ -100,7 +100,9 @@ def _kiosk_processes(db, date_from=None, date_to=None):
     # (label, model, status column, amount column, status→bucket map)
     specs = [
         ("P01 · Settlement",     SBIP01Result, SBIP01Result.status,         SBIP01Result.bank_settled,
-         {"credited": "matched", "pending": "unmatched", "partial": "mismatch", "excess": "other"}),
+         # two-state since 2026-07-27; legacy values folded for old rows
+         {"matched": "matched", "unmatched": "unmatched",
+          "credited": "matched", "pending": "unmatched", "partial": "unmatched", "excess": "unmatched"}),
         ("P02 · Bank ↔ Txn",     SBIP02Result, SBIP02Result.match_status,    SBIP02Result.bank_amount,
          # a reversal is a net-zero DR+CR pair → reconciled, counted as matched (Kiosk decision)
          {"matched": "matched", "unmatched": "unmatched", "partial": "mismatch", "reversal": "matched"}),
@@ -325,6 +327,11 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     # status-composition of the 'other' bucket, per group / product / overall — so the
     # dashboard can show WHY those rows aren't matched or open (Failed, Duplicate, Fee, …).
     other_g, other_p, other_t = {}, {}, {}
+    # Per-side raw transaction counts (BOTH legs, before the pair-dedup below) so the
+    # Transactions column can show bank-side AND internal-side totals, not just the
+    # deduped pair count. Additive only — the headline `transactions` is unchanged.
+    side_tx_t = {"bank": 0, "internal": 0}
+    side_tx_p, side_tx_g = {}, {}
     for prod, sd, d, status, cnt, amt in recs:
         products.add(prod)
         if prod not in prod_meta:
@@ -334,6 +341,11 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         b = _bucket(status)
         # by_side always sees BOTH legs — the "bank vs internal" chart is about exactly that.
         _apply(by_side_map.setdefault(sd, _blank()), b, cnt, amt)
+        # Count both legs on their true side (pre-dedup) for the per-side breakdown.
+        sk = "internal" if sd == "internal" else "bank"
+        side_tx_t[sk] += cnt
+        side_tx_p.setdefault(prod, {"bank": 0, "internal": 0})[sk] += cnt
+        side_tx_g.setdefault(g, {"bank": 0, "internal": 0})[sk] += cnt
         # A matched / amount-mismatch PAIR is ONE transaction represented by two rows —
         # a bank leg and an internal leg. Count it ONCE (the bank leg) in every headline
         # figure so counts and volume aren't doubled. Unmatched legs are distinct orphans
@@ -358,6 +370,8 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         return bag["matched"] + bag["unmatched"] + bag["mismatch"] + bag["other"]
 
     totals["transactions"] = _total(totals)
+    totals["bank_transactions"] = side_tx_t["bank"]
+    totals["internal_transactions"] = side_tx_t["internal"]
     totals["match_rate"] = _rate(totals)
     totals["other_statuses"] = other_t
 
@@ -365,6 +379,8 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         ({"product": p, "label": prod_meta[p][2],
           "group": prod_meta[p][0], "group_label": prod_meta[p][1],
           **v, "transactions": _total(v), "match_rate": _rate(v),
+          "bank_transactions": side_tx_p.get(p, {}).get("bank", 0),
+          "internal_transactions": side_tx_p.get(p, {}).get("internal", 0),
           "other_statuses": other_p.get(p, {})}
          for p, v in by_product.items()),
         key=lambda x: (x["group_label"], -x["transactions"]))
@@ -372,6 +388,8 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     by_group_list = sorted(
         ({"group": g, "label": group_meta[g], **v,
           "transactions": _total(v), "match_rate": _rate(v),
+          "bank_transactions": side_tx_g.get(g, {}).get("bank", 0),
+          "internal_transactions": side_tx_g.get(g, {}).get("internal", 0),
           "other_statuses": other_g.get(g, {})}
          for g, v in by_group.items()),
         key=lambda x: -x["transactions"])

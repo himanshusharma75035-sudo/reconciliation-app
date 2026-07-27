@@ -551,8 +551,10 @@ def _write_reconciliation_workbook(results) -> io.BytesIO:
 
 
 # ── Report B: Source_Files_Match_Status (source-centric, per-product sheets) ────
-_P01_LABEL = {"CREDITED": "Matched", "PENDING": "Pending",
-              "EXCESS": "Excess (bank only)", "PARTIAL": "Partial"}
+_P01_LABEL = {"matched": "Matched", "unmatched": "Unmatched",
+              # legacy statuses (pre-2026-07-27) fold into the two-state model
+              "CREDITED": "Matched", "PENDING": "Unmatched",
+              "EXCESS": "Unmatched", "PARTIAL": "Unmatched"}
 
 
 def build_source_match_report(db, recon_date: str) -> io.BytesIO:

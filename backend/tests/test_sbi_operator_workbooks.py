@@ -82,7 +82,7 @@ def _fixture(db):
     db.add(SBIKOLimits(txn_date=D1, txn_datetime=f"{D1} 09:00:00", ko_id="KO1",
                        txn_type="KO Withdrawal", amount=500.0,
                        limit_configured_by="BC1"))
-    db.add(SBIP01Result(recon_date=D1, ko_id="KO1", status="CREDITED"))
+    db.add(SBIP01Result(recon_date=D1, ko_id="KO1", status="matched"))
     # D2: matched pair + the cross-date probe source (same ref as D1's unmatched bank)
     _bank(db, D2, ref=R3, credit=300.0, desc=f"POS {R3}")
     _src(db, D2, R3, 300.0)
@@ -90,7 +90,7 @@ def _fixture(db):
     db.add(SBIKOLimits(txn_date=D2, txn_datetime=f"{D2} 09:00:00", ko_id="KO1",
                        txn_type="KO Deposit", amount=700.0,
                        limit_configured_by="BC1"))
-    db.add(SBIP01Result(recon_date=D2, ko_id="KO1", status="PENDING"))
+    db.add(SBIP01Result(recon_date=D2, ko_id="KO1", status="unmatched"))
     db.commit()
 
 
@@ -145,7 +145,7 @@ def test_single_date_source_match_workbook_contract(db):
     assert total[1:] == (2, 1, 1, 1, 0, 1)
     ls = wb["Limit & Settlement"]
     assert len(_rows(ls)) == 1
-    assert _rows(ls)[0][_col(ls, "Settlement Status (P01)")] == "Matched"   # CREDITED
+    assert _rows(ls)[0][_col(ls, "Settlement Status (P01)")] == "Matched"   # status='matched'
     wd = wb["Withdrawal"]
     assert _headers(wd) == PROD_COLS
 
@@ -190,8 +190,8 @@ def test_range_source_match_per_date_p01_and_sums(db):
     rows = _rows(ls)
     assert [r[_col(ls, "Sr. No.")] for r in rows] == [1, 2]
     # same KO, two dates, two DIFFERENT P01 statuses — per-date lookup, no collision
-    assert rows[0][_col(ls, "Settlement Status (P01)")] == "Matched"    # D1 CREDITED
-    assert rows[1][_col(ls, "Settlement Status (P01)")] == "Pending"    # D2 PENDING
+    assert rows[0][_col(ls, "Settlement Status (P01)")] == "Matched"      # D1 status='matched'
+    assert rows[1][_col(ls, "Settlement Status (P01)")] == "Unmatched"    # D2 status='unmatched'
     wd = wb["Withdrawal"]
     ms = {(r[_col(wd, "Reference Number")]): r[_col(wd, "Match Status")] for r in _rows(wd)}
     assert ms[R1] == "Matched" and ms[R3] == "Matched"
