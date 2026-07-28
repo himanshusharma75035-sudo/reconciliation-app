@@ -61,6 +61,7 @@ from routes.views import router as views_router
 from routes.recycle_bin import router as recycle_bin_router
 from routes.portal import router as portal_router
 from routes.public_dashboard import router as public_dashboard_router
+from routes.downloads import router as downloads_router
 
 app = FastAPI(
     title="Eko Bharat Ventures — Reconciliation API",
@@ -117,6 +118,7 @@ app.include_router(views_router)
 app.include_router(recycle_bin_router)
 app.include_router(portal_router)
 app.include_router(public_dashboard_router)
+app.include_router(downloads_router)
 
 
 def _apply_indexes():

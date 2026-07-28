@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { Outlet, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Upload, Play, AlertTriangle, GitMerge,
-  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2, PieChart, Trash2, Palette
+  BarChart2, Users, LogOut, ChevronLeft, ChevronRight, BookOpen, Scale, Shield, AlertOctagon, Zap, Settings, TrendingUp, Activity, Code2, PieChart, Trash2, Palette, Download
 } from 'lucide-react'
 import { hasPermission, isAdmin } from '../utils/permissions'
 import EkoLogo from './EkoLogo'
@@ -60,6 +60,7 @@ const navItems = [
   { to: '/mismatches',   icon: AlertOctagon,    label: 'Mismatches' },
   { to: '/manual-match', icon: GitMerge,        label: 'Manual Match',  requiredPerm: 'manual_match' },
   { to: '/reports',      icon: BarChart2,       label: 'Reports',       requiredPerm: 'reports' },
+  { to: '/data-downloads', icon: Download,      label: 'Data Downloads', requiredPerm: 'data_download' },
   { to: '/rules',        icon: BookOpen,        label: 'Logic Builder', requiredPerm: 'logic_builder' },
   // Per-product recon windows (AePS, QR, SBI Kiosk, E-Value, BBPS) open from the
   // product cards in Upload Files — intentionally NOT in the sidebar to keep it clean.

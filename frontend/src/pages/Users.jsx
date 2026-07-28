@@ -34,6 +34,7 @@ const PERM_GROUPS = [
     label: 'Reporting & Oversight',
     perms: [
       { key: 'reports',       label: 'Reports',                    desc: 'View and export all reports' },
+      { key: 'data_download', label: 'Data Downloads',             desc: 'Download raw uploaded bank statements & internal data by date range (sensitive: account numbers — every download is audited)' },
       { key: 'audit_read',    label: 'Audit Log',                  desc: 'View and export the activity / audit log' },
     ]
   },
@@ -51,7 +52,7 @@ const PERM_GROUPS = [
 const PERMS = PERM_GROUPS.flatMap(g => g.perms.map(p => p.key))
 const PERM_LABELS = Object.fromEntries(PERM_GROUPS.flatMap(g => g.perms.map(p => [p.key, p.label])))
 
-const DEFAULT_PERMS = { upload: true, run_recon: true, src_assign: true, reports: true, logic_builder: false, override: false, manual_match: true, clear_data: false, approver: false, audit_read: false, portal_access: false, portal_approve: false, portal_build: false }
+const DEFAULT_PERMS = { upload: true, run_recon: true, src_assign: true, reports: true, data_download: false, logic_builder: false, override: false, manual_match: true, clear_data: false, approver: false, audit_read: false, portal_access: false, portal_approve: false, portal_build: false }
 
 export default function Users() {
   const [users, setUsers] = useState([])

@@ -27,6 +27,7 @@ import Workflow from './pages/Workflow'
 import IngestionMonitor from './pages/IngestionMonitor'
 import DeveloperPortal from './pages/DeveloperPortal'
 import RecycleBin from './pages/RecycleBin'
+import DataDownloads from './pages/DataDownloads'
 import ErrorBoundary from './components/ErrorBoundary'
 import { isViewer } from './utils/permissions'
 
@@ -59,6 +60,7 @@ export default function App() {
         <Route path="mismatches" element={<Mismatches />} />
         <Route path="manual-match" element={<ManualMatch />} />
         <Route path="reports" element={<Reports />} />
+        <Route path="data-downloads" element={<DataDownloads />} />
         <Route path="rules" element={<Rules />} />
         <Route path="users" element={<Users />} />
         <Route path="audit-log" element={<AuditLog />} />
