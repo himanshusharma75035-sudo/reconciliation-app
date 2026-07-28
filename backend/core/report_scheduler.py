@@ -445,6 +445,51 @@ def _fmt_inr_short(n) -> str:
     return f"₹{n:,.0f}"
 
 
+def _top_open_items(db, date_from, date_to, limit=5):
+    """The largest-₹ still-open (unmatched) items across products — the 'grab these first' list.
+    Best-effort per source; never raises so it can't block the email."""
+    from models.database import Transaction, EvalueBankTxn, SBIP02Result
+    items = []
+
+    def _rng(q, col):
+        if date_from: q = q.filter(col >= date_from)
+        if date_to:   q = q.filter(col <= date_to)
+        return q
+
+    try:
+        for r in (_rng(db.query(Transaction).filter(
+                    Transaction.row_type == "txn", Transaction.recon_date.like("20%"),
+                    Transaction.recon_status.in_(["unmatched", "src_assigned"])), Transaction.recon_date)
+                  .order_by(Transaction.amount.desc()).limit(limit).all()):
+            items.append({"product": (r.partner or "").upper(),
+                          "ref": r.eko_tid or r.utr_number or r.tracking_number or "—",
+                          "amount": float(r.amount or 0), "date": r.recon_date or ""})
+    except Exception:
+        pass
+    try:
+        for r in (_rng(db.query(EvalueBankTxn).filter(
+                    EvalueBankTxn.recon_status.in_(["unmatched_bank", "src_assigned", "wrong_amount"])),
+                    EvalueBankTxn.txn_date).order_by(EvalueBankTxn.amount.desc()).limit(limit).all()):
+            items.append({"product": "E-Value", "ref": getattr(r, "reco_acc_no", "") or "—",
+                          "amount": float(r.amount or 0), "date": getattr(r, "txn_date", "") or ""})
+    except Exception:
+        pass
+    try:
+        _ph = {"", "-", "- / -", "-/-", "- /-", "-/ -", "n/a", "na"}
+        for r in (_rng(db.query(SBIP02Result).filter(SBIP02Result.match_status == "Unmatched"),
+                    SBIP02Result.recon_date).order_by(SBIP02Result.bank_amount.desc()).limit(limit).all()):
+            ref = (r.reference_number or "").strip()
+            if ref.lower() in _ph:
+                ref = (r.ko_id or "").strip()          # cash-deposit placeholder → show KO instead
+            items.append({"product": "SBI Kiosk", "ref": ref or "—",
+                          "amount": float(r.bank_amount or 0), "date": r.recon_date or ""})
+    except Exception:
+        pass
+
+    items.sort(key=lambda x: -x["amount"])
+    return items[:limit]
+
+
 def _analytics_email_html(db, from_date: str, to_date: str) -> str:
     """Executive analytics dashboard as email-safe HTML (inline styles, table layout,
     pure-CSS bars — no JS/SVG, renders in Gmail/Outlook). Covers the same date window
@@ -533,6 +578,85 @@ def _analytics_email_html(db, from_date: str, to_date: str) -> str:
                 f'<span style="color:#94a3b8">across {(ag.get("total_count") or 0):,} unmatched, by age</span></div>'
                 f'<table width="100%" style="border-collapse:collapse"><tr>{age_cells}</tr></table></div>')
 
+        # ── Target / SLA + day-over-day trend ──────────────────────────────────
+        import datetime as _dt
+        try: target = float(os.getenv("MATCH_RATE_TARGET", "99.5"))
+        except Exception: target = 99.5
+        rate = float(t.get("match_rate", 0) or 0)
+        met = rate >= target
+        target_html = (f'<span style="color:{"#059669" if met else "#dc2626"};font-weight:700">'
+                       f'Target {target:g}% · {"met ✓" if met else "below ✗"}</span>')
+        trend_html = ""
+        if from_date == to_date:
+            try:
+                prevd = (_dt.date.fromisoformat(from_date) - _dt.timedelta(days=1)).isoformat()
+                pt = build_analytics(db, date_from=prevd, date_to=prevd).get("totals", {})
+                if pt.get("transactions"):
+                    def _arrow(v, good_down=False):
+                        if not v: return '<span style="color:#94a3b8">– same</span>'
+                        good = (v < 0) if good_down else (v > 0)
+                        return f'<span style="color:{"#059669" if good else "#dc2626"}">{"▲" if v > 0 else "▼"}{abs(v):g}</span>'
+                    dr = round(rate - float(pt.get("match_rate", 0) or 0), 1)
+                    du = int(t.get("unmatched", 0)) - int(pt.get("unmatched", 0))
+                    trend_html = (f' &nbsp;·&nbsp; rate {_arrow(dr)} · unmatched {_arrow(du, good_down=True)} '
+                                  f'<span style="color:#94a3b8">vs prev day</span>')
+            except Exception:
+                trend_html = ""
+        meta_line = f'<div style="font-size:11px;color:#475569;margin:2px 0 10px">{target_html}{trend_html}</div>'
+
+        # ── Needs action today (worst products first; flags likely-missing counterpart files) ──
+        acts = []
+        for g in groups:
+            un = int(g.get("unmatched", 0))
+            if un <= 0:
+                continue
+            grate = float(g.get("match_rate", 0) or 0)
+            hint = (" — counterpart data may not be uploaded"
+                    if (grate == 0 and int(g.get("matched", 0)) == 0) else "")
+            acts.append((g.get("label", ""), un, g.get("open_volume", 0), hint))
+        acts.sort(key=lambda x: -float(x[2] or 0))
+        action_lines = []
+        old7 = next((b for b in ag_buckets if b.get("bucket") == "d7" and (b.get("count") or 0) > 0), None)
+        if old7:
+            action_lines.append(f'<li style="margin:3px 0;color:#b45309"><b>Ageing</b>: {old7["count"]:,} item(s) '
+                                f'open 7+ days ({_fmt_inr_short(old7.get("value", 0))}) — clear the backlog</li>')
+        for lbl, un, gov, hint in acts[:5]:
+            action_lines.append(f'<li style="margin:3px 0"><b>{lbl}</b>: {un:,} unmatched · '
+                                f'{_fmt_inr_short(gov)}{hint}</li>')
+        if action_lines:
+            action_block = ('<div style="margin-top:16px;background:#fffbeb;border:1px solid #fde68a;'
+                            'border-radius:8px;padding:11px 14px">'
+                            '<div style="font-size:11px;font-weight:700;color:#b45309;text-transform:uppercase;'
+                            'letter-spacing:.03em;margin-bottom:3px">&#9888; Needs action today</div>'
+                            '<ul style="margin:4px 0 0;padding-left:18px;font-size:12px;color:#334155;line-height:1.5">'
+                            f'{"".join(action_lines)}</ul></div>')
+        else:
+            action_block = ('<div style="margin-top:16px;background:#ecfdf5;border:1px solid #a7f3d0;'
+                            'border-radius:8px;padding:10px 14px;font-size:12px;color:#065f46">'
+                            '&#10003; All products fully reconciled — nothing needs action.</div>')
+
+        # ── Top open items (largest ₹, across products) ────────────────────────
+        top = _top_open_items(db, from_date, to_date, 5)
+        top_block = ""
+        if top:
+            trows = "".join(
+                '<tr>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #f1f5f9;color:#334155;font-weight:600">{i["product"]}</td>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #f1f5f9;color:#64748b;font-family:monospace;font-size:11px">{i["ref"]}</td>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #f1f5f9;text-align:right;font-weight:600;color:#dc2626">&#8377;{i["amount"]:,.0f}</td>'
+                f'<td style="padding:5px 8px;border-bottom:1px solid #f1f5f9;text-align:right;color:#94a3b8;font-size:11px">{i["date"]}</td>'
+                '</tr>' for i in top)
+            top_block = (
+                '<div style="margin-top:18px">'
+                '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.03em;margin-bottom:4px">Top open items</div>'
+                '<table width="100%" style="border-collapse:collapse;font-size:12px">'
+                '<tr style="color:#94a3b8;text-align:left">'
+                '<th style="padding:4px 8px;font-weight:600;border-bottom:1px solid #e5e7eb">Product</th>'
+                '<th style="padding:4px 8px;font-weight:600;border-bottom:1px solid #e5e7eb">Reference</th>'
+                '<th style="padding:4px 8px;font-weight:600;text-align:right;border-bottom:1px solid #e5e7eb">Amount</th>'
+                '<th style="padding:4px 8px;font-weight:600;text-align:right;border-bottom:1px solid #e5e7eb">Date</th>'
+                f'</tr>{trows}</table></div>')
+
         return f"""
         <div style="margin-top:22px">
           <div style="background:#065f46;color:white;padding:13px 18px;border-radius:8px 8px 0 0">
@@ -541,7 +665,9 @@ def _analytics_email_html(db, from_date: str, to_date: str) -> str:
           </div>
           <div style="border:1px solid #e5e7eb;border-top:none;padding:16px 18px;border-radius:0 0 8px 8px;background:#fff">
             <table width="100%" style="border-collapse:collapse;margin-bottom:6px"><tr>{kpi_cells}</tr></table>
+            {meta_line}
             {recon_note}
+            {action_block}
             <table width="100%" style="border-collapse:collapse;font-size:12.5px">
               <tr style="color:#94a3b8;text-align:left">
                 <th style="padding:6px 8px;font-weight:600;border-bottom:2px solid #e5e7eb">Product</th>
@@ -554,6 +680,7 @@ def _analytics_email_html(db, from_date: str, to_date: str) -> str:
               {rows}
             </table>
             {age_block}
+            {top_block}
             <div style="margin-top:16px;text-align:center">
               <a href="{exec_url}" style="display:inline-block;background:#059669;color:#fff;text-decoration:none;font-size:13px;font-weight:600;padding:9px 20px;border-radius:8px">View the live dashboard →</a>
             </div>
