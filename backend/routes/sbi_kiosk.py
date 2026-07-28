@@ -2404,10 +2404,50 @@ def sbi_all_entries_report(
 
 # ── Run all four processes in sequence (QoL orchestration — same code paths) ──
 
+def _backfill_dateless_txn_dates(db):
+    """Some 'Deposit' transaction-report files ingest with NO per-row date (their date column
+    header differs), so those rows never fall into any recon date and their bank counterparts
+    stay Unmatched despite an exact 20-digit reference + amount. The reference is globally
+    unique, so heal each dateless report by copying the txn date from the bank row carrying the
+    same reference. Idempotent (only touches still-dateless rows); returns the set of business
+    dates it assigned so the caller reconciles them too. Never raises to the caller's flow."""
+    dateless = (db.query(SBITxnReport)
+                .filter((SBITxnReport.txn_date.is_(None)) | (SBITxnReport.txn_date == ''),
+                        SBITxnReport.reference_number.isnot(None)).all())
+    refs = sorted({(r.reference_number or "").strip() for r in dateless if (r.reference_number or "").strip()})
+    if not refs:
+        return set()
+    bank_date = {}                          # reference -> bank txn_date (first non-empty wins)
+    for ref, td in (db.query(SBIBankTransaction.ref_number, SBIBankTransaction.txn_date)
+                    .filter(SBIBankTransaction.ref_number.in_(refs)).all()):
+        r = (ref or "").strip()
+        if r and td and r not in bank_date:
+            bank_date[r] = td
+    healed = set()
+    for rpt in dateless:
+        d = bank_date.get((rpt.reference_number or "").strip())
+        if d:
+            rpt.txn_date = d
+            healed.add(d)
+    if healed:
+        db.commit()
+    return healed
+
+
 def _run_all_dates(db, current_user, dates):
     """Run P01→P04 for each business date in `dates`. Each process is wipe-guarded, so a
     date missing its counterpart file is a no-op (never a wipe). A failure in one
     process/date is recorded but never blocks the rest."""
+    # First heal any date-less transaction reports (e.g. the 'Deposit' file) from their bank
+    # counterpart's date, and reconcile those business dates too — otherwise their exact-ref
+    # bank matches would be silently missed.
+    try:
+        healed = _backfill_dateless_txn_dates(db)
+        if healed:
+            dates = sorted(set(dates) | healed)
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
     per_date = {}
     for d in dates:
         r = {}
