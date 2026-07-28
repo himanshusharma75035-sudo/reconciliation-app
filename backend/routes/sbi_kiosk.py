@@ -1597,7 +1597,7 @@ def _unified_entries(db, recon_date, include_deposits=False):
         drcr = "DR" if (b.debit or 0) > 0 else ("CR" if (b.credit or 0) > 0 else "")
         amt = (b.debit or 0) if (b.debit or 0) > 0 else (b.credit or 0)
         if b.is_settlement:
-            e = _new("bank", "Bank Settlement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description,
+            e = _new("bank", "Bank Settlement", b.id, _clean_refno(b.ref_number), b.ko_id, amt, b.txn_date, drcr, b.description,
                      disc=_row_disc("Bank Settlement", b))
             # settlement reconciles under its business (deduct) date, not the posting date
             r = p01_idx.get(((b.deduct_date or recon_date), b.ko_id))
@@ -1606,7 +1606,7 @@ def _unified_entries(db, recon_date, include_deposits=False):
                          counterpart=f"Wallet out {_r(r.wallet_withdrawn)}", result_id=r.id,
                          result_process="p01", _result=r)
         else:
-            e = _new("bank", "Bank Statement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description,
+            e = _new("bank", "Bank Statement", b.id, _clean_refno(b.ref_number), b.ko_id, amt, b.txn_date, drcr, b.description,
                      disc=_row_disc("Bank Statement", b))
             r = p02_by_bank.get(b.id)
             if r:
@@ -2791,7 +2791,9 @@ def _bank_descriptor(b):
     src = "Bank Settlement" if b.is_settlement else "Bank Statement"
     drcr = "DR" if (b.debit or 0) > 0 else ("CR" if (b.credit or 0) > 0 else "")
     amt = (b.debit or 0) if (b.debit or 0) > 0 else (b.credit or 0)
-    key = _pair_key("bank", src, b.ko_id, b.ref_number, b.txn_date, drcr, amt, _row_disc(src, b))
+    # normalise the ref the SAME way _unified_entries does (placeholder → '') so the write-time
+    # key matches the read-time key computed in _apply_pairs.
+    key = _pair_key("bank", src, b.ko_id, _clean_refno(b.ref_number), b.txn_date, drcr, amt, _row_disc(src, b))
     return {"key": key, "source": src, "amount": float(amt or 0), "date": b.txn_date}
 
 

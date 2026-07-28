@@ -13,6 +13,11 @@ function fmtINR(n) {
 }
 function today() { return new Date().toISOString().split('T')[0] }
 
+// A bank "Ref No./Cheque No." is frequently a placeholder like "- / -" (cash-deposit credits
+// carry no 20-digit ref). Never show the placeholder — callers fall back to the description.
+const _REF_PLACEHOLDER = new Set(['', '-', '- / -', '-/-', '- /-', '-/ -', 'n/a', 'na'])
+function refOrBlank(s) { const t = (s || '').trim(); return _REF_PLACEHOLDER.has(t.toLowerCase()) ? '' : t }
+
 // ── Plain-language status metadata, per process ─────────────────────────────────
 // label = human wording the team reads; tone = colour; hint = hover tooltip that
 // explains what the status actually means (incl. the common "file not uploaded" cases).
@@ -723,7 +728,7 @@ function P02Tab({ reconDate, setReconDate }) {
                               <span className={drcr ? 'text-red-500' : 'text-green-600'}>{r.bank_type}</span> {fmtINR(r.bank_amount)}
                               {r.bank_txn_date && <span className="ml-2 text-[11px] font-normal text-gray-400">{r.bank_txn_date}</span>}
                             </div>
-                            <div className="text-[11px] font-mono text-gray-500">{r.reference_number || '—'}</div>
+                            <div className="text-[11px] font-mono text-gray-500">{refOrBlank(r.reference_number) || '—'}</div>
                             {r.bank_description && <div className="text-[11px] text-gray-400 truncate max-w-[240px]" title={r.bank_description}>{r.bank_description}</div>}
                           </div>
                         </td>
@@ -857,7 +862,7 @@ function P03Tab({ reconDate, setReconDate }) {
                           ? <div className="leading-tight">
                               <div className="font-semibold tabular-nums">{r.txn_amount != null ? fmtINR(r.txn_amount) : '—'}</div>
                               <div className="text-[11px] font-mono text-gray-500">CSP {r.csp_code}{r.mode && r.mode !== 'Unknown' && <span className="text-gray-400"> · {r.mode}</span>}</div>
-                              <div className="text-[11px] text-gray-400">{r.txn_date || ''}{r.ref_number ? ` · ${r.ref_number}` : ''}</div>
+                              <div className="text-[11px] text-gray-400">{r.txn_date || ''}{refOrBlank(r.ref_number) ? ` · ${refOrBlank(r.ref_number)}` : ''}</div>
                             </div>
                           : <span className="text-[11px] text-gray-300 italic">— no txn record —</span>}
                       </td>
@@ -1191,8 +1196,10 @@ function UnifiedTab({ reconDate, setReconDate }) {
                       <td className="px-3 py-2"><span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${r.side === 'bank' ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700'}`}>{r.side}</span></td>
                       <td className="px-3 py-2 text-gray-600 whitespace-nowrap">{r.source}</td>
                       <td className="px-3 py-2">
-                        <div className="font-mono text-gray-600">{r.ref || '—'}</div>
+                        <div className="font-mono text-gray-600">{refOrBlank(r.ref) || '—'}</div>
                         {r.ko_csp && <div className="text-[11px] text-gray-400 font-mono">{r.ko_csp}</div>}
+                        {!refOrBlank(r.ref) && !r.ko_csp && r.narration &&
+                          <div className="text-[11px] text-gray-400 truncate max-w-[260px]" title={r.narration}>{r.narration}</div>}
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums font-medium whitespace-nowrap">{fmtINR(r.amount)}{r.drcr && <span className={`ml-1 text-[10px] ${r.drcr === 'DR' ? 'text-red-500' : 'text-green-600'}`}>{r.drcr}</span>}</td>
                       <td className="px-3 py-2 font-mono text-gray-500">{r.date || '—'}</td>
