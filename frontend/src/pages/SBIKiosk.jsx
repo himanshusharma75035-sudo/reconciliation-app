@@ -1247,7 +1247,10 @@ function PairRow({ r, selected, disabled, onClick }) {
         <div className="text-[10px] text-gray-400">{r.date}</div>
       </td>
       <td className="px-3 py-2 font-mono text-[11px] text-gray-600 whitespace-nowrap">{r.ko_csp || '—'}</td>
-      <td className="px-3 py-2 font-mono text-[11px] text-gray-500 max-w-[130px] truncate" title={r.ref}>{r.ref || '—'}</td>
+      <td className="px-3 py-2 max-w-[190px]">
+        <div className="font-mono text-[11px] text-gray-500 truncate" title={r.ref}>{r.ref || '—'}</div>
+        {r.narration && <div className="text-[10px] text-gray-400 truncate" title={r.narration}>{r.narration}</div>}
+      </td>
       <td className="px-3 py-2 text-right tabular-nums font-medium whitespace-nowrap">{fmtINR(r.amount)}
         {drcr && <span className={`ml-1 text-[10px] ${drcr === 'DR' ? 'text-red-500' : 'text-green-600'}`}>{drcr}</span>}</td>
     </tr>

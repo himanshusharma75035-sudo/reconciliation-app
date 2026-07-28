@@ -159,6 +159,20 @@ def reconcile(db, recon_date: str) -> dict:
         ko_wdl[((k.ko_id or "").strip(), round(k.amount or 0, 2))].append(k)
     used_kw = set()
 
+    # A settlement debit reconciles in P01 by its DEDUCT (business) date, which for a D+1/D+2
+    # posting differs from THIS report's posting date — so its KO Withdrawal (booked on the
+    # deduct date) is NOT in ko_wdl (scoped to the posting date). Defer to P01, the single
+    # source of truth, so a settlement the P01 tab shows Matched isn't mislabelled
+    # "Unmatched Settlement" here. If P01 hasn't run for that date this stays empty and the
+    # ko_wdl fallback below applies unchanged.
+    _settle_dd = {(b.deduct_date or recon_date) for b in bank
+                  if b.is_settlement and (b.debit or 0) > 0}
+    p01_matched = set()
+    if _settle_dd:
+        for x in db.query(SBIP01Result).filter(
+                SBIP01Result.recon_date.in_(_settle_dd), SBIP01Result.status == "matched").all():
+            p01_matched.add(((x.ko_id or "").strip(), x.recon_date))
+
     bank_recs = []
     used_src = set()
     n_with_ref = n_matched = n_ref_not_found = n_no_ref = n_amt_mismatch = n_reversal = 0
@@ -170,6 +184,7 @@ def reconcile(db, recon_date: str) -> dict:
         matched = None
         amount_match = ""
         settle = None                                # matched KO Withdrawal (settlement)
+        p01_settled = False                          # reconciled in P01 by deduct date (D+1/D+2)
         is_settle_debit = bool(b.is_settlement) and (b.debit or 0) > 0
         if ref:
             n_with_ref += 1
@@ -194,18 +209,23 @@ def reconcile(db, recon_date: str) -> dict:
                 n_ref_not_found += 1
         elif is_settle_debit:
             n_settle += 1
-            cands = [k for k in ko_wdl.get(((b.ko_id or "").strip(), round(b.debit or 0, 2)), [])
-                     if id(k) not in used_kw]
-            if cands:
-                settle = cands[0]; used_kw.add(id(settle)); n_settle_matched += 1
+            biz = b.deduct_date or recon_date
+            if ((b.ko_id or "").strip(), biz) in p01_matched:
+                p01_settled = True; n_settle_matched += 1     # P01 reconciled it by its deduct date
             else:
-                n_settle_open += 1        # settlement debit with no matching KO Withdrawal (review)
+                cands = [k for k in ko_wdl.get(((b.ko_id or "").strip(), round(b.debit or 0, 2)), [])
+                         if id(k) not in used_kw]
+                if cands:
+                    settle = cands[0]; used_kw.add(id(settle)); n_settle_matched += 1
+                else:
+                    n_settle_open += 1    # settlement debit with no matching KO Withdrawal (review)
         else:
             n_no_ref += 1
 
+        _settled = settle is not None or p01_settled
         if matched is not None:
             status = "Matched"
-        elif settle is not None:
+        elif _settled:
             status = "Matched (Settlement)"
         elif is_settle_debit:
             status = "Unmatched Settlement"
@@ -225,12 +245,13 @@ def reconcile(db, recon_date: str) -> dict:
             "Credit": b.credit or 0,
             "Balance": b.balance if b.balance is not None else "",
             "Extracted Txn No. (20-digit)": ref,
-            "Matched Source File": ("KO Limits" if settle else
+            "Matched Source File": ("KO Limits" if _settled else
                                     (canonical_product(matched.source_file) if matched else "")),
-            "Matched Transaction Type": ("KO Withdrawal" if settle else
+            "Matched Transaction Type": ("KO Withdrawal" if _settled else
                                          ((matched.txn_type or "") if matched else "")),
-            "Source Amount": (settle.amount if settle else ((matched.amount or 0) if matched else "")),
-            "Amount Match": ("Yes" if settle else amount_match),
+            "Source Amount": (settle.amount if settle else
+                              ((b.debit or 0) if p01_settled else ((matched.amount or 0) if matched else ""))),
+            "Amount Match": ("Yes" if _settled else amount_match),
             "Match Status": status,
             "_is_dup": ref in dup_refs,
         })

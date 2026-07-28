@@ -128,10 +128,19 @@ def _read_xls_rows(content: bytes) -> list:
         errs.append(f"openpyxl: {str(e)[:80]}")
     raise ValueError("no reader could open the file — " + " | ".join(errs))
 
+# Empty markers seen in the bank statement's "Ref No./Cheque No." column — never store these
+# as a reference (cash-deposit/CDM credits carry no 20-digit ref there, so the column is a bare
+# placeholder). Mirrors core.sbi_reports._PLACEHOLDER.
+_REFNO_PLACEHOLDER = {"", "-", "- / -", "-/-", "- /-", "-/ -", "n/a", "na"}
+
 def _extract_bank_ref(desc: str) -> str:
     """Extract 20-digit reference number from bank description."""
     m = re.search(r'(?:TO|BY)\s+TRANSFER-(\d{20})', desc)
     return m.group(1) if m else ''
+
+def _clean_refno(ref_no: str) -> str:
+    """The bank 'Ref No./Cheque No.' column, blanked when it's just a placeholder like '- / -'."""
+    return "" if (ref_no or "").strip().lower() in _REFNO_PLACEHOLDER else ref_no
 
 def _extract_ko_id(desc: str) -> str:
     """Extract KO ID from bank description (after TXN@KO or @KO )."""
@@ -319,7 +328,7 @@ async def upload_bank_statement(
                 txn_date      = _clip(txn_date, 10),
                 value_date    = _clip(value_date, 10),
                 description   = desc,                            # Text — no length cap
-                ref_number    = _clip(ref_extracted or ref_no, 100),
+                ref_number    = _clip(ref_extracted or _clean_refno(ref_no), 100),
                 branch_code   = _clip(branch, 20),
                 debit         = debit,
                 credit        = credit,
