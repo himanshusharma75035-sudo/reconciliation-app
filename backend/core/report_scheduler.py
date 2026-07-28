@@ -459,10 +459,13 @@ def _analytics_email_html(db, from_date: str, to_date: str) -> str:
         base = os.getenv("APP_PUBLIC_URL", "https://122.176.147.78:8443/recon").rstrip("/")
         exec_url = base + "/exec"
 
+        others = int(t.get("mismatch", 0)) + int(t.get("other", 0))
+        open_val = t.get("open_volume", 0)
         kpis = [
             ("Total txns",     f'{t.get("transactions", 0):,}',        "#111827"),
             ("Matched",        f'{t.get("matched", 0):,}',             "#059669"),
             ("Unmatched",      f'{t.get("unmatched", 0):,}',           "#dc2626"),
+            ("Others",         f'{others:,}',                          "#64748b"),
             ("Match rate",     f'{t.get("match_rate", 0)}%',           "#4f46e5"),
             ("Matched volume", _fmt_inr_short(t.get("matched_volume", 0)), "#111827"),
         ]
@@ -471,6 +474,17 @@ def _analytics_email_html(db, from_date: str, to_date: str) -> str:
             f'<div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.03em">{lbl}</div>'
             f'<div style="font-size:17px;font-weight:800;color:{color};margin-top:2px">{val}</div></td>'
             for lbl, val, color in kpis)
+
+        # Reconciliation note so the KPIs always tie out: Total = Matched + Unmatched + Others.
+        # 'Others' = rows that don't require a bank↔internal match (reversals, fees, duplicates)
+        # plus any amount mismatches, which DO need a review — called out when present.
+        mismatch_n = int(t.get("mismatch", 0))
+        others_note = ("reversals, fees &amp; duplicates — no action needed" if not mismatch_n else
+                       f"<span style=\"color:#d97706;font-weight:600\">{mismatch_n:,} amount mismatch(es) to review</span> "
+                       f"+ reversals, fees &amp; duplicates")
+        recon_note = (f'<div style="font-size:10.5px;color:#94a3b8;margin:2px 0 12px;line-height:1.5">'
+                      f'Total = Matched + Unmatched + Others &nbsp;·&nbsp; '
+                      f'<b style="color:#64748b">Others</b> = {others_note}.</div>')
 
         def _bar(rate):
             rate = max(0.0, min(100.0, float(rate or 0)))
@@ -486,13 +500,38 @@ def _analytics_email_html(db, from_date: str, to_date: str) -> str:
             f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;color:#475569">{g.get("transactions",0):,}</td>'
             f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;color:#059669;font-weight:600">{g.get("matched",0):,}</td>'
             f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;color:#dc2626">{g.get("unmatched",0):,}</td>'
+            f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;color:#94a3b8">{(int(g.get("mismatch",0))+int(g.get("other",0))):,}</td>'
             f'<td style="padding:6px 8px;border-bottom:1px solid #f1f5f9;text-align:right;white-space:nowrap">{_bar(g.get("match_rate",0))} '
             f'<span style="font-size:11px;color:#64748b">{g.get("match_rate",0)}%</span></td>'
             '</tr>'
             for g in groups)
         if not rows:
-            rows = ('<tr><td colspan="5" style="padding:10px;text-align:center;color:#9ca3af;'
+            rows = ('<tr><td colspan="6" style="padding:10px;text-align:center;color:#9ca3af;'
                     'font-style:italic">No reconciliation activity for this window.</td></tr>')
+
+        # Open items at risk — the ₹ value + ageing (7+ days highlighted), so the backlog's SIZE
+        # and AGE are visible, not just the count. Drawn only when there is open exposure.
+        ag = (a.get("open_ageing") or {})
+        ag_buckets = ag.get("buckets", [])
+
+        def _age_cell(b):
+            old = b.get("bucket") == "d7" and (b.get("count") or 0) > 0
+            col = "#dc2626" if old else "#334155"
+            bg  = "#fef2f2" if old else "#f8fafc"
+            return (f'<td style="padding:7px 8px;text-align:center;border:1px solid #eef2f7;background:{bg}">'
+                    f'<div style="font-size:9.5px;color:#94a3b8;text-transform:uppercase">{b.get("label","")}</div>'
+                    f'<div style="font-size:15px;font-weight:700;color:{col};margin-top:1px">{(b.get("count") or 0):,}</div>'
+                    f'<div style="font-size:9.5px;color:#94a3b8">{_fmt_inr_short(b.get("value",0))}</div></td>')
+
+        age_block = ""
+        if ag_buckets and (ag.get("total_count") or 0) > 0:
+            age_cells = "".join(_age_cell(b) for b in ag_buckets)
+            age_block = (
+                '<div style="margin-top:18px">'
+                '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.03em;margin-bottom:6px">'
+                f'Open items at risk &nbsp;·&nbsp; <span style="color:#dc2626;font-weight:700">{_fmt_inr_short(open_val)}</span> '
+                f'<span style="color:#94a3b8">across {(ag.get("total_count") or 0):,} unmatched, by age</span></div>'
+                f'<table width="100%" style="border-collapse:collapse"><tr>{age_cells}</tr></table></div>')
 
         return f"""
         <div style="margin-top:22px">
@@ -501,17 +540,20 @@ def _analytics_email_html(db, from_date: str, to_date: str) -> str:
             <div style="font-size:15px;font-weight:700;margin-top:3px">Activity for {day_label} · all products</div>
           </div>
           <div style="border:1px solid #e5e7eb;border-top:none;padding:16px 18px;border-radius:0 0 8px 8px;background:#fff">
-            <table width="100%" style="border-collapse:collapse;margin-bottom:14px"><tr>{kpi_cells}</tr></table>
+            <table width="100%" style="border-collapse:collapse;margin-bottom:6px"><tr>{kpi_cells}</tr></table>
+            {recon_note}
             <table width="100%" style="border-collapse:collapse;font-size:12.5px">
               <tr style="color:#94a3b8;text-align:left">
                 <th style="padding:6px 8px;font-weight:600;border-bottom:2px solid #e5e7eb">Product</th>
                 <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Txns</th>
                 <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Matched</th>
                 <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Unmatched</th>
+                <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Others</th>
                 <th style="padding:6px 8px;font-weight:600;text-align:right;border-bottom:2px solid #e5e7eb">Match rate</th>
               </tr>
               {rows}
             </table>
+            {age_block}
             <div style="margin-top:16px;text-align:center">
               <a href="{exec_url}" style="display:inline-block;background:#059669;color:#fff;text-decoration:none;font-size:13px;font-weight:600;padding:9px 20px;border-radius:8px">View the live dashboard →</a>
             </div>
