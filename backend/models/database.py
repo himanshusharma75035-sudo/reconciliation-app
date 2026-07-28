@@ -1166,6 +1166,45 @@ class SBISrcAssignment(Base):
     )
 
 
+class SBIManualPair(Base):
+    """
+    Operator two-sided manual PAIR for SBI Kiosk recon (persistent overlay, additive).
+
+    Unlike SBIManualMatch (a one-sided status flip on a single P02/P03 result row),
+    this links ONE bank-side row to ONE internal/data-side row — the pair-picker window
+    ("SBI Kiosk → Manual Match"). Both source rows (bank statement, txn report, KO limits)
+    survive recon re-runs, but their ids are regenerated on file RE-UPLOAD, so — like
+    SBIManualMatch/SBISrcAssignment (behavior-contract #17) — the link is keyed by each
+    side's STABLE BUSINESS key, computed identically at write time (from the source row)
+    and read time (from the unified entry). Overlaid onto the unified read model at READ
+    time so both rows flip to "Manual_Matched" and show each other as counterpart; it never
+    touches the P01–P04 run logic. Deletable by an operator to undo.
+
+    Free-form: any bank row may be paired with any internal row (settlement↔KO withdrawal,
+    bank↔txn report, bank credit↔txn report, etc.); an amount/bucket mismatch is surfaced
+    as a warning, not blocked. Bank and data business dates may differ (D+1 settlements).
+    """
+    __tablename__ = "sbi_manual_pairs"
+
+    id           = Column(String(36),  primary_key=True, default=generate_id)
+    bank_date    = Column(String(10),  index=True)       # business date of the bank row
+    data_date    = Column(String(10),  index=True)       # business date of the data row
+    bank_key     = Column(String(200), index=True)       # stable business key, bank side
+    data_key     = Column(String(200), index=True)       # stable business key, data side
+    bank_source  = Column(String(30))                    # Bank Settlement | Bank Statement
+    data_source  = Column(String(30))                    # Txn Report | KO Withdrawal | KO Deposit
+    bank_amount  = Column(MONEY)
+    data_amount  = Column(MONEY)
+    remark       = Column(String(500))
+    created_by   = Column(String(100))
+    created_at   = Column(DateTime,    default=datetime.datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_sbipair_bank", "bank_key"),
+        Index("ix_sbipair_data", "data_key"),
+    )
+
+
 # ─── QR Collection Settlement & Chargeback Models ─────────────────────────────
 
 class QRSettlement(Base):

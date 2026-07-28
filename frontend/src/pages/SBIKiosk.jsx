@@ -1230,10 +1230,224 @@ function UnifiedTab({ reconDate, setReconDate }) {
   )
 }
 
+// ── Manual Match (two-sided pair-picker) ────────────────────────────────────────
+// Bank open items on the left, internal open items (Txn Reports — each labelled with its
+// source file — KO Withdrawals + KO Deposits) on the right. Pick a row on each side, queue
+// the pair, submit all. Free-form: any bank↔internal pairing is allowed; an amount mismatch
+// is shown as a warning, not blocked. Reuses /sbi/manual-match/* (survives re-runs/re-uploads).
+
+function PairRow({ r, selected, disabled, onClick }) {
+  const drcr = r.drcr
+  return (
+    <tr onClick={disabled ? undefined : onClick}
+      className={`border-t border-gray-100 transition-colors ${disabled ? 'opacity-40 cursor-not-allowed'
+        : selected ? 'bg-primary/10 cursor-pointer' : 'hover:bg-gray-50 cursor-pointer'}`}>
+      <td className="px-3 py-2">
+        <div className="text-[11px] font-semibold text-gray-700 whitespace-nowrap">{r.file || r.source}</div>
+        <div className="text-[10px] text-gray-400">{r.date}</div>
+      </td>
+      <td className="px-3 py-2 font-mono text-[11px] text-gray-600 whitespace-nowrap">{r.ko_csp || '—'}</td>
+      <td className="px-3 py-2 font-mono text-[11px] text-gray-500 max-w-[130px] truncate" title={r.ref}>{r.ref || '—'}</td>
+      <td className="px-3 py-2 text-right tabular-nums font-medium whitespace-nowrap">{fmtINR(r.amount)}
+        {drcr && <span className={`ml-1 text-[10px] ${drcr === 'DR' ? 'text-red-500' : 'text-green-600'}`}>{drcr}</span>}</td>
+    </tr>
+  )
+}
+
+function PairPanel({ title, tone, items, selected, onSelect, queuedIds }) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+      <div className={`px-4 py-2.5 text-sm font-semibold border-b ${tone}`}>{title} <span className="opacity-60">({items.length})</span></div>
+      <div className="max-h-[420px] overflow-auto">
+        {items.length === 0
+          ? <div className="text-center text-gray-400 text-sm py-10">No open items — load first</div>
+          : <table className="w-full text-sm">
+              <thead className="text-[10px] uppercase tracking-wide text-gray-400 bg-gray-50/60 sticky top-0">
+                <tr><th className="px-3 py-2 text-left font-medium">Source / File</th>
+                  <th className="px-3 py-2 text-left font-medium">KO / CSP</th>
+                  <th className="px-3 py-2 text-left font-medium">Ref</th>
+                  <th className="px-3 py-2 text-right font-medium">Amount</th></tr>
+              </thead>
+              <tbody>{items.map(r => (
+                <PairRow key={r.id} r={r} selected={selected?.id === r.id}
+                  disabled={queuedIds.has(r.id)} onClick={() => onSelect(r)} />
+              ))}</tbody>
+            </table>}
+      </div>
+    </div>
+  )
+}
+
+function ManualPairTab({ reconDate }) {
+  const canEdit = hasPermission('src_assign')
+  const [from, setFrom] = useState(reconDate)
+  const [to, setTo] = useState(reconDate)
+  const [search, setSearch] = useState('')
+  const [bankItems, setBankItems] = useState([])
+  const [dataItems, setDataItems] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [selBank, setSelBank] = useState(null)
+  const [selData, setSelData] = useState(null)
+  const [queue, setQueue] = useState([])
+  const [remark, setRemark] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [pairs, setPairs] = useState([])
+
+  useEffect(() => { setFrom(reconDate); setTo(reconDate) }, [reconDate])
+
+  const load = async () => {
+    if (!from) { toast.error('Pick a From date'); return }
+    setLoading(true)
+    try {
+      const params = { date_from: from, date_to: to || from, search: search || undefined, page_size: 500 }
+      const [b, d, p] = await Promise.all([
+        api.get('/sbi/manual-match/open-items', { params: { ...params, side: 'bank' } }),
+        api.get('/sbi/manual-match/open-items', { params: { ...params, side: 'data' } }),
+        api.get('/sbi/manual-match/pair', { params: { date_from: from, date_to: to || from } }),
+      ])
+      setBankItems(b.data.items || [])
+      setDataItems(d.data.items || [])
+      setPairs(p.data.rows || [])
+      setSelBank(null); setSelData(null)
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Failed to load open items') }
+    setLoading(false)
+  }
+
+  const queuedIds = new Set(queue.flatMap(q => [q.bank.id, q.data.id]))
+  const diffOf = (b, d) => Math.abs(Number(b?.amount || 0) - Number(d?.amount || 0))
+
+  const addPair = () => {
+    if (!selBank || !selData) { toast('Select one row on each side', { icon: 'ℹ️' }); return }
+    if (queuedIds.has(selBank.id) || queuedIds.has(selData.id)) { toast('Row already queued', { icon: '⚠️' }); return }
+    setQueue(q => [...q, { bank: selBank, data: selData }])
+    setSelBank(null); setSelData(null)
+  }
+  const removeQ = i => setQueue(q => q.filter((_, idx) => idx !== i))
+
+  const submit = async () => {
+    if (!queue.length) return
+    if (remark.trim().length < 5) { toast.error('A remark (≥5 characters) is required'); return }
+    setSubmitting(true)
+    try {
+      const payload = { pairs: queue.map(q => ({ bank_id: q.bank.id, data_id: q.data.id, data_source: q.data.source })), remark: remark.trim() }
+      const { data } = await api.post('/sbi/manual-match/pair', payload)
+      if (data.queued) { toast(data.message || 'Queued for approval', { icon: '🕒' }); setQueue([]); setRemark('') }
+      else {
+        const msg = `${data.paired} paired${data.warned ? ` · ${data.warned} amount warning` : ''}${data.errors ? ` · ${data.errors} failed` : ''}`
+        data.errors ? toast(msg, { icon: '⚠️' }) : toast.success(msg)
+        setQueue([]); setRemark(''); await load()
+      }
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Submit failed') }
+    setSubmitting(false)
+  }
+
+  const unpair = async id => {
+    try {
+      const { data } = await api.delete(`/sbi/manual-match/pair/${id}`)
+      if (data.queued) { toast(data.message || 'Queued for approval', { icon: '🕒' }); return }
+      toast.success('Unmatched'); await load()
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Unmatch failed') }
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="rounded-xl border border-gray-200 bg-white p-4">
+        <div className="text-sm font-semibold text-gray-800 mb-1">Manual Match — pick a bank row and an internal row, queue, submit</div>
+        <p className="text-xs text-gray-400 mb-3">Internal side spans every file (Txn Reports — each shown with its source file — KO Withdrawals &amp; KO Deposits). Use a date range to catch a D+1 settlement. Manual pairs persist across re-runs and re-uploads.</p>
+        <div className="flex flex-wrap items-end gap-3">
+          <div><label className="text-xs text-gray-400 block mb-1">From Date</label>
+            <input type="date" className="input" value={from} onChange={e => setFrom(e.target.value)} /></div>
+          <div><label className="text-xs text-gray-400 block mb-1">To Date</label>
+            <input type="date" className="input" value={to} onChange={e => setTo(e.target.value)} /></div>
+          <div className="flex-1 min-w-[180px]"><label className="text-xs text-gray-400 block mb-1">Search (Ref / KO / CSP / File)</label>
+            <input className="input w-full" placeholder="optional…" value={search} onChange={e => setSearch(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && load()} /></div>
+          <button onClick={load} disabled={loading} className="btn flex items-center gap-1.5">
+            {loading ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />} Load Open Items
+          </button>
+        </div>
+      </div>
+
+      {!canEdit && <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">You have read-only access — manual matching needs the <span className="font-semibold">src_assign</span> permission.</div>}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <PairPanel title="Bank Statement" tone="text-blue-700 bg-blue-50/60 border-blue-100" items={bankItems}
+          selected={selBank} onSelect={setSelBank} queuedIds={queuedIds} />
+        <PairPanel title="Internal / Data (all files)" tone="text-green-700 bg-green-50/60 border-green-100" items={dataItems}
+          selected={selData} onSelect={setSelData} queuedIds={queuedIds} />
+      </div>
+
+      {/* selection → add-to-queue bar */}
+      <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-3 flex flex-wrap items-center gap-3">
+        <div className="text-xs text-gray-500">Bank: {selBank ? <span className="font-mono text-gray-800">{selBank.file} · {fmtINR(selBank.amount)}</span> : <span className="text-gray-400">none</span>}</div>
+        <ArrowLeftRight size={15} className="text-gray-400" />
+        <div className="text-xs text-gray-500">Internal: {selData ? <span className="font-mono text-gray-800">{selData.file} · {fmtINR(selData.amount)}</span> : <span className="text-gray-400">none</span>}</div>
+        {selBank && selData && diffOf(selBank, selData) > 0.01 &&
+          <span className="text-[11px] text-amber-700 bg-amber-100 rounded-full px-2 py-0.5 flex items-center gap-1"><AlertTriangle size={11} />Amounts differ by {fmtINR(diffOf(selBank, selData))}</span>}
+        <button onClick={addPair} disabled={!selBank || !selData || !canEdit} className="btn-ghost text-sm flex items-center gap-1.5 ml-auto"><Check size={14} /> Add pair to queue</button>
+      </div>
+
+      {/* queue */}
+      {queue.length > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <div className="text-sm font-semibold text-gray-800 mb-2">Queued pairs ({queue.length})</div>
+          <div className="space-y-1.5 mb-3">
+            {queue.map((q, i) => {
+              const warn = diffOf(q.bank, q.data) > 0.01
+              return (
+                <div key={i} className="flex items-center gap-2 text-xs bg-gray-50 rounded-lg px-3 py-2">
+                  <span className="font-mono text-blue-700 whitespace-nowrap">{q.bank.file} · {fmtINR(q.bank.amount)}</span>
+                  <ArrowLeftRight size={12} className="text-gray-400 shrink-0" />
+                  <span className="font-mono text-green-700 whitespace-nowrap">{q.data.file} · {fmtINR(q.data.amount)}</span>
+                  {warn && <span className="text-[10px] text-amber-700 bg-amber-100 rounded-full px-1.5 py-0.5 whitespace-nowrap">Δ {fmtINR(diffOf(q.bank, q.data))}</span>}
+                  <button onClick={() => removeQ(i)} className="ml-auto text-gray-400 hover:text-red-500"><X size={14} /></button>
+                </div>
+              )
+            })}
+          </div>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="flex-1 min-w-[220px]"><label className="text-xs text-gray-400 block mb-1">Remark (required, ≥5 chars — kept in the audit trail)</label>
+              <input className="input w-full" placeholder="why these are matched…" maxLength={500} value={remark} onChange={e => setRemark(e.target.value)} /></div>
+            <button onClick={submit} disabled={submitting || !canEdit || remark.trim().length < 5}
+              className="btn flex items-center gap-1.5">{submitting ? <RefreshCw size={15} className="animate-spin" /> : <Check size={15} />} Submit {queue.length} pair{queue.length > 1 ? 's' : ''}</button>
+          </div>
+        </div>
+      )}
+
+      {/* existing pairs */}
+      {pairs.length > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
+          <div className="px-4 py-2.5 text-sm font-semibold text-amber-700 bg-amber-50/60 border-b border-amber-100">Manual pairs in range ({pairs.length})</div>
+          <div className="max-h-[300px] overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="text-[10px] uppercase tracking-wide text-gray-400 bg-gray-50/60">
+                <tr><th className="px-3 py-2 text-left font-medium">Bank</th><th className="px-3 py-2 text-left font-medium">Internal</th>
+                  <th className="px-3 py-2 text-right font-medium">Δ</th><th className="px-3 py-2 text-left font-medium">Remark</th>
+                  <th className="px-3 py-2 text-left font-medium">By</th><th className="px-3 py-2"></th></tr>
+              </thead>
+              <tbody>{pairs.map(p => (
+                <tr key={p.id} className="border-t border-gray-100">
+                  <td className="px-3 py-2 text-xs whitespace-nowrap"><span className="text-blue-700">{p.bank_source}</span> {fmtINR(p.bank_amount)} <span className="text-gray-400">· {p.bank_date}</span></td>
+                  <td className="px-3 py-2 text-xs whitespace-nowrap"><span className="text-green-700">{p.data_source}</span> {fmtINR(p.data_amount)} <span className="text-gray-400">· {p.data_date}</span></td>
+                  <td className="px-3 py-2 text-right text-xs tabular-nums">{p.amount_diff > 0.01 ? <span className="text-amber-600">{fmtINR(p.amount_diff)}</span> : <span className="text-gray-300">—</span>}</td>
+                  <td className="px-3 py-2 text-xs text-gray-500 max-w-[200px] truncate" title={p.remark}>{p.remark}</td>
+                  <td className="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">{p.by}</td>
+                  <td className="px-3 py-2 text-right">{canEdit && <button onClick={() => unpair(p.id)} title="Unmatch" className="text-gray-400 hover:text-red-500"><Trash2 size={14} /></button>}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main Page ──────────────────────────────────────────────────────────────────
 
 const PROCESSES = [
   { key: 'unified', label: '🔎 All Entries' },
+  { key: 'pair', label: '🔗 Manual Match' },
   { key: 'p01', label: '💳 P01 · Wallet ↔ Settlement' },
   { key: 'p02', label: '📊 P02 · Bank ↔ Txn Report' },
   { key: 'p03', label: '🔄 P03 · Money Out ↔ In' },
@@ -1527,6 +1741,7 @@ export default function SBIKiosk() {
       )}
 
       {tab === 'unified' && <UnifiedTab reconDate={reconDate} setReconDate={setReconDate} />}
+      {tab === 'pair' && <ManualPairTab reconDate={reconDate} />}
       {tab === 'p01' && <P01Tab reconDate={reconDate} setReconDate={setReconDate} />}
       {tab === 'p02' && <P02Tab reconDate={reconDate} setReconDate={setReconDate} />}
       {tab === 'p03' && <P03Tab reconDate={reconDate} setReconDate={setReconDate} />}

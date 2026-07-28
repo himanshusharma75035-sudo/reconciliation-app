@@ -214,6 +214,12 @@ def _dispatch_approved(req: ApprovalRequest, db: Session, approver: User) -> dic
     if req.action_type == "sbi_delete_manual_match":
         import routes.sbi_kiosk as SK
         return SK.delete_manual_match(p["mm_id"], db=db, current_user=approver)
+    if req.action_type == "sbi_manual_pair":
+        import routes.sbi_kiosk as SK
+        return SK.create_manual_pairs(SK.ManualPairBulkIn(**p), db=db, current_user=approver)
+    if req.action_type == "sbi_delete_manual_pair":
+        import routes.sbi_kiosk as SK
+        return SK.delete_manual_pair(p["pair_id"], db=db, current_user=approver)
 
     raise HTTPException(400, f"Unknown action type '{req.action_type}'")
 

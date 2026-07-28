@@ -32,19 +32,20 @@ from typing import Optional, List
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from models.database import (
     get_db, generate_id, AuditLog,
     SBIBankTransaction, SBITxnReport, SBIKOLimits,
     SBIKOCashHolding, SBILimitFailure, SBICSPMaster,
     SBIP01Result, SBIP02Result, SBIP03Result, SBIP04Result,
-    SBIManualMatch, SBISrcAssignment,
+    SBIManualMatch, SBISrcAssignment, SBIManualPair,
 )
 from core.auth import get_current_user, require_permission, require_product_access
 from core import maker_checker
+from core.sbi_reports import canonical_product, TOL
 
 # Gate on the "kiosk" product id directly (what Users.jsx writes into allowed_products),
 # so access does not depend on the PartnerConfig(slug='sbi'->product='kiosk') seed row
@@ -1462,30 +1463,87 @@ def _r(n) -> str:
         return "₹0"
 
 
-@router.get("/unified")
-def get_unified(
-    recon_date: str,
-    upload_date: Optional[str] = None,
-    side: Optional[str] = None,        # bank | data
-    status: Optional[str] = None,      # Matched | Unmatched | Reversal | ...
-    process: Optional[str] = None,     # p01 | p02 | p03
-    search: Optional[str] = None,      # ref / KO / CSP
-    page: int = 1,
-    page_size: int = 100,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    """
-    Unified SBI ledger: EVERY source entry — bank statement lines AND data lines
-    (transaction reports, KO withdrawals) — each tagged with its reconciliation
-    status, which process (P01/P02/P03) reconciled it, and its counterpart. Built
-    read-only from the P0x result tables; SRC + manual-match act on the mapped
-    result row via the existing endpoints (result_id + result_process on each row).
-    Scoped to one date (sources by upload_date≈recon_date; behaviour-contract #17).
-    P03 has no source FK, so P03 links are best-effort on CSP+amount.
-    Sources by the transaction's BUSINESS date (recon_date == txn_date), matching the runs.
-    """
+# Rows whose unified status counts as reconciled (excluded from the pair-picker's open lists).
+_MATCHED_UNIFIED = {"Matched", "Manual_Matched"}
 
+
+def _row_disc(source, row):
+    """A per-physical-row discriminator that is STABLE across recon re-runs and file
+    re-uploads (source CONTENT, never the regenerated row id). Folded into _pair_key so two
+    business-identical rows (e.g. two same-amount KO withdrawals for one KO on one day) get
+    DISTINCT keys and a pair can't fan out across them. Bank rows use the running balance
+    (unique per statement line); txn reports use datetime+journal; KO rows use the datetime."""
+    if source in ("Bank Settlement", "Bank Statement"):
+        bal = getattr(row, "balance", None)
+        return "" if bal is None else f"{bal}"
+    if source == "Txn Report":
+        return f"{getattr(row, 'txn_datetime', '') or ''}|{getattr(row, 'journal_number', '') or ''}"
+    if source in ("KO Withdrawal", "KO Deposit"):
+        return getattr(row, "txn_datetime", "") or ""
+    return ""
+
+
+def _pair_key(side, source, ko, ref, date, drcr, amount, disc=""):
+    """Stable business key for one side of a manual pair. Computed identically from a
+    source row (write time) and from a unified entry (read time) so a pair survives recon
+    re-runs AND file re-uploads (behavior-contract #17 — source ids regenerate on upload).
+    `disc` (a stable per-row content discriminator) keeps business-identical rows distinct."""
+    try:
+        amt = f"{float(amount or 0):.2f}"
+    except (TypeError, ValueError):
+        amt = "0.00"
+    tail = f"|d={disc or ''}"
+    if side == "bank":
+        tag = "bankset" if source == "Bank Settlement" else "bank"
+        return f"{tag}|{ko or ''}|{ref or ''}|{date or ''}|{drcr or ''}|{amt}{tail}"
+    tag = {"Txn Report": "txr", "KO Withdrawal": "kow", "KO Deposit": "kod"}.get(source, "dat")
+    return f"{tag}|{ko or ''}|{ref or ''}|{date or ''}|{amt}{tail}"
+
+
+def _apply_pairs(db, entries):
+    """Overlay operator manual pairs onto unified entries (read-time). A row whose stable
+    key is one side of a pair flips to Manual_Matched with the other side as its counterpart.
+    Each stored pair is CONSUMED once per side, so even if two rows share a key a pair can
+    never phantom-reconcile more than one row. No-op when no pairs exist, so every existing
+    surface (the unified page, the all-entries report) stays byte-identical until a pair."""
+    if not entries:
+        return entries
+    pairs = db.query(SBIManualPair).all()
+    if pairs:
+        by_bank = {p.bank_key: p for p in pairs if p.bank_key}
+        by_data = {p.data_key: p for p in pairs if p.data_key}
+        used_bank_ids, used_data_ids = set(), set()
+        for e in entries:
+            k = _pair_key(e["side"], e["source"], e["ko_csp"], e["ref"], e["date"],
+                          e["drcr"], e["amount"], e.get("_disc"))
+            if e["side"] == "bank":
+                p = by_bank.get(k)
+                if not p or p.id in used_bank_ids:
+                    continue
+                used_bank_ids.add(p.id)
+                other_src, other_amt = p.data_source, p.data_amount
+            else:
+                p = by_data.get(k)
+                if not p or p.id in used_data_ids:
+                    continue
+                used_data_ids.add(p.id)
+                other_src, other_amt = p.bank_source, p.bank_amount
+            e["status"] = "Manual_Matched"
+            e["process"] = "Manual"
+            e["manual_pair_id"] = p.id
+            e["counterpart"] = f"{other_src or ''} {_r(other_amt)}".strip()
+    for e in entries:
+        e.pop("_disc", None)     # private discriminator — never serialised
+    return entries
+
+
+def _unified_entries(db, recon_date, include_deposits=False):
+    """Build the flat list of every bank + data source entry for ONE business date, each
+    tagged with recon status/process/counterpart and its manual-pair overlay. Returns
+    entries carrying a private '_result' handle (caller must pop it). Shared by get_unified
+    (the SBI Kiosk 'All Entries' view and the all-entries report) and the manual-match
+    pair-picker. `include_deposits` adds KO Deposit rows — OFF by default so the unified
+    page and the all-entries report stay byte-identical to before."""
     # P01 results indexed by (business_date, ko). A settlement posted on recon_date may
     # belong to an EARLIER business date (its deduct_date) where its P01 match now lives,
     # so load recon_date PLUS those deduct dates. Withdrawal side keys on recon_date;
@@ -1517,19 +1575,21 @@ def get_unified(
 
     entries = []
 
-    def _new(sidev, src, row_id, ref, ko, amt, date, drcr, narration):
+    def _new(sidev, src, row_id, ref, ko, amt, date, drcr, narration, file="", disc=""):
         return {"side": sidev, "source": src, "id": row_id, "ref": ref or "", "ko_csp": ko or "",
                 "amount": amt, "date": date or "", "drcr": drcr, "narration": narration or "",
+                "file": file or src,   # fine-grained originating file/report (Txn Report → canonical product)
                 "status": "Not reconciled", "process": "", "counterpart": None, "also_p03": False,
                 "result_id": None, "result_process": None, "src_code": None, "src_note": None,
-                "_result": None}
+                "manual_pair_id": None, "_disc": disc, "_result": None}
 
     # ---- bank side ----
     for b in db.query(SBIBankTransaction).filter(SBIBankTransaction.txn_date == recon_date).all():
         drcr = "DR" if (b.debit or 0) > 0 else ("CR" if (b.credit or 0) > 0 else "")
         amt = (b.debit or 0) if (b.debit or 0) > 0 else (b.credit or 0)
         if b.is_settlement:
-            e = _new("bank", "Bank Settlement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description)
+            e = _new("bank", "Bank Settlement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description,
+                     disc=_row_disc("Bank Settlement", b))
             # settlement reconciles under its business (deduct) date, not the posting date
             r = p01_idx.get(((b.deduct_date or recon_date), b.ko_id))
             if r:
@@ -1537,7 +1597,8 @@ def get_unified(
                          counterpart=f"Wallet out {_r(r.wallet_withdrawn)}", result_id=r.id,
                          result_process="p01", _result=r)
         else:
-            e = _new("bank", "Bank Statement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description)
+            e = _new("bank", "Bank Statement", b.id, b.ref_number, b.ko_id, amt, b.txn_date, drcr, b.description,
+                     disc=_row_disc("Bank Statement", b))
             r = p02_by_bank.get(b.id)
             if r:
                 e.update(status=r.match_status, process="P02", result_id=r.id, result_process="p02", _result=r,
@@ -1553,7 +1614,8 @@ def get_unified(
     # ---- data side: transaction reports ----
     for t in db.query(SBITxnReport).filter(SBITxnReport.txn_date == recon_date).all():
         amt = t.amount or 0
-        e = _new("data", "Txn Report", t.id, t.reference_number, t.ko_id, amt, t.txn_date, "", t.txn_type)
+        e = _new("data", "Txn Report", t.id, t.reference_number, t.ko_id, amt, t.txn_date, "", t.txn_type,
+                 file=canonical_product(t.source_file), disc=_row_disc("Txn Report", t))
         e["status"] = "Unmatched"
         r = p02_by_report.get(t.id)
         if r:
@@ -1571,13 +1633,49 @@ def get_unified(
     # ---- data side: KO withdrawals ----
     for w in db.query(SBIKOLimits).filter(SBIKOLimits.txn_type == "KO Withdrawal",
                                           SBIKOLimits.txn_date == recon_date).all():
-        e = _new("data", "KO Withdrawal", w.id, "", w.ko_id, w.amount or 0, w.txn_date, "", "KO Withdrawal")
+        e = _new("data", "KO Withdrawal", w.id, "", w.ko_id, w.amount or 0, w.txn_date, "", "KO Withdrawal",
+                 disc=_row_disc("KO Withdrawal", w))
         r = p01_by_ko.get(w.ko_id)
         if r:
             e.update(status=_P01_UNIFIED_STATUS.get(r.status, r.status), process="P01",
                      counterpart=f"Bank settled {_r(r.bank_settled)}", result_id=r.id,
                      result_process="p01", _result=r)
         entries.append(e)
+
+    # ---- data side: KO deposits (pair-picker only; OFF for the unified page + report) ----
+    if include_deposits:
+        for w in db.query(SBIKOLimits).filter(SBIKOLimits.txn_type == "KO Deposit",
+                                              SBIKOLimits.txn_date == recon_date).all():
+            entries.append(_new("data", "KO Deposit", w.id, "", w.ko_id, w.amount or 0, w.txn_date, "", "KO Deposit",
+                                disc=_row_disc("KO Deposit", w)))
+
+    return _apply_pairs(db, entries)
+
+
+@router.get("/unified")
+def get_unified(
+    recon_date: str,
+    upload_date: Optional[str] = None,
+    side: Optional[str] = None,        # bank | data
+    status: Optional[str] = None,      # Matched | Unmatched | Reversal | ...
+    process: Optional[str] = None,     # p01 | p02 | p03
+    search: Optional[str] = None,      # ref / KO / CSP
+    page: int = 1,
+    page_size: int = 100,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Unified SBI ledger: EVERY source entry — bank statement lines AND data lines
+    (transaction reports, KO withdrawals) — each tagged with its reconciliation
+    status, which process (P01/P02/P03) reconciled it, and its counterpart. Built
+    read-only from the P0x result tables; SRC + manual-match act on the mapped
+    result row via the existing endpoints (result_id + result_process on each row).
+    Scoped to one date (sources by upload_date≈recon_date; behaviour-contract #17).
+    P03 has no source FK, so P03 links are best-effort on CSP+amount.
+    Sources by the transaction's BUSINESS date (recon_date == txn_date), matching the runs.
+    """
+    entries = _unified_entries(db, recon_date, include_deposits=False)
 
     # ---- filters ----
     if side:    entries = [e for e in entries if e["side"] == side]
@@ -2626,6 +2724,260 @@ def list_manual_matches(
     rows = q.order_by(SBIManualMatch.created_at.desc()).all()
     return {"rows": [{"id": m.id, "recon_date": m.recon_date, "process": m.process,
                       "match_key": m.match_key, "counterpart_ref": m.counterpart_ref,
+                      "remark": m.remark, "by": m.created_by, "at": str(m.created_at)} for m in rows],
+            "count": len(rows)}
+
+
+# ── Two-sided manual PAIR (SBI Kiosk pair-picker) ─────────────────────────────
+# A first-class bank-row↔internal-row link (unlike the one-sided SBIManualMatch above).
+# Stored in SBIManualPair keyed by each side's stable business key, overlaid onto the
+# unified read model (_apply_pairs) so both rows flip to Manual_Matched and the exports
+# reconcile. Free-form: any bank row may pair with any internal row; amount/bucket
+# mismatches are surfaced as a warning, not blocked. Internal side spans Txn Reports (each
+# labelled by its source file), KO Withdrawals and KO Deposits — NOT Limit Failures /
+# Cash Holding (they have no bank counterpart).
+
+@router.get("/manual-match/open-items")
+def manual_pair_open_items(
+    side: str,                       # bank | data
+    date_from: str,
+    date_to: Optional[str] = None,
+    search: Optional[str] = None,    # ref / KO / CSP / file
+    amount_min: Optional[float] = None,
+    amount_max: Optional[float] = None,
+    page: int = 1,
+    page_size: int = 200,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Open (unmatched) SBI Kiosk rows for ONE side across a date range — feeds the
+    pair-picker. Bank side = settlements + statement + credits; data side = Txn Reports
+    (each carrying its originating file), KO Withdrawals and KO Deposits."""
+    if side not in ("bank", "data"):
+        raise HTTPException(status_code=400, detail="side must be 'bank' or 'data'")
+    dates = _resolve_workbook_dates(db, date_from, date_to or date_from)   # 422 on bad range / >31 dates
+    rows = []
+    for d in dates:
+        for e in _unified_entries(db, d, include_deposits=True):
+            e.pop("_result", None)
+            if e["side"] != side or e["status"] in _MATCHED_UNIFIED:
+                continue
+            rows.append(e)
+    if search:
+        s = search.lower()
+        rows = [e for e in rows if s in (e["ref"] or "").lower() or s in (e["ko_csp"] or "").lower()
+                or s in (e["file"] or "").lower()]
+    if amount_min is not None:
+        rows = [e for e in rows if float(e["amount"] or 0) >= amount_min]
+    if amount_max is not None:
+        rows = [e for e in rows if float(e["amount"] or 0) <= amount_max]
+    rows.sort(key=lambda e: (e["date"] or "", e["ko_csp"] or "", e["ref"] or ""))
+    total = len(rows)
+    page_rows = rows[(page - 1) * page_size: page * page_size]
+    return {"items": page_rows, "total": total, "page": page, "page_size": page_size, "dates": dates}
+
+
+def _bank_descriptor(b):
+    """Resolve a bank source row to its stable, id-independent pair descriptor."""
+    src = "Bank Settlement" if b.is_settlement else "Bank Statement"
+    drcr = "DR" if (b.debit or 0) > 0 else ("CR" if (b.credit or 0) > 0 else "")
+    amt = (b.debit or 0) if (b.debit or 0) > 0 else (b.credit or 0)
+    key = _pair_key("bank", src, b.ko_id, b.ref_number, b.txn_date, drcr, amt, _row_disc(src, b))
+    return {"key": key, "source": src, "amount": float(amt or 0), "date": b.txn_date}
+
+
+def _data_descriptor(row, data_source):
+    """Resolve an internal source row to its stable, id-independent pair descriptor."""
+    if data_source == "Txn Report":
+        ko, ref, date, amt = row.ko_id, row.reference_number, row.txn_date, (row.amount or 0)
+    else:  # KO Withdrawal | KO Deposit
+        ko, ref, date, amt = row.ko_id, "", row.txn_date, (row.amount or 0)
+    key = _pair_key("data", data_source, ko, ref, date, "", amt, _row_disc(data_source, row))
+    return {"key": key, "source": data_source, "amount": float(amt or 0), "date": date}
+
+
+class ManualPairIn(BaseModel):
+    data_source: str                 # Txn Report | KO Withdrawal | KO Deposit
+    # A fresh submit sends the two source-row ids (resolved to stable keys server-side). A
+    # maker-checker replay instead carries the RESOLVED keys below, so an approved pair never
+    # depends on regenerable source ids (behavior-contract #17 — ids change on re-upload).
+    bank_id: Optional[str] = None
+    data_id: Optional[str] = None
+    bank_key: Optional[str] = None
+    data_key: Optional[str] = None
+    bank_source: Optional[str] = None
+    bank_amount: Optional[float] = None
+    data_amount: Optional[float] = None
+    bank_date: Optional[str] = None
+    data_date: Optional[str] = None
+
+
+class ManualPairBulkIn(BaseModel):
+    pairs: List[ManualPairIn]
+    remark: str = Field("", max_length=500)
+
+
+@router.post("/manual-match/pair")
+def create_manual_pairs(
+    body: ManualPairBulkIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("src_assign")),
+):
+    """Link chosen (bank row, internal row) pairs. Free-form; amount/bucket mismatches are
+    warned, not blocked. Persists as a business-key overlay (survives re-runs + re-uploads),
+    shows as Manual_Matched in the unified view + exports. Remark (5-500) required; maker-checker
+    gated; a bank OR internal row already paired is rejected (1:1)."""
+    if not body.pairs:
+        raise HTTPException(status_code=400, detail="No pairs submitted")
+    remark = (body.remark or "").strip()
+    if len(remark) < 5:
+        raise HTTPException(status_code=400, detail="A remark (≥5 characters) is required")
+
+    # Phase 1 — resolve every pair to STABLE business keys (id-independent) BEFORE the
+    # maker-checker gate, so a queued/approved pair survives a re-upload (#17). A replayed
+    # pair already carries its keys and skips the source-row lookup entirely.
+    existing = db.query(SBIManualPair).all()
+    used_bank = {p.bank_key for p in existing}
+    used_data = {p.data_key for p in existing}
+    resolved, results, errors, warned = [], [], 0, 0
+    for pr in body.pairs:
+        try:
+            if pr.bank_key and pr.data_key:                      # replay: keys already resolved
+                bd = {"key": pr.bank_key, "source": pr.bank_source,
+                      "amount": float(pr.bank_amount or 0), "date": pr.bank_date}
+                dd = {"key": pr.data_key, "source": pr.data_source,
+                      "amount": float(pr.data_amount or 0), "date": pr.data_date}
+            else:                                                # fresh submit: resolve source rows
+                b = db.query(SBIBankTransaction).filter(SBIBankTransaction.id == pr.bank_id).first()
+                if not b:
+                    raise ValueError("Bank row not found")
+                bd = _bank_descriptor(b)
+                ds = pr.data_source
+                if ds == "Txn Report":
+                    row = db.query(SBITxnReport).filter(SBITxnReport.id == pr.data_id).first()
+                elif ds in ("KO Withdrawal", "KO Deposit"):
+                    row = db.query(SBIKOLimits).filter(SBIKOLimits.id == pr.data_id,
+                                                       SBIKOLimits.txn_type == ds).first()
+                else:
+                    raise ValueError(f"Unsupported data source '{ds}'")
+                if not row:
+                    raise ValueError(f"{ds} row not found")
+                dd = _data_descriptor(row, ds)
+
+            if bd["key"] in used_bank:
+                raise ValueError("Bank row already manually matched")
+            if dd["key"] in used_data:
+                raise ValueError("Internal row already manually matched")
+            used_bank.add(bd["key"])
+            used_data.add(dd["key"])
+            diff = round(abs(bd["amount"] - dd["amount"]), 2)
+            resolved.append({"bank_key": bd["key"], "data_key": dd["key"],
+                             "bank_source": bd["source"], "data_source": dd["source"],
+                             "bank_amount": bd["amount"], "data_amount": dd["amount"],
+                             "bank_date": bd["date"], "data_date": dd["date"], "_res_idx": len(results)})
+            results.append({"bank_id": pr.bank_id, "data_id": pr.data_id, "status": "ok",
+                            "pair_id": None, "amount_diff": diff, "warn": diff > TOL})
+            if diff > TOL:
+                warned += 1
+        except Exception as ex:
+            errors += 1
+            results.append({"bank_id": pr.bank_id, "data_id": pr.data_id,
+                            "status": "error", "error": str(ex)[:200]})
+
+    if not resolved:
+        return {"paired": 0, "errors": errors, "warned": 0, "results": results}
+
+    # Phase 2 — maker-checker gate on the RESOLVED descriptors (no volatile source ids).
+    queued = maker_checker.intercept(
+        db, current_user, "sbi_manual_pair",
+        payload={"pairs": [{"data_source": r["data_source"], "bank_key": r["bank_key"],
+                            "data_key": r["data_key"], "bank_source": r["bank_source"],
+                            "bank_amount": r["bank_amount"], "data_amount": r["data_amount"],
+                            "bank_date": r["bank_date"], "data_date": r["data_date"]} for r in resolved],
+                 "remark": remark},
+        summary=f"SBI Kiosk manual pair: {len(resolved)} pair(s)",
+        partner="kiosk")
+    if queued:
+        return queued
+
+    # Phase 3 — persist. Guard the commit so a DB error rolls back cleanly instead of
+    # leaving a poisoned session that 500s with nothing saved.
+    try:
+        for r in resolved:
+            mp = SBIManualPair(
+                bank_date=r["bank_date"], data_date=r["data_date"], bank_key=r["bank_key"],
+                data_key=r["data_key"], bank_source=r["bank_source"], data_source=r["data_source"],
+                bank_amount=r["bank_amount"], data_amount=r["data_amount"],
+                remark=remark, created_by=current_user.username)
+            db.add(mp)
+            db.flush()
+            results[r["_res_idx"]]["pair_id"] = mp.id
+            try:
+                db.add(AuditLog(user_id=current_user.id, username=current_user.username,
+                                action="sbi_manual_pair", action_type="human",
+                                entity_type="sbi", entity_id=mp.id,
+                                detail=json.dumps({"bank_key": r["bank_key"], "data_key": r["data_key"],
+                                                   "bank_source": r["bank_source"], "data_source": r["data_source"],
+                                                   "bank_amount": r["bank_amount"], "data_amount": r["data_amount"],
+                                                   "remark": remark})))
+            except Exception:
+                pass
+        db.commit()
+    except Exception as ex:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save pairs: {str(ex)[:200]}")
+
+    return {"paired": len(resolved), "errors": errors, "warned": warned, "results": results}
+
+
+@router.delete("/manual-match/pair/{pair_id}")
+def delete_manual_pair(
+    pair_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("src_assign")),
+):
+    """Undo a two-sided manual pair — both rows revert to their algorithm-computed status."""
+    mp = db.query(SBIManualPair).filter(SBIManualPair.id == pair_id).first()
+    if not mp:
+        raise HTTPException(status_code=404, detail="Manual pair not found")
+    queued = maker_checker.intercept(
+        db, current_user, "sbi_delete_manual_pair",
+        payload={"pair_id": pair_id},
+        summary=f"SBI Kiosk undo manual pair: {pair_id}",
+        partner="kiosk")
+    if queued:
+        return queued
+    bk, dk = mp.bank_key, mp.data_key
+    db.delete(mp)
+    try:
+        db.add(AuditLog(user_id=current_user.id, username=current_user.username,
+                        action="sbi_manual_unpair", action_type="human",
+                        entity_type="sbi", entity_id=pair_id,
+                        detail=json.dumps({"bank_key": bk, "data_key": dk})))
+    except Exception:
+        pass
+    db.commit()
+    return {"deleted": pair_id}
+
+
+@router.get("/manual-match/pair")
+def list_manual_pairs(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """List two-sided manual pairs touching the date range (either side)."""
+    q = db.query(SBIManualPair)
+    if date_from:
+        q = q.filter(or_(SBIManualPair.bank_date >= date_from, SBIManualPair.data_date >= date_from))
+    if date_to:
+        q = q.filter(or_(SBIManualPair.bank_date <= date_to, SBIManualPair.data_date <= date_to))
+    rows = q.order_by(SBIManualPair.created_at.desc()).all()
+    return {"rows": [{"id": m.id, "bank_date": m.bank_date, "data_date": m.data_date,
+                      "bank_source": m.bank_source, "data_source": m.data_source,
+                      "bank_amount": m.bank_amount, "data_amount": m.data_amount,
+                      "amount_diff": round(abs(float(m.bank_amount or 0) - float(m.data_amount or 0)), 2),
                       "remark": m.remark, "by": m.created_by, "at": str(m.created_at)} for m in rows],
             "count": len(rows)}
 
