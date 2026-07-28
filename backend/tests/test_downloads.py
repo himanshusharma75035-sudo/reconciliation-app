@@ -78,3 +78,40 @@ def test_bad_side_rejected(db):
     with pytest.raises(HTTPException) as e:
         _build_export(db, "fino", "sideways")
     assert e.value.status_code == 400
+
+
+def _wb_header(content):
+    import io as _io, openpyxl as _ox
+    ws = _ox.load_workbook(_io.BytesIO(content))["Data"]
+    return [c.value for c in ws[1]]
+
+
+def test_core_export_expands_raw_data_and_drops_plumbing(db):
+    import json as _j
+    db.add(Transaction(partner="aeps", side="bank", recon_date="2026-07-20", amount=3500, row_type="txn",
+                       recon_status="matched", match_id="APS-1",
+                       raw_data=_j.dumps({"RRN": "620114085924", "Bank Name": "SBI",
+                                          "Transaction Amount": "3500"})))
+    db.commit()
+    hdr = _wb_header(_build_export(db, "aeps", "bank")[0])
+    assert "RRN" in hdr and "Bank Name" in hdr            # original statement columns present
+    assert "Recon Status" in hdr                          # readable recon context appended
+    assert not ({"raw_data", "upload_session_id", "id", "matched_with_id"} & set(hdr))  # plumbing dropped
+
+
+def test_account_filter_core(db):
+    for acct, amt in [("ACC-1", 100), ("ACC-1", 200), ("ACC-2", 300)]:
+        db.add(Transaction(partner="axis", side="bank", recon_date="2026-07-20", amount=amt,
+                           row_type="txn", bank_account=acct, raw_data="{}"))
+    db.commit()
+    assert _build_export(db, "axis", "bank")[1] == 3
+    assert _build_export(db, "axis", "bank", account="ACC-1")[1] == 2
+
+
+def test_catalog_lists_accounts(db):
+    for acct in ("919020056664138", "916020056063631"):
+        db.add(Transaction(partner="axis", side="bank", recon_date="2026-07-20", amount=1,
+                           row_type="txn", bank_account=acct, raw_data="{}"))
+    db.commit()
+    ax = next(p for p in download_catalog(db=db, current_user=USER)["products"] if p["key"] == "axis")
+    assert set(ax["sides"]["bank"]["accounts"]) == {"919020056664138", "916020056063631"}

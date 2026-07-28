@@ -19,7 +19,11 @@ export default function DataDownloads() {
   const [side, setSide] = useState('bank')
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
+  const [account, setAccount] = useState('')
   const [busy, setBusy] = useState(false)
+
+  // reset the chosen account whenever the product or side changes (its account list differs)
+  useEffect(() => { setAccount('') }, [product, side])
 
   useEffect(() => {
     api.get('/downloads/catalog')
@@ -52,7 +56,7 @@ export default function DataDownloads() {
     setBusy(true)
     try {
       const r = await api.get('/downloads/export', {
-        params: { product, side, date_from: from || undefined, date_to: to || undefined },
+        params: { product, side, account: account || undefined, date_from: from || undefined, date_to: to || undefined },
         responseType: 'blob',
       })
       const cd = r.headers['content-disposition'] || ''
@@ -78,7 +82,7 @@ export default function DataDownloads() {
 
       <div className="flex items-start gap-2 text-xs text-blue-800 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 mb-5">
         <ShieldCheck size={15} className="mt-0.5 shrink-0" />
-        <span>A faithful re-export of the stored data (not the exact original file). These rows contain account numbers — access is restricted and <span className="font-semibold">every download is recorded in the audit log</span>.</span>
+        <span>The original statement / dump columns as uploaded (plus the match status), for one bank account or all. These rows contain account numbers — access is restricted and <span className="font-semibold">every download is recorded in the audit log</span>.</span>
       </div>
 
       {loading ? (
@@ -124,6 +128,17 @@ export default function DataDownloads() {
               })}
             </div>
           </div>
+
+          {/* bank account — only for products with more than one (e.g. Axis, E-Value) */}
+          {info?.accounts?.length > 1 && (
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Bank account</label>
+              <select className="input w-full" value={account} onChange={e => setAccount(e.target.value)}>
+                <option value="">All accounts ({info.accounts.length})</option>
+                {info.accounts.map(a => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </div>
+          )}
 
           {/* dates */}
           <div className="flex flex-wrap items-end gap-3">
