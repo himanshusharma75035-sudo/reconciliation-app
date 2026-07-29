@@ -15,6 +15,7 @@ const TABS = [
   { key: 'bank-accounts',   label: '🏛️ Bank Accounts' },
   { key: 'evalue-accounts', label: '👛 E-Value Accounts' },
   { key: 'api-keys',        label: '🔑 API Keys' },
+  { key: 'ai',              label: '🤖 AI' },
 ]
 
 // Derived from the product registry (single source of truth) so a new core product
@@ -1060,6 +1061,51 @@ function APIKeysTab() {
 // ────────────────────────────────────────────────────────────────────────────
 // Main Admin Page
 // ────────────────────────────────────────────────────────────────────────────
+function AIConfigTab() {
+  const [cfg, setCfg] = useState(null)
+  const [key, setKey] = useState('')
+  const [saving, setSaving] = useState(false)
+  const load = () => api.get('/admin/ai-config').then(({ data }) => setCfg(data)).catch(() => toast.error('Failed to load AI config'))
+  useEffect(() => { load() }, [])
+  const save = async (clear = false) => {
+    if (!clear && !key.trim()) { toast.error('Paste an API key first'); return }
+    setSaving(true)
+    try {
+      await api.post('/admin/ai-config', { api_key: clear ? '' : key.trim() })
+      toast.success(clear ? 'API key cleared' : 'API key saved')
+      setKey(''); load()
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Save failed') }
+    setSaving(false)
+  }
+  return (
+    <div className="max-w-2xl">
+      <div className="mb-4">
+        <h3 className="font-semibold text-gray-700">AI — Anthropic API Key</h3>
+        <p className="text-sm text-gray-500">Powers the Developer Portal agent and AI reconciliation. Stored in the database (never shown or logged) so nobody has to edit backend files.</p>
+      </div>
+      <div className="card space-y-4">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-gray-500">Status:</span>
+          {cfg?.configured
+            ? <span className="text-green-700 font-medium">● Configured <span className="font-mono text-gray-400">{cfg.masked}</span> <span className="text-gray-400">(from {cfg.source})</span></span>
+            : <span className="text-gray-400">Not configured</span>}
+        </div>
+        <div>
+          <label className="text-xs text-gray-400 block mb-1">Anthropic API key</label>
+          <input type="password" className="input w-full font-mono" placeholder="sk-ant-…" value={key}
+            onChange={e => setKey(e.target.value)} autoComplete="off" />
+          <p className="text-[11px] text-gray-400 mt-1">A new key replaces the stored one. Write-only — it's never returned to the browser.</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => save(false)} disabled={saving} className="btn">Save key</button>
+          {cfg?.configured && cfg.source === 'config' &&
+            <button onClick={() => save(true)} disabled={saving} className="btn-ghost text-red-600">Clear</button>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Admin() {
   const [tab, setTab] = useState('partners')
 
@@ -1091,6 +1137,7 @@ export default function Admin() {
       {tab === 'bank-accounts'   && <BankAccountsTab />}
       {tab === 'evalue-accounts' && <EvalueAccountsTab />}
       {tab === 'api-keys'        && <APIKeysTab />}
+      {tab === 'ai'              && <AIConfigTab />}
     </div>
   )
 }

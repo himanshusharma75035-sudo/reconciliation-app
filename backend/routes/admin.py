@@ -9,6 +9,7 @@ All write endpoints require admin role.
 GET /api/partners is public (used by Upload, RunRecon, Dashboard dropdowns).
 """
 
+import os
 import json
 import datetime
 from typing import Optional, List
@@ -18,7 +19,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from models.database import (
-    get_db, PartnerConfig, BankFormatPreset, MatchRule, generate_id
+    get_db, PartnerConfig, BankFormatPreset, MatchRule, generate_id,
+    SystemSetting, AuditLog,
 )
 from core.auth import require_permission, require_admin
 
@@ -427,3 +429,53 @@ def delete_bank_account(account_id: str, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="Bank account not found")
     db.delete(row); db.commit()
     return {"status": "deleted"}
+
+
+# ── AI configuration (Anthropic API key) ──────────────────────────────────────
+# The key that powers the Developer-Portal agent and (going forward) AI reconciliation.
+# Stored in SystemSetting so admins set it here instead of editing backend/.env. The value
+# is never returned — only a masked preview + configured/source status. config_audit blocks
+# 'api_key' from the change log, and the audit row we write carries no key material.
+
+class AIConfigIn(BaseModel):
+    api_key: str
+
+
+def _mask_key(k: str) -> str:
+    k = (k or "").strip()
+    if not k:
+        return ""
+    return (k[:7] + "…" + k[-4:]) if len(k) > 14 else "set"
+
+
+@router.get("/ai-config")
+def get_ai_config(db: Session = Depends(get_db), _=Depends(require_admin)):
+    row = db.query(SystemSetting).filter(SystemSetting.key == "anthropic_api_key").first()
+    cfg = (row.value if row else "") or ""
+    env = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    active = cfg.strip() or env
+    return {
+        "configured": bool(active),
+        "masked": _mask_key(active),
+        "source": "config" if cfg.strip() else ("env" if env else "none"),
+        "updated_by": getattr(row, "updated_by", None) if row else None,
+    }
+
+
+@router.post("/ai-config")
+def set_ai_config(body: AIConfigIn, db: Session = Depends(get_db), user=Depends(require_admin)):
+    key = (body.api_key or "").strip()
+    row = db.query(SystemSetting).filter(SystemSetting.key == "anthropic_api_key").first()
+    if not row:
+        row = SystemSetting(key="anthropic_api_key")
+        db.add(row)
+    row.value = key
+    row.updated_by = user.username
+    try:
+        db.add(AuditLog(user_id=user.id, username=user.username, action="ai_config_set",
+                        action_type="human", entity_type="config", entity_id="anthropic_api_key",
+                        detail=json.dumps({"configured": bool(key)})))   # never log the key itself
+    except Exception:
+        pass
+    db.commit()
+    return {"configured": bool(key), "masked": _mask_key(key)}

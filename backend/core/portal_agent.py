@@ -40,6 +40,19 @@ SEARCH_MAX_HITS = 60
 # ── Availability ──────────────────────────────────────────────────────────────
 
 def _api_key() -> str:
+    """The Anthropic API key. A DB-configured key (admin → Configuration) wins so nobody has to
+    edit backend/.env; falls back to the env var for bootstrap / legacy deploys."""
+    try:
+        from models.database import SessionLocal, SystemSetting
+        db = SessionLocal()
+        try:
+            row = db.query(SystemSetting).filter(SystemSetting.key == "anthropic_api_key").first()
+            if row and (row.value or "").strip():
+                return row.value.strip()
+        finally:
+            db.close()
+    except Exception:
+        pass
     return (os.getenv("ANTHROPIC_API_KEY") or "").strip()
 
 
