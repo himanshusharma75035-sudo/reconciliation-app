@@ -20,6 +20,13 @@ const FALLBACK_PARTNERS = [
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 const isAdmin = () => { try { return JSON.parse(localStorage.getItem('user') || '{}').role === 'admin' } catch { return false } }
 
+// Shared System/AI badge — AI content is advisory (de-identified, verify before acting).
+const AiBadge = () => (
+  <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-violet-100 text-violet-700" title="AI-generated from de-identified aggregates — advisory">🤖 AI</span>
+)
+const likeClass = l => l === 'high' ? 'bg-red-50 text-red-600' : l === 'medium' ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-600'
+const trendClass = t => t === 'worsening' ? 'text-red-600' : t === 'improving' ? 'text-green-600' : 'text-gray-500'
+
 export default function Insights() {
   const [tab, setTab] = useState('trend')
   const [partners, setPartners] = useState([])
@@ -58,15 +65,42 @@ function Trend({ partners }) {
   const [partner, setPartner] = useState('')
   const [months, setMonths] = useState(3)
   const [data, setData] = useState(null)
+  const [ai, setAi] = useState(null)
+  const [aiLoading, setAiLoading] = useState(false)
   const load = () => api.get('/insights/trend', { params: { partner: partner || undefined, months } }).then(({ data }) => setData(data)).catch(() => toast.error('Failed'))
-  useEffect(() => { load() }, [partner, months])
+  useEffect(() => { load(); setAi(null) }, [partner, months])
+  const explain = () => {
+    setAiLoading(true)
+    api.get('/insights/trend-narrative-ai', { params: { partner: partner || undefined, months } })
+      .then(({ data }) => { if (data.error) toast(data.error, { icon: '🤖' }); setAi(data) })
+      .catch(() => toast.error('AI explain failed')).finally(() => setAiLoading(false))
+  }
   return (
     <div className="max-w-5xl">
       <div className="flex items-center gap-3 mb-4">
         <select className="select w-44" value={partner} onChange={e => setPartner(e.target.value)}><option value="">All partners</option>{partners.map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}</select>
         <select className="select w-28" value={months} onChange={e => setMonths(+e.target.value)}>{[3, 6, 12].map(m => <option key={m} value={m}>{m} months</option>)}</select>
         <button onClick={load} className="btn-ghost text-xs flex items-center gap-1"><RefreshCw size={12} /> Refresh</button>
+        <button onClick={explain} disabled={aiLoading} className="btn-ghost text-xs flex items-center gap-1 text-violet-600 hover:border-violet-200">🤖 {aiLoading ? 'Thinking…' : 'Explain trend'}</button>
       </div>
+      {ai && (ai.narrative || (ai.highlights || []).length > 0) && (
+        <div className="card mb-4 border-violet-100 bg-violet-50/20">
+          <div className="flex items-center gap-2 mb-1"><AiBadge /><span className="text-xs font-semibold text-gray-700">AI trend summary</span></div>
+          {ai.narrative && <p className="text-sm text-gray-700 mb-2">{ai.narrative}</p>}
+          {(ai.highlights || []).length > 0 && (
+            <ul className="space-y-1">
+              {ai.highlights.map((h, i) => (
+                <li key={i} className="text-xs text-gray-600 flex items-start gap-2">
+                  <span className={`font-semibold capitalize ${trendClass(h.trend)}`}>{h.trend}</span>
+                  <span className="capitalize font-medium">{h.product}</span>
+                  <span className="text-gray-400">— {h.detail}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-[10px] text-gray-400 mt-2">{ai.disclaimer}</p>
+        </div>
+      )}
       {data && (
         <div className="card overflow-x-auto">
           <table className="w-full text-xs">
@@ -94,17 +128,49 @@ function Escalation({ partners }) {
   const [partner, setPartner] = useState('')
   const [data, setData] = useState(null)
   const [draft, setDraft] = useState(null)
+  const [rc, setRc] = useState(null)
+  const [rcLoading, setRcLoading] = useState(false)
   const load = () => api.get('/insights/escalation', { params: { partner: partner || undefined } }).then(({ data }) => setData(data)).catch(() => toast.error('Failed'))
-  useEffect(() => { load() }, [partner])
+  useEffect(() => { load(); setRc(null) }, [partner])
   const makeDraft = () => { if (!partner) return toast.error('Pick a partner'); api.get('/insights/escalation/email-draft', { params: { partner } }).then(({ data }) => setDraft(data)).catch(() => toast.error('Failed')) }
+  const rootCause = () => {
+    setRcLoading(true)
+    api.get('/insights/escalation-rootcause-ai', { params: { partner: partner || undefined } })
+      .then(({ data }) => { if (data.error) toast(data.error, { icon: '🤖' }); setRc(data) })
+      .catch(() => toast.error('AI root-cause failed')).finally(() => setRcLoading(false))
+  }
   return (
     <div className="max-w-5xl">
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-3 mb-4 flex-wrap">
         <select className="select w-44" value={partner} onChange={e => setPartner(e.target.value)}><option value="">All partners</option>{partners.map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}</select>
         <button onClick={load} className="btn-ghost text-xs flex items-center gap-1"><RefreshCw size={12} /> Refresh</button>
         <button onClick={makeDraft} disabled={!partner} className="btn-primary text-xs flex items-center gap-1 disabled:opacity-50"><Mail size={13} /> Draft email</button>
+        <button onClick={rootCause} disabled={rcLoading} className="btn-ghost text-xs flex items-center gap-1 text-violet-600 hover:border-violet-200">🤖 {rcLoading ? 'Thinking…' : 'AI root-cause'}</button>
       </div>
       {data && <p className="text-sm text-gray-600 mb-2"><strong className="text-red-600">{data.count}</strong> item(s) open beyond D+7, totalling <strong>{inr(data.total_amount)}</strong></p>}
+      {rc && ((rc.hypotheses || []).length > 0 || rc.note) && (
+        <div className="card mb-4 border-violet-100 bg-violet-50/20">
+          <div className="flex items-center gap-2 mb-2"><AiBadge /><span className="text-xs font-semibold text-gray-700">AI root-cause hypotheses</span></div>
+          {(rc.hypotheses || []).length > 0 && (
+            <ul className="space-y-1.5 mb-2">
+              {rc.hypotheses.map((h, i) => (
+                <li key={i} className="text-xs text-gray-700 flex items-start gap-2">
+                  <span className={`px-2 py-0.5 rounded-full font-medium capitalize ${likeClass(h.likelihood)}`}>{h.likelihood}</span>
+                  <span><strong>{h.title}</strong>{h.rationale ? <span className="text-gray-400"> — {h.rationale}</span> : null}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {rc.note && (
+            <div className="mt-2">
+              <div className="flex items-center justify-between mb-1"><span className="text-[11px] font-semibold text-violet-700">Suggested escalation note</span>
+                <button onClick={() => { navigator.clipboard?.writeText(rc.note); toast.success('Copied') }} className="btn-ghost text-[11px] flex items-center gap-1"><Copy size={11} /> Copy</button></div>
+              <pre className="text-[11px] text-gray-600 whitespace-pre-wrap font-sans">{rc.note}</pre>
+            </div>
+          )}
+          <p className="text-[10px] text-gray-400 mt-2">{rc.disclaimer}</p>
+        </div>
+      )}
       {draft && (
         <div className="card mb-4 bg-blue-50/40">
           <div className="flex items-center justify-between mb-1"><span className="text-xs font-semibold text-blue-700">Email draft</span>

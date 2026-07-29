@@ -309,6 +309,20 @@ was ignored, the guard saw a live key, and the test hit the paid API (surfacing,
 the key was out of credits). Import external clients at **module top level** so tests can stub
 them, and treat *any* unit test reaching the network as a bug in the test's isolation.
 
+**A "promote to config" endpoint must bind scope server-side — never trust a client scope key.**
+An endpoint that let a suggestion (AI- or user-proposed) be promoted to a live matching rule took
+the target partner straight from the request body. Because rules are loaded with `partner IN
+(partner, "all")`, a caller with only the delegable rule-edit permission could POST `partner:"all"`
+and inject a **global, active** rule that silently reclassified money across *every* partner —
+a blast radius the analogous privileged paths (admin CRUD, learned-suggestion accept) all blocked
+by validating and lowercasing the partner and reserving global scope for admins. The rule: when an
+action writes config that the engine applies to many entities, validate the scope against the
+real registry, reject the wildcard ("all") unless the caller is an admin, canonicalise it (a
+non-lowercased slug creates a silently *dead* rule), and mirror the constraints of the existing
+privileged path rather than inventing a looser one. This class of bug is invisible in a green test
+suite and in a "does it work" demo — an **adversarial review that tries to escalate scope** is what
+surfaces it before deploy.
+
 ---
 
 ## 7. Operations & deployment

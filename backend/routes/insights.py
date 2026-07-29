@@ -221,6 +221,28 @@ def escalation_email(partner: str = Query(...), db: Session = Depends(get_db),
     return {"partner": partner, "subject": subject, "body": body, "count": esc["count"]}
 
 
+# ── 4b) AI insight layer (advisory, de-identified aggregates, tagged AI) ───────
+
+@router.get("/trend-narrative-ai")
+def trend_narrative_ai(partner: Optional[str] = None, months: int = Query(3, ge=1, le=12),
+                       db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Plain-English AI explanation of the SAME aggregate trend table (no row PII).
+    Advisory, tagged source:"ai"; degrades gracefully when AI is unavailable."""
+    payload = trend(partner=partner, months=months, db=db, user=user)
+    from core.ai_insights import narrate_trend
+    return narrate_trend(payload)
+
+
+@router.get("/escalation-rootcause-ai")
+def escalation_rootcause_ai(partner: Optional[str] = None,
+                            db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """AI root-cause hypotheses + a draft escalation note for the D+7 aged open items.
+    Built from numbers-only aggregates (no per-row PII). Advisory, tagged source:"ai"."""
+    esc = escalation(partner=partner, db=db, user=user)
+    from core.ai_insights import explain_escalation
+    return explain_escalation(esc.get("items", []), partner)
+
+
 # ── 5) Monthly reconciliation certificate (PDF) ───────────────────────────────
 @router.get("/certificate")
 def certificate(partner: str = Query(...), month: str = Query(..., description="YYYY-MM"),

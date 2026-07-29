@@ -238,7 +238,7 @@ function FeeRulesTab() {
 
 // ═══════════════════════════════ Anomalies ═══════════════════════════════════
 
-function AnomalyTable({ title, icon, items = [], columns, searchKey, empty, accent = 'red' }) {
+function AnomalyTable({ title, icon, items = [], columns, searchKey, empty, accent = 'red', sourceTag }) {
   const [query, setQuery] = useState('')
   const [showAll, setShowAll] = useState(false)
   const TOP = 15
@@ -255,6 +255,11 @@ function AnomalyTable({ title, icon, items = [], columns, searchKey, empty, acce
       <div className={`flex items-center justify-between px-4 py-3 border-b ${items.length ? `bg-${accent}-50/40 border-${accent}-100` : 'bg-gray-50/50 border-gray-100'}`}>
         <h3 className="font-semibold text-gray-800 text-sm flex items-center gap-2">
           <span>{icon}</span>{title}
+          {sourceTag && (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${sourceTag === 'AI' ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-600'}`}>
+              {sourceTag === 'AI' ? '🤖 AI' : 'System'}
+            </span>
+          )}
           <span className={`text-[11px] px-2 py-0.5 rounded-full font-bold ${items.length ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>
             {items.length ? `${items.length} found` : 'clear ✓'}
           </span>
@@ -300,6 +305,8 @@ function AnomalyTable({ title, icon, items = [], columns, searchKey, empty, acce
 function AnomaliesTab() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [aiData, setAiData] = useState(null)
+  const [aiLoading, setAiLoading] = useState(false)
 
   const scan = () => {
     setLoading(true)
@@ -308,30 +315,48 @@ function AnomaliesTab() {
   }
   useEffect(() => { scan() }, [])
 
+  // AI scan — de-identified, advisory, button-triggered (no spend on tab open).
+  const scanAi = () => {
+    setAiLoading(true)
+    api.get('/workflow/anomalies-ai').then(({ data }) => {
+      if (data.error) toast(data.error, { icon: '🤖' })
+      else if ((data.ai_anomalies || []).length === 0) toast('AI found no novel anomalies', { icon: '🤖' })
+      else toast.success(`AI flagged ${data.ai_anomalies.length} anomal${data.ai_anomalies.length === 1 ? 'y' : 'ies'}`)
+      if (data.note) toast(data.note, { icon: 'ℹ️' })
+      setAiData(data)
+    }).catch(() => toast.error('AI anomaly scan failed')).finally(() => setAiLoading(false))
+  }
+
   const counts = {
     utr: data?.duplicate_utr?.length || 0,
     tid: data?.duplicate_tid?.length || 0,
     vol: data?.volume_spikes?.length || 0,
+    ai: aiData?.ai_anomalies?.length || 0,
   }
+  const sevClass = s => s === 'high' ? 'bg-red-50 text-red-600' : s === 'medium' ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-600'
 
   return (
     <div className="max-w-5xl space-y-4">
       {/* Summary strip */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         {[
-          { l: 'Duplicate UTRs', v: counts.utr, i: '🔁' },
-          { l: 'Duplicate TIDs', v: counts.tid, i: '🆔' },
-          { l: 'Volume anomalies', v: counts.vol, i: '📈' },
+          { l: 'Duplicate UTRs', v: counts.utr, i: '🔁', ai: false },
+          { l: 'Duplicate TIDs', v: counts.tid, i: '🆔', ai: false },
+          { l: 'Volume anomalies', v: counts.vol, i: '📈', ai: false },
+          { l: 'AI findings', v: counts.ai, i: '🤖', ai: true },
         ].map(c => (
           <div key={c.l} className="bg-white rounded-lg border border-gray-100 p-3 flex items-center gap-3">
             <span className="text-xl">{c.i}</span>
             <div>
-              <div className={`text-lg font-bold ${c.v ? 'text-red-600' : 'text-green-600'}`}>{c.v}</div>
+              <div className={`text-lg font-bold ${c.ai ? (c.v ? 'text-violet-600' : 'text-gray-400') : (c.v ? 'text-red-600' : 'text-green-600')}`}>{c.v}</div>
               <div className="text-[11px] text-gray-500">{c.l}</div>
             </div>
           </div>
         ))}
-        <div className="col-span-3 flex justify-end -mt-1">
+        <div className="col-span-4 flex justify-end gap-2 -mt-1">
+          <button onClick={scanAi} disabled={aiLoading} className="btn-ghost text-xs flex items-center gap-1 text-violet-600 hover:border-violet-200">
+            🤖 {aiLoading ? 'Thinking…' : 'AI anomalies'}
+          </button>
           <button onClick={scan} disabled={loading} className="btn-ghost text-xs flex items-center gap-1">
             <RefreshCw size={12} className={loading ? 'animate-spin' : ''} /> {loading ? 'Scanning…' : 'Re-scan'}
           </button>
@@ -339,7 +364,7 @@ function AnomaliesTab() {
       </div>
 
       <AnomalyTable
-        title="Duplicate UTRs (bank side)" icon="🔁" items={data?.duplicate_utr || []}
+        title="Duplicate UTRs (bank side)" icon="🔁" items={data?.duplicate_utr || []} sourceTag="System"
         searchKey="utr_number" empty="No duplicate UTRs found — every bank UTR is unique."
         columns={[
           { label: 'UTR Number', render: it => <span className="font-mono">{it.utr_number}</span> },
@@ -347,7 +372,7 @@ function AnomaliesTab() {
         ]}
       />
       <AnomalyTable
-        title="Duplicate Eko TIDs" icon="🆔" items={data?.duplicate_tid || []}
+        title="Duplicate Eko TIDs" icon="🆔" items={data?.duplicate_tid || []} sourceTag="System"
         searchKey="eko_tid" empty="No duplicate TIDs found."
         columns={[
           { label: 'Eko TID', render: it => <span className="font-mono">{it.eko_tid}</span> },
@@ -356,7 +381,7 @@ function AnomaliesTab() {
         ]}
       />
       <AnomalyTable
-        title="Volume anomalies (vs trailing 7-day average)" icon="📈" items={data?.volume_spikes || []}
+        title="Volume anomalies (vs trailing 7-day average)" icon="📈" items={data?.volume_spikes || []} sourceTag="System"
         searchKey="partner" empty="No volume spikes or drops detected." accent="amber"
         columns={[
           { label: 'Partner', render: it => <span className="capitalize font-medium">{it.partner}</span> },
@@ -366,6 +391,23 @@ function AnomaliesTab() {
           { label: 'Signal', render: it => <span className={`px-2 py-0.5 rounded-full font-medium ${it.direction === 'spike' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600'}`}>{it.direction === 'spike' ? '▲ spike' : '▼ drop'}</span> },
         ]}
       />
+
+      {/* AI-detected anomalies — advisory, de-identified, human-reviewed */}
+      {aiData && (
+        <AnomalyTable
+          title="AI-detected anomalies (advisory)" icon="🤖" items={aiData.ai_anomalies || []} sourceTag="AI"
+          searchKey="title" accent="amber" empty="AI found no novel anomalies in this window."
+          columns={[
+            { label: 'Source', render: () => <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-violet-100 text-violet-700" title="Detected by AI (de-identified) — review before acting">🤖 AI</span> },
+            { label: 'Kind', render: it => <span className="font-mono text-[11px] text-gray-500">{it.kind}</span> },
+            { label: 'Finding', render: it => <span className="font-medium text-gray-800">{it.title}</span> },
+            { label: 'Severity', render: it => <span className={`px-2 py-0.5 rounded-full font-medium capitalize ${sevClass(it.severity)}`}>{it.severity}</span> },
+            { label: 'Detail', render: it => <span className="text-gray-500">{it.detail}</span> },
+            { label: 'Amount', right: true, render: it => it.amount != null ? inr(it.amount) : '—' },
+            { label: 'Date', render: it => <span className="font-mono">{it.date || '—'}</span> },
+          ]}
+        />
+      )}
     </div>
   )
 }
@@ -373,8 +415,12 @@ function AnomaliesTab() {
 // ═══════════════════════════════ Rule suggestions (Tier 2) ═══════════════════
 
 function RuleSuggestionsTab() {
-  const [rows, setRows] = useState([])
+  const [rows, setRows] = useState([])          // System — learned from manual matches
+  const [aiRows, setAiRows] = useState([])      // AI — proposed from de-identified data (ephemeral)
   const [loading, setLoading] = useState(false)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [partners, setPartners] = useState([])
+  const [partner, setPartner] = useState('')
 
   const load = () => {
     setLoading(true)
@@ -383,7 +429,28 @@ function RuleSuggestionsTab() {
       .finally(() => setLoading(false))
   }
   useEffect(() => { load() }, [])
+  useEffect(() => {
+    api.get('/admin/partners-public')
+      .then(({ data }) => { const core = (data || []).filter(isCoreLedgerPartner); setPartners(core); if (core[0]) setPartner(core[0].slug) })
+      .catch(() => {})
+  }, [])
 
+  // AI analysis — de-identified, advisory. Proposes NEW rules a human promotes.
+  const runAi = () => {
+    if (!partner) return toast.error('Pick a partner first')
+    setAiLoading(true)
+    api.get('/workflow/rule-suggestions-ai', { params: { partner } })
+      .then(({ data }) => {
+        if (data.error) toast(data.error, { icon: '🤖' })
+        else if ((data.suggestions || []).length === 0) toast('AI proposed no new rules', { icon: '🤖' })
+        else toast.success(`AI proposed ${data.suggestions.length} rule${data.suggestions.length === 1 ? '' : 's'}`)
+        setAiRows(data.suggestions || [])
+      })
+      .catch((e) => toast.error(e.response?.data?.detail || 'AI analysis failed'))
+      .finally(() => setAiLoading(false))
+  }
+
+  // System (learned) accept/dismiss — unchanged path.
   const act = async (row, kind) => {
     try {
       const { data } = await api.post(`/workflow/rule-suggestions/${row.id}/${kind}`)
@@ -391,30 +458,75 @@ function RuleSuggestionsTab() {
       load()
     } catch (e) { toast.error(e.response?.data?.detail || 'Action failed') }
   }
+  // AI accept → promote to a real MatchRule; AI dismiss → drop locally (ephemeral).
+  const actAi = async (row, kind) => {
+    if (kind === 'dismiss') { setAiRows(prev => prev.filter(x => x !== row)); return }
+    try {
+      const { data } = await api.post('/workflow/rule-suggestions-ai/accept', { partner: row.partner, fields: row.fields })
+      toast.success(`Rule created: ${data.created_rule}`)
+      setAiRows(prev => prev.filter(x => x !== row))
+    } catch (e) { toast.error(e.response?.data?.detail || 'Action failed') }
+  }
+
+  const Badge = ({ ai }) => (
+    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${ai ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-600'}`}
+      title={ai ? 'Proposed by AI from de-identified data — review before creating' : 'Learned from your team\'s manual matches'}>
+      {ai ? '🤖 AI' : 'System'}
+    </span>
+  )
+  const fieldChip = f => <span key={f} className="font-mono text-xs bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded mx-0.5">{f}</span>
 
   return (
-    <div className="max-w-4xl">
+    <div className="max-w-4xl space-y-4">
+      {/* AI analysis controls */}
       <div className="card">
-        <div className="flex items-center justify-between mb-3">
-          <p className="text-xs text-gray-400">
-            Patterns learned from your team's manual matches. When the same field combination keeps
-            working, promote it to a real matching rule — future recon runs apply it automatically.
+        <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+          <p className="text-xs text-gray-400 flex-1 min-w-[240px]">
+            Suggestions come from two sources: <strong>System</strong> — patterns learned from your team's
+            manual matches; and <strong>AI</strong> — new rules proposed from a de-identified view of a
+            partner's unmatched rows. Both are promoted to a real matching rule only when you approve.
           </p>
-          <button onClick={load} disabled={loading} className="btn-ghost text-xs flex items-center gap-1"><RefreshCw size={12} /> Refresh</button>
+          <div className="flex items-center gap-2">
+            <select className="select text-xs py-1.5" value={partner} onChange={e => setPartner(e.target.value)}>
+              {partners.length === 0 && <option value="">No partners</option>}
+              {partners.map(p => <option key={p.slug} value={p.slug}>{p.display_name}</option>)}
+            </select>
+            <button onClick={runAi} disabled={aiLoading} className="btn-ghost text-xs flex items-center gap-1 text-violet-600 hover:border-violet-200">
+              🤖 {aiLoading ? 'Analyzing…' : 'AI Suggestions'}
+            </button>
+            <button onClick={load} disabled={loading} className="btn-ghost text-xs flex items-center gap-1"><RefreshCw size={12} /> Refresh</button>
+          </div>
         </div>
-        {rows.length === 0 ? (
+      </div>
+
+      <div className="card">
+        {aiRows.length === 0 && rows.length === 0 ? (
           <p className="text-sm text-gray-400 py-6 text-center">
-            Nothing learned yet — patterns appear here after the same kind of manual match happens at least twice.
+            Nothing yet — learned patterns appear after the same manual match happens twice, or run <strong>AI Suggestions</strong> for a partner above.
           </p>
         ) : (
           <div className="space-y-2">
-            {rows.map(r => (
-              <div key={r.id} className="border border-gray-100 rounded-lg p-3 flex items-center gap-3 flex-wrap">
-                <Lightbulb size={15} className="text-amber-500" />
+            {aiRows.map((r, i) => (
+              <div key={`ai-${i}`} className="border border-violet-100 bg-violet-50/20 rounded-lg p-3 flex items-center gap-3 flex-wrap">
+                <Badge ai />
                 <div className="flex-1 min-w-[240px]">
                   <div className="text-sm text-gray-800">
-                    <span className="capitalize font-medium">{r.partner}</span>: match on{' '}
-                    {r.fields.map(f => <span key={f} className="font-mono text-xs bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded mx-0.5">{f}</span>)}
+                    <span className="capitalize font-medium">{r.partner}</span>: match on {r.fields.map(fieldChip)}
+                  </div>
+                  <div className="text-[11px] text-gray-400 mt-0.5">{r.rationale} · confidence {r.confidence}%</div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => actAi(r, 'accept')} className="px-3 py-1 rounded text-xs font-medium bg-violet-600 text-white hover:bg-violet-700">Create rule</button>
+                  <button onClick={() => actAi(r, 'dismiss')} className="px-3 py-1 rounded text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200">Dismiss</button>
+                </div>
+              </div>
+            ))}
+            {rows.map(r => (
+              <div key={r.id} className="border border-gray-100 rounded-lg p-3 flex items-center gap-3 flex-wrap">
+                <Badge ai={false} />
+                <div className="flex-1 min-w-[240px]">
+                  <div className="text-sm text-gray-800">
+                    <span className="capitalize font-medium">{r.partner}</span>: match on {r.fields.map(fieldChip)}
                   </div>
                   <div className="text-[11px] text-gray-400 mt-0.5">seen {r.hit_count}× in manual matches · last {r.last_seen?.slice(0, 10)}</div>
                 </div>

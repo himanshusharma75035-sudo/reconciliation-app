@@ -543,6 +543,74 @@ def dismiss_rule_suggestion(sug_id: str, db: Session = Depends(get_db),
     return {"dismissed": sug_id}
 
 
+# ── AI rule-suggestions (advisory; separate from the learned-from-manual ones) ─
+
+@router.get("/rule-suggestions-ai")
+def rule_suggestions_ai(partner: str = Query(...),
+                        date_from: str = Query(""), date_to: str = Query(""),
+                        db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    AI-proposed matching rules for a partner, from a DE-IDENTIFIED view of its
+    unmatched rows. Advisory + ephemeral (recomputed each call) — a human promotes
+    one via /rule-suggestions-ai/accept. Tagged source:"ai". Never writes.
+    """
+    def base(side):
+        q = db.query(Transaction).filter(
+            Transaction.partner == partner, Transaction.side == side,
+            Transaction.recon_status == ReconStatus.unmatched,
+            Transaction.row_type == "txn",
+        )
+        if date_from: q = q.filter(Transaction.recon_date >= date_from)
+        if date_to:   q = q.filter(Transaction.recon_date <= date_to)
+        return q.limit(3000).all()
+
+    from models.database import MatchRule
+    existing = []
+    for r in db.query(MatchRule).filter(MatchRule.partner.in_([partner, "all"])).all():
+        try:
+            existing.append(json.loads(r.match_fields or "[]"))
+        except Exception:
+            pass
+
+    from core.ai_rules import suggest_rules
+    return suggest_rules(base("bank"), base("internal"), partner, existing)
+
+
+class AiRuleAccept(BaseModel):
+    partner: str
+    fields: List[str]
+    name: Optional[str] = None
+
+
+@router.post("/rule-suggestions-ai/accept")
+def accept_ai_rule(body: AiRuleAccept, db: Session = Depends(get_db),
+                   user=Depends(require_permission("logic_builder"))):
+    """Promote an AI-proposed rule to a real MatchRule (appended at lowest priority).
+    Constrained to the valid match-field vocabulary so the created rule always works."""
+    from models.database import MatchRule, PartnerConfig
+    from core.ai_rules import ALLOWED_FIELDS
+    fields = [f for f in (body.fields or []) if f in ALLOWED_FIELDS]
+    fields = list(dict.fromkeys(fields))
+    if not fields or fields == ["amount"]:
+        raise HTTPException(400, "A rule needs a valid field combination (not amount alone).")
+    # Bind to a real, single partner (canonical slug) — never trust the client to widen scope.
+    # A global "all" rule reclassifies every partner's money, so it stays admin-only (admin CRUD).
+    partner = (body.partner or "").strip().lower()
+    if not partner or partner == "all":
+        raise HTTPException(400, "Choose a specific partner — global 'all' rules are not allowed here.")
+    if not db.query(PartnerConfig).filter(PartnerConfig.slug == partner).first():
+        raise HTTPException(404, f"Unknown partner '{partner}'.")
+    max_prio = db.query(func.max(MatchRule.priority)).filter(MatchRule.partner == partner).scalar() or 0
+    name = (body.name or "").strip() or f"AI: {' + '.join(f.replace('_', ' ').title() for f in fields)}"
+    rule = MatchRule(name=name, partner=partner, priority=max_prio + 1,
+                     match_fields=json.dumps(fields), is_active=True)
+    db.add(rule)
+    db.commit()
+    _log(db, user, "ai_rule_suggestion_accepted", "match_rule", rule.id,
+         detail={"partner": partner, "fields": fields, "source": "ai"})
+    return {"created_rule": rule.name, "partner": partner, "priority": rule.priority}
+
+
 # ═══════════════════════════════ Anomalies ═══════════════════════════════════
 
 @router.get("/anomalies")
@@ -588,3 +656,25 @@ def anomalies(partner: str = Query(""), db: Session = Depends(get_db),
                 "direction": "spike" if latest > avg * 2 else "drop",
             })
     return out
+
+
+@router.get("/anomalies-ai")
+def anomalies_ai(partner: str = Query(""),
+                 date_from: str = Query(""), date_to: str = Query(""),
+                 db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    AI-detected anomalies the rule scan structurally can't catch (near-duplicate
+    references, same-amount clusters, timing outliers). Advisory only — the model
+    sees a DE-IDENTIFIED payload and never writes. Tagged source:"ai".
+    """
+    q = db.query(Transaction).filter(Transaction.row_type == "txn")
+    if partner:   q = q.filter(Transaction.partner == partner)
+    if date_from: q = q.filter(Transaction.recon_date >= date_from)
+    if date_to:   q = q.filter(Transaction.recon_date <= date_to)
+    # Favour the rows most worth scrutinising: unmatched + amount_mismatch first.
+    q = q.filter(Transaction.recon_status.in_([
+        ReconStatus.unmatched, ReconStatus.amount_mismatch, ReconStatus.src_assigned]))
+    rows = q.order_by(Transaction.recon_date.desc()).limit(400).all()
+
+    from core.ai_anomalies import detect_anomalies
+    return detect_anomalies(rows)
