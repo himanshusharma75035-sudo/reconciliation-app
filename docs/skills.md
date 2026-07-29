@@ -288,6 +288,27 @@ mutating endpoint, including newer products bolted on later.
 **Fail open, not closed, on non-essential paths.** Auto-recon chains, notifications and health
 checks must never block an upload or crash a report. Swallow and log.
 
+**Sending money data to an external model needs one de-identification choke-point.** When you
+add AI assistance (e.g. "AI-suggested matches") to a ledger app, make a *single* module the
+only place rows become a model-visible payload, and make it an **allowlist, not a denylist**:
+emit only match-relevant fields (amounts, dates, DR/CR, status, transaction *reference* numbers)
+and never account numbers, customer/retailer names, narration, or the raw source row. Replace
+every real row id with an opaque per-batch token (`B1`, `I7`) so the model can only refer to a
+row by something it cannot resolve to a customer — and map tokens back to ids server-side. Add a
+**fail-closed guard** that re-scans the exact outgoing payload for any sensitive value and raises
+*before* the network call (a false positive kills one suggestion run; a false negative leaks a
+customer). Keep the AI **advisory**: it returns suggestions a human confirms — it never writes a
+matched status. And **degrade gracefully** — no key, no SDK, no credits, or a model error must
+return an empty result with a friendly message, never a 500. (Reuse the app's existing key
+resolution so the model key lives in config/DB, not scattered across `.env` files.)
+
+**An in-function re-import silently defeats a monkeypatch — and can fire a real API call.**
+A "disabled path" unit test stubbed the module's `portal_agent`, but the function under test did
+`from core import portal_agent` *inside itself*, rebinding the name to the real module; the stub
+was ignored, the guard saw a live key, and the test hit the paid API (surfacing, usefully, that
+the key was out of credits). Import external clients at **module top level** so tests can stub
+them, and treat *any* unit test reaching the network as a bug in the test's isolation.
+
 ---
 
 ## 7. Operations & deployment

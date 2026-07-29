@@ -331,12 +331,37 @@ function ProductReconTab({ slug, partners }) {
   // ── Suggested matches (Tier 1) ──────────────────────────────────────────────
   const [suggestions, setSuggestions] = useState(null)   // null = hidden
   const [sugLoading, setSugLoading] = useState(false)
+  const [aiLoading, setAiLoading] = useState(false)
   const loadSuggestions = () => {
     setSugLoading(true)
     api.get('/workflow/suggested-matches', { params: { partner, ...workflowDateParams() } })
       .then(({ data }) => setSuggestions(data))
       .catch((e) => toast.error(e.response?.data?.detail || 'Could not load suggestions'))
       .finally(() => setSugLoading(false))
+  }
+  // AI-assisted suggestions — de-identified payload, human-approved, tagged "AI".
+  // Merges into the same window as the System (heuristic) suggestions.
+  const loadAiSuggestions = () => {
+    setAiLoading(true)
+    api.get('/workflow/suggested-matches-ai', { params: { partner, ...workflowDateParams() } })
+      .then(({ data }) => {
+        if (data.error) toast(data.error, { icon: '🤖' })
+        else if ((data.suggestions || []).length === 0) toast('AI found no new confident pairs', { icon: '🤖' })
+        else toast.success(`AI suggested ${data.suggestions.length} match${data.suggestions.length === 1 ? '' : 'es'}`)
+        if (data.note) toast(data.note, { icon: 'ℹ️' })
+        setSuggestions(prev => {
+          const existing = prev?.suggestions || []
+          const seen = new Set(existing.map(s => `${s.bank.id}|${s.internal.id}`))
+          const add = (data.suggestions || []).filter(s => !seen.has(`${s.bank.id}|${s.internal.id}`))
+          return {
+            bank_unmatched: data.bank_unmatched ?? prev?.bank_unmatched ?? 0,
+            internal_unmatched: data.internal_unmatched ?? prev?.internal_unmatched ?? 0,
+            suggestions: [...existing, ...add].sort((a, b) => b.score - a.score),
+          }
+        })
+      })
+      .catch((e) => toast.error(e.response?.data?.detail || 'AI suggestions failed'))
+      .finally(() => setAiLoading(false))
   }
   const confirmSuggestion = async (s) => {
     try {
@@ -421,6 +446,9 @@ function ProductReconTab({ slug, partners }) {
           <button onClick={loadSuggestions} disabled={sugLoading} className="btn-ghost text-xs flex items-center gap-1 text-indigo-600 hover:border-indigo-200">
             ✨ {sugLoading ? 'Finding…' : 'Suggested Matches'}
           </button>
+          <button onClick={loadAiSuggestions} disabled={aiLoading} className="btn-ghost text-xs flex items-center gap-1 text-violet-600 hover:border-violet-200">
+            🤖 {aiLoading ? 'Thinking…' : 'AI Suggestions'}
+          </button>
           <button onClick={verifyFees} disabled={feeLoading} className="btn-ghost text-xs flex items-center gap-1 text-emerald-700 hover:border-emerald-200">
             % {feeLoading ? 'Checking…' : 'Verify Fees'}
           </button>
@@ -444,6 +472,7 @@ function ProductReconTab({ slug, partners }) {
             <div className="space-y-1.5 max-h-72 overflow-y-auto">
               {suggestions.suggestions.map((s, i) => (
                 <div key={i} className="flex items-center gap-3 text-xs border border-gray-100 rounded-lg px-3 py-2 flex-wrap">
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${s.source === 'ai' ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-600'}`} title={s.source === 'ai' ? 'Suggested by AI (de-identified) — confirm before matching' : 'Suggested by the rule engine'}>{s.source === 'ai' ? '🤖 AI' : 'System'}</span>
                   <span className={`font-bold px-2 py-0.5 rounded-full ${s.score >= 90 ? 'bg-green-50 text-green-700' : s.score >= 70 ? 'bg-amber-50 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>{s.score}</span>
                   <span className="font-mono">{s.bank.eko_tid || s.bank.tracking_number || s.bank.id.slice(0, 8)}</span>
                   <span className="text-gray-300">↔</span>

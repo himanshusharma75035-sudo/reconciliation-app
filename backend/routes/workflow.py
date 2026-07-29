@@ -450,6 +450,7 @@ def suggested_matches(partner: str = Query(...),
         if best and best_score >= 50:
             used_internal.add(best.id)
             suggestions.append({
+                "source": "system",
                 "score": min(best_score, 100), "why": best_why,
                 "bank": {"id": b.id, "eko_tid": b.eko_tid, "tracking_number": b.tracking_number,
                          "amount": b.amount, "transaction_date": b.transaction_date, "recon_date": b.recon_date},
@@ -459,6 +460,33 @@ def suggested_matches(partner: str = Query(...),
     suggestions.sort(key=lambda s: -s["score"])
     return {"suggestions": suggestions[:limit],
             "bank_unmatched": len(bank_rows), "internal_unmatched": len(internal_rows)}
+
+
+@router.get("/suggested-matches-ai")
+def suggested_matches_ai(partner: str = Query(...),
+                         date_from: str = Query(""), date_to: str = Query(""),
+                         limit: int = Query(50, le=200),
+                         db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    AI-assisted candidate pairs for the same unmatched rows the heuristic sees.
+    Advisory only: the model receives a DE-IDENTIFIED, allowlist-only payload
+    (no account numbers / customer names / narration), refers to rows by opaque
+    tokens, and NEVER writes — a human confirms each match via /recon/manual-match.
+    Returns the same shape as /suggested-matches, tagged "source": "ai".
+    """
+    def base(side):
+        q = db.query(Transaction).filter(
+            Transaction.partner == partner, Transaction.side == side,
+            Transaction.recon_status == ReconStatus.unmatched,
+            Transaction.row_type == "txn",
+        )
+        if date_from: q = q.filter(Transaction.recon_date >= date_from)
+        if date_to:   q = q.filter(Transaction.recon_date <= date_to)
+        return q.limit(3000).all()
+
+    bank_rows, internal_rows = base("bank"), base("internal")
+    from core.ai_matcher import suggest_matches
+    return suggest_matches(bank_rows, internal_rows, limit=limit)
 
 
 # ═══════════════════════════════ Rule learning (Tier 2) ══════════════════════
