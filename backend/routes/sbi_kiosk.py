@@ -2847,11 +2847,30 @@ def manual_pair_open_items(
     if side not in ("bank", "data"):
         raise HTTPException(status_code=400, detail="side must be 'bank' or 'data'")
     dates = _resolve_workbook_dates(db, date_from, date_to or date_from)   # 422 on bad range / >31 dates
+    # The raw unified bank view marks a row open whenever P01/P02 didn't match it — but the
+    # reconciliation report reconciles some settlement debits (via its KO-Withdrawal amount
+    # fallback) that P01 leaves "Unmatched", so the raw view over-counts open bank rows. The
+    # report is the finance-ops source of truth, so for the BANK side we keep only rows the
+    # report itself classifies as open (Unmatched / Unmatched Settlement / No Txn Number) —
+    # making the picker's open count reconcile with the report. Data side is unaffected.
+    _REPORT_OPEN = {"Unmatched", "Unmatched Settlement", "No Txn Number"}
     rows = []
     for d in dates:
+        report_open_ids = None
+        if side == "bank":
+            try:
+                from core.sbi_reports import reconcile as _reconcile
+                rep = _reconcile(db, d)
+                report_open_ids = {r.get("_id") for r in rep.get("bank_recs", [])
+                                   if r.get("Match Status") in _REPORT_OPEN}
+            except Exception as _e:
+                logger.warning(f"manual-match open-items: report align skipped for {d}: {_e}")
+                report_open_ids = None   # fail open — fall back to the raw unified set
         for e in _unified_entries(db, d, include_deposits=True):
             e.pop("_result", None)
             if e["side"] != side or e["status"] in _MATCHED_UNIFIED:
+                continue
+            if side == "bank" and report_open_ids is not None and e["id"] not in report_open_ids:
                 continue
             rows.append(e)
     if search:

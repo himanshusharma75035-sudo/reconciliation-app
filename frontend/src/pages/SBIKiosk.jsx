@@ -1456,7 +1456,7 @@ function ManualPairTab({ reconDate }) {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <PairPanel title="Bank Statement" tone="text-blue-700 bg-blue-50/60 border-blue-100" items={bankItems}
-          subtitle={bankItems.length ? `${bankWithRef} with a bank reference (the report's "open") · ${bankNoRef} no-reference (cash deposits / informational — pairable here, not counted open in the report)` : undefined}
+          subtitle={bankItems.length ? `Matches the reconciliation report's open bank items · ${bankWithRef} with a bank reference · ${bankNoRef} cash-deposit / no-reference` : undefined}
           selected={selBank} onSelect={setSelBank} queuedIds={queuedIds} />
         <PairPanel title="Internal / Data" tone="text-green-700 bg-green-50/60 border-green-100" items={shownData}
           filterValue={dataFile} filterOptions={dataFiles} onFilterChange={setDataFile}

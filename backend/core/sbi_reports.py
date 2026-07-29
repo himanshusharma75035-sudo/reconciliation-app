@@ -255,6 +255,8 @@ def reconcile(db, recon_date: str) -> dict:
             "Amount Match": ("Yes" if _settled else amount_match),
             "Match Status": status,
             "_is_dup": ref in dup_refs,
+            "_id": b.id,          # private (not an Excel column) — lets the manual-match
+                                  # picker align its bank-open set with this report's.
         })
 
     # ── source-side classification ─────────────────────────────────────────────
