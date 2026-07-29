@@ -1074,10 +1074,33 @@ def run_internal_match(partner: str, recon_date: str, db: Session, user_id: str)
                     matched_count += 1
                     break
 
+    # ── Pass 3 (Digikhata only): net position ──────────────────────────────────
+    # Digikhata is a self-contained PPI wallet ledger — its internal debits/credits reconcile
+    # by netting, so whatever tiny rows remain after the pair passes are the expected net wallet
+    # movement, NOT an open reconciliation gap. Mark them internal_matched (net position, no bank
+    # leg) so they are not flagged as open. Strictly gated to this partner (isolation), and
+    # idempotent (only touches still-open rows).
+    net_position = 0
+    if partner == "digikhata":
+        residual = [r for r in db.query(Transaction).filter(
+            Transaction.partner == partner, Transaction.side == "internal",
+            Transaction.recon_date == recon_date, Transaction.row_type == "txn",
+            Transaction.recon_status.in_(_OPEN),
+        ).all() if r.recon_status in _OPEN]   # re-check in-session status (pairs above may be unflushed)
+        if residual:
+            mid = _make_match_id(partner + "I", recon_date, seq)
+            for r in residual:
+                r.recon_status = ReconStatus.internal_matched
+                r.match_id = mid
+                if not (r.src_note or "").strip():
+                    r.src_note = "net position (PPI wallet)"
+            net_position = len(residual)
+            matched_count += net_position
+
     if matched_count:
         db.commit()
 
-    return {"internal_matched": matched_count}
+    return {"internal_matched": matched_count, "net_position": net_position}
 
 
 def assign_src(transaction_id: str, src_code: str, src_note: str, db: Session) -> Transaction:
