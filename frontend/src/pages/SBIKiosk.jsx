@@ -1342,12 +1342,17 @@ function PairPanel({ title, tone, items, selected, onSelect, queuedIds, subtitle
                   <th className="px-3 py-2 text-left font-medium">Ref</th>
                   <th className="px-3 py-2 text-right font-medium">Amount</th></tr>
               </thead>
-              <tbody>{items.map(r => (
+              <tbody>{items.slice(0, 400).map(r => (
                 <PairRow key={r.id} r={r} selected={selected?.id === r.id}
                   disabled={queuedIds.has(r.id)} onClick={() => onSelect(r)} />
               ))}</tbody>
             </table>}
       </div>
+      {items.length > 400 && (
+        <div className="text-[11px] text-gray-400 text-center py-2 border-t border-gray-50">
+          Showing first 400 of {items.length} — narrow with the file / amount filters above.
+        </div>
+      )}
     </div>
   )
 }
@@ -1363,6 +1368,9 @@ function ManualPairTab({ reconDate }) {
   const [selBank, setSelBank] = useState(null)
   const [selData, setSelData] = useState(null)
   const [dataFile, setDataFile] = useState('')   // '' = all files (internal-side file filter)
+  const [amtFilter, setAmtFilter] = useState('') // exact-amount filter applied to BOTH sides
+  const [bankTotal, setBankTotal] = useState(0)  // server total (to warn if the load truncated)
+  const [dataTotal, setDataTotal] = useState(0)
   const [queue, setQueue] = useState([])
   const [remark, setRemark] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -1374,7 +1382,10 @@ function ManualPairTab({ reconDate }) {
     if (!from) { toast.error('Pick a From date'); return }
     setLoading(true)
     try {
-      const params = { date_from: from, date_to: to || from, search: search || undefined, page_size: 500 }
+      // Load the FULL open set (not a 500-row page) so the client-side file/amount filters
+      // see every item — otherwise a file with entries beyond row 500 (e.g. KO Deposit)
+      // shows only the few that landed in the first page. Rendering is capped for perf.
+      const params = { date_from: from, date_to: to || from, search: search || undefined, page_size: 4000 }
       const [b, d, p] = await Promise.all([
         api.get('/sbi/manual-match/open-items', { params: { ...params, side: 'bank' } }),
         api.get('/sbi/manual-match/open-items', { params: { ...params, side: 'data' } }),
@@ -1382,8 +1393,10 @@ function ManualPairTab({ reconDate }) {
       ])
       setBankItems(b.data.items || [])
       setDataItems(d.data.items || [])
+      setBankTotal(b.data.total || 0)
+      setDataTotal(d.data.total || 0)
       setPairs(p.data.rows || [])
-      setSelBank(null); setSelData(null); setDataFile('')
+      setSelBank(null); setSelData(null); setDataFile(''); setAmtFilter('')
     } catch (e) { toast.error(e?.response?.data?.detail || 'Failed to load open items') }
     setLoading(false)
   }
@@ -1391,14 +1404,17 @@ function ManualPairTab({ reconDate }) {
   const queuedIds = new Set(queue.flatMap(q => [q.bank.id, q.data.id]))
   const diffOf = (b, d) => Math.abs(Number(b?.amount || 0) - Number(d?.amount || 0))
 
-  // Internal-side file-wise filter (client-side — the full list is already loaded).
+  // Client-side filters over the fully-loaded open sets. The amount filter applies to BOTH
+  // sides (Rajendra: type e.g. 1000 to see every ₹1000 bank + internal row); combine with
+  // the internal file dropdown to narrow to one file (e.g. ₹1000 Withdrawals).
+  const amtMatch = r => !amtFilter || Math.abs(Number(r.amount || 0) - Number(amtFilter)) < 0.01
   const dataFiles = [...new Set(dataItems.map(r => r.file).filter(Boolean))].sort()
-  const shownData = dataFile ? dataItems.filter(r => r.file === dataFile) : dataItems
-  // Bank-side count breakdown — reconciles the picker's broad count with the report's
-  // narrower "open": rows WITH a bank reference are the report's open items; the rest are
-  // no-reference cash-deposit / informational lines the report doesn't count as open.
-  const bankWithRef = bankItems.filter(r => r.ref).length
-  const bankNoRef = bankItems.length - bankWithRef
+  const shownData = dataItems.filter(r => (!dataFile || r.file === dataFile) && amtMatch(r))
+  const shownBank = bankItems.filter(amtMatch)
+  const truncated = dataTotal > dataItems.length || bankTotal > bankItems.length
+  // Bank-side breakdown (report's open = with-ref + no-ref cash deposits).
+  const bankWithRef = shownBank.filter(r => r.ref).length
+  const bankNoRef = shownBank.length - bankWithRef
 
   const addPair = () => {
     if (!selBank || !selData) { toast('Select one row on each side', { icon: 'ℹ️' }); return }
@@ -1437,26 +1453,35 @@ function ManualPairTab({ reconDate }) {
     <div className="space-y-5">
       <div className="rounded-xl border border-gray-200 bg-white p-4">
         <div className="text-sm font-semibold text-gray-800 mb-1">Manual Match — pick a bank row and an internal row, queue, submit</div>
-        <p className="text-xs text-gray-400 mb-3">Internal side spans every file (Txn Reports — each shown with its source file — KO Withdrawals &amp; KO Deposits); use the file dropdown on that panel to narrow to one file. Use a date range to catch a D+1 settlement. Manual pairs persist across re-runs and re-uploads.</p>
+        <p className="text-xs text-gray-400 mb-3">Internal side spans every file (Txn Reports — each shown with its source file — KO Withdrawals &amp; KO Deposits); use the file dropdown on that panel to narrow to one file, and the <strong>Amount</strong> box to filter both sides to one value. Use a date range to catch a D+1 settlement. Manual pairs persist across re-runs and re-uploads.</p>
         <div className="flex flex-wrap items-end gap-3">
           <div><label className="text-xs text-gray-400 block mb-1">From Date</label>
             <input type="date" className="input" value={from} onChange={e => setFrom(e.target.value)} /></div>
           <div><label className="text-xs text-gray-400 block mb-1">To Date</label>
             <input type="date" className="input" value={to} onChange={e => setTo(e.target.value)} /></div>
-          <div className="flex-1 min-w-[180px]"><label className="text-xs text-gray-400 block mb-1">Search (Ref / KO / CSP / File)</label>
+          <div className="flex-1 min-w-[150px]"><label className="text-xs text-gray-400 block mb-1">Search (Ref / KO / CSP / File)</label>
             <input className="input w-full" placeholder="optional…" value={search} onChange={e => setSearch(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && load()} /></div>
+          <div><label className="text-xs text-gray-400 block mb-1">Amount (both sides)</label>
+            <input type="number" className="input w-32" placeholder="e.g. 1000" value={amtFilter} onChange={e => setAmtFilter(e.target.value)} /></div>
           <button onClick={load} disabled={loading} className="btn flex items-center gap-1.5">
             {loading ? <RefreshCw size={15} className="animate-spin" /> : <Play size={15} />} Load Open Items
           </button>
         </div>
       </div>
 
+      {truncated && (
+        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+          Loaded {dataItems.length} of {dataTotal} internal and {bankItems.length} of {bankTotal} bank open items —
+          the date range has more than fit in one load. Narrow the date range to see everything.
+        </div>
+      )}
+
       {!canEdit && <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">You have read-only access — manual matching needs the <span className="font-semibold">src_assign</span> permission.</div>}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <PairPanel title="Bank Statement" tone="text-blue-700 bg-blue-50/60 border-blue-100" items={bankItems}
-          subtitle={bankItems.length ? `Matches the reconciliation report's open bank items · ${bankWithRef} with a bank reference · ${bankNoRef} cash-deposit / no-reference` : undefined}
+        <PairPanel title="Bank Statement" tone="text-blue-700 bg-blue-50/60 border-blue-100" items={shownBank}
+          subtitle={shownBank.length ? `Matches the reconciliation report's open bank items · ${bankWithRef} with a bank reference · ${bankNoRef} cash-deposit / no-reference` : undefined}
           selected={selBank} onSelect={setSelBank} queuedIds={queuedIds} />
         <PairPanel title="Internal / Data" tone="text-green-700 bg-green-50/60 border-green-100" items={shownData}
           filterValue={dataFile} filterOptions={dataFiles} onFilterChange={setDataFile}
