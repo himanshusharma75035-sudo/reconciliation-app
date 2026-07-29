@@ -339,9 +339,18 @@ operator exercises the edge (deactivate-all), so a test that only deactivates *o
 scoped API keys are synthesised by cloning their (admin) creator's principal and overriding only
 `.permissions`, that clone keeps `role == "admin"` — so the key bypasses *every* permission gate and
 its declared scope is silently ignored. New permission-gated endpoints inherit this the moment they
-ship. The fix belongs at the auth layer (give the key-principal a non-privileged role, or consult
-permissions for key-principals regardless of role), not in each endpoint — but know that "gated by a
-new permission" does **not** mean "safe from a scoped key" until that's fixed.
+ship. The fix belongs at the auth layer, and the clean shape is a single `is_admin_principal(user)`
+helper that every gate consults: a JWT user is admin by role; a key-principal is admin **only** when
+its own scope opts in (`permissions['admin']`), never because an admin minted it. Route
+`require_permission` / `require_admin` / product-scope / maker-checker bypass through that one helper,
+and mark the synthesised key-principal (`is_api_key = True`, role stripped to a non-privileged value)
+so no stray `role == "admin"` read elsewhere re-grants it. Two traps while doing it: (1) sweep for
+**every** `role == "admin"` read — one missed site (a maker-checker bypass, a "list all" branch) keeps
+a hole or, if the key is now non-admin there, silently changes behaviour; (2) collapsing a
+`require_permission("admin")` string-permission into real admin can strand a JWT user who legitimately
+held that permission — check the live data first (here: zero such users, so it was safe to unify). And
+because a key inherits no product scope of its own, it falls back to the creator's `allowed_products`
+(usually empty = all) — closing the permission hole doesn't close product scope; that needs its own field.
 
 ---
 

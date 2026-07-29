@@ -19,7 +19,7 @@ from models.database import (
     get_db, Transaction, ReconStatus, User, ApprovalRequest, FeeRule,
     SystemSetting, generate_id,
 )
-from core.auth import get_current_user, require_permission
+from core.auth import get_current_user, require_permission, require_admin
 from core import maker_checker
 from routes.recon import _log
 
@@ -102,7 +102,7 @@ class SettingUpdate(BaseModel):
 
 @router.put("/settings/maker-checker")
 def update_maker_checker(body: SettingUpdate, db: Session = Depends(get_db),
-                         user=Depends(require_permission("admin"))):
+                         user=Depends(require_admin)):
     maker_checker.set_enabled(db, body.enabled, user.username)
     _log(db, user, "maker_checker_toggle", "system_setting", detail={"enabled": body.enabled})
     return {"maker_checker_enabled": body.enabled}
@@ -293,7 +293,7 @@ def list_fee_rules(db: Session = Depends(get_db), user=Depends(get_current_user)
 
 @router.post("/fee-rules")
 def create_fee_rule(body: FeeRuleIn, db: Session = Depends(get_db),
-                    user=Depends(require_permission("admin"))):
+                    user=Depends(require_admin)):
     if body.fee_type not in ("percent", "flat"):
         raise HTTPException(400, "fee_type must be 'percent' or 'flat'")
     r = FeeRule(**body.dict())
@@ -304,7 +304,7 @@ def create_fee_rule(body: FeeRuleIn, db: Session = Depends(get_db),
 
 @router.put("/fee-rules/{rule_id}")
 def update_fee_rule(rule_id: str, body: FeeRuleIn, db: Session = Depends(get_db),
-                    user=Depends(require_permission("admin"))):
+                    user=Depends(require_admin)):
     r = db.query(FeeRule).filter(FeeRule.id == rule_id).first()
     if not r:
         raise HTTPException(404, "Fee rule not found")
@@ -317,7 +317,7 @@ def update_fee_rule(rule_id: str, body: FeeRuleIn, db: Session = Depends(get_db)
 
 @router.delete("/fee-rules/{rule_id}")
 def delete_fee_rule(rule_id: str, db: Session = Depends(get_db),
-                    user=Depends(require_permission("admin"))):
+                    user=Depends(require_admin)):
     r = db.query(FeeRule).filter(FeeRule.id == rule_id).first()
     if not r:
         raise HTTPException(404, "Fee rule not found")

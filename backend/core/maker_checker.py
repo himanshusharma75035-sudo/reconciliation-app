@@ -54,7 +54,8 @@ def intercept(db, user, action_type: str, payload: dict, summary: str, partner: 
     if _replaying.get():
         # This action was already approved and is being replayed by a checker — run it.
         return None
-    if getattr(user, "role", "") == "admin":
+    from core.auth import is_admin_principal
+    if is_admin_principal(user):   # admins (incl. admin-scoped keys) bypass dual-control uniformly
         return None
     if not is_enabled(db):
         return None

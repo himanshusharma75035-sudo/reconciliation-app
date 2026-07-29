@@ -305,7 +305,7 @@ def session_logs(
     to_date: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
-    current_user: User = Depends(require_permission("admin")),
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """Admin-only: login / logout / failed-login / expiry history."""
@@ -322,7 +322,7 @@ def session_logs(
     } for r in rows]}
 
 @router.get("/users")
-def list_users(current_user: User = Depends(require_permission("admin")), db: Session = Depends(get_db)):
+def list_users(current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     users = db.query(User).all()
     return [{"id": u.id, "username": u.username, "full_name": u.full_name,
              "email": u.email, "role": u.role, "is_active": u.is_active,
@@ -330,7 +330,7 @@ def list_users(current_user: User = Depends(require_permission("admin")), db: Se
              "allowed_products": json.loads(getattr(u, "allowed_products", None) or "[]")} for u in users]
 
 @router.post("/users")
-def create_user(data: UserCreate, current_user: User = Depends(require_permission("admin")), db: Session = Depends(get_db)):
+def create_user(data: UserCreate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
     # Email must be @eko.co.in. Password accounts (admin/user) REQUIRE one — it
@@ -364,7 +364,7 @@ def create_user(data: UserCreate, current_user: User = Depends(require_permissio
     return {"id": user.id, "username": user.username, "message": "User created"}
 
 @router.put("/users/{user_id}")
-def update_user(user_id: str, data: UserUpdate, current_user: User = Depends(require_permission("admin")), db: Session = Depends(get_db)):
+def update_user(user_id: str, data: UserUpdate, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -385,7 +385,7 @@ def update_user(user_id: str, data: UserUpdate, current_user: User = Depends(req
     return {"message": "Updated successfully"}
 
 @router.delete("/users/{user_id}")
-def delete_user(user_id: str, current_user: User = Depends(require_permission("admin")), db: Session = Depends(get_db)):
+def delete_user(user_id: str, current_user: User = Depends(require_admin), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

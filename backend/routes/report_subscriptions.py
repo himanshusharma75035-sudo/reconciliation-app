@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from pydantic import BaseModel
 from models.database import get_db, User, ReportSubscription, generate_id
-from core.auth import get_current_user
+from core.auth import get_current_user, is_admin_principal
 
 logger = logging.getLogger("eko_recon")
 router = APIRouter(prefix="/api/report-subscriptions", tags=["report-subscriptions"])
@@ -48,7 +48,7 @@ def list_subscriptions(
 ):
     """List all subscriptions for the current user (admin sees all)."""
     q = db.query(ReportSubscription)
-    if current_user.role != "admin":
+    if not is_admin_principal(current_user):
         q = q.filter(ReportSubscription.user_id == current_user.id)
     subs = q.order_by(ReportSubscription.created_at.desc()).all()
     return [_to_dict(s) for s in subs]
@@ -175,7 +175,7 @@ def _get_own(sub_id: str, user: User, db: Session) -> ReportSubscription:
     sub = db.query(ReportSubscription).filter(ReportSubscription.id == sub_id).first()
     if not sub:
         raise HTTPException(404, "Subscription not found")
-    if user.role != "admin" and sub.user_id != user.id:
+    if not is_admin_principal(user) and sub.user_id != user.id:
         raise HTTPException(403, "Not your subscription")
     return sub
 

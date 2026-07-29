@@ -200,11 +200,17 @@ def get_current_user(
         if not creator or not creator.is_active:
             raise HTTPException(status_code=401, detail="API key owner account is inactive")
 
-        # Temporarily override permissions with key-specific scope
+        # Override permissions with key-specific scope. CRITICAL: a key's authority is
+        # its OWN scope, never the admin creator's role — otherwise every admin-minted
+        # key would silently carry full admin authority and its declared scope would be
+        # ignored. So mark it as an API-key principal and strip the inherited admin role;
+        # a key gets admin authority ONLY by opting in via its permissions ('{"admin":true}').
         creator_copy = User.__new__(User)
         creator_copy.__dict__.update(creator.__dict__)
         creator_copy.permissions = api_key.permissions
         creator_copy.full_name   = f"{api_key.name} [API key]"
+        creator_copy.is_api_key  = True
+        creator_copy.role        = "user"
         set_actor(db, creator_copy)   # additive: attribute config/entitlement changes to this principal
         _enforce_viewer_scope(creator_copy, request)
         return creator_copy
@@ -240,12 +246,29 @@ def get_current_user(
 
 # ── Permission helpers ────────────────────────────────────────────────────────
 
+def is_admin_principal(user) -> bool:
+    """Does this principal hold admin authority?
+
+    A normal (JWT-authenticated) user is admin by role. An API-key principal is
+    admin ONLY when its own scope explicitly grants it (permissions '{"admin":true}')
+    — never merely because an admin minted the key. This is the single place that
+    decides admin authority, so every gate (require_permission / require_admin /
+    check_product_access) treats a scoped key by its declared scope, not the
+    creator's role."""
+    if getattr(user, "is_api_key", False):
+        try:
+            return bool(json.loads(getattr(user, "permissions", None) or "{}").get("admin"))
+        except Exception:
+            return False
+    return getattr(user, "role", "") == "admin"
+
+
 def check_product_access(db, user, partner: str):
     """
     Raise 403 if the user's allowed_products excludes this partner's product.
     Empty/None allowed_products = access to ALL products. Admins always pass.
     """
-    if getattr(user, "role", "") == "admin":
+    if is_admin_principal(user):
         return
     try:
         allowed = json.loads(getattr(user, "allowed_products", None) or "[]")
@@ -278,7 +301,7 @@ def require_product_access(partner: str):
 
 def require_permission(permission: str):
     def checker(current_user: User = Depends(get_current_user)):
-        if current_user.role == "admin":
+        if is_admin_principal(current_user):
             return current_user
         try:
             perms = json.loads(current_user.permissions or "{}")
@@ -294,7 +317,7 @@ def require_permission(permission: str):
 
 
 def require_admin(current_user: User = Depends(get_current_user)):
-    if current_user.role != "admin":
+    if not is_admin_principal(current_user):
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
 
