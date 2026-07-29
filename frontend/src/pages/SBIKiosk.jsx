@@ -1264,10 +1264,21 @@ function PairRow({ r, selected, disabled, onClick }) {
   )
 }
 
-function PairPanel({ title, tone, items, selected, onSelect, queuedIds }) {
+function PairPanel({ title, tone, items, selected, onSelect, queuedIds, subtitle, filterValue, filterOptions, onFilterChange }) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white overflow-hidden">
-      <div className={`px-4 py-2.5 text-sm font-semibold border-b ${tone}`}>{title} <span className="opacity-60">({items.length})</span></div>
+      <div className={`px-4 py-2.5 border-b ${tone}`}>
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">{title} <span className="opacity-60">({items.length})</span></span>
+          {filterOptions?.length > 0 && (
+            <select className="input ml-auto text-xs py-1" value={filterValue} onChange={e => onFilterChange(e.target.value)}>
+              <option value="">All files ({filterOptions.length})</option>
+              {filterOptions.map(f => <option key={f} value={f}>{f}</option>)}
+            </select>
+          )}
+        </div>
+        {subtitle && <div className="text-[10px] font-normal opacity-70 mt-0.5">{subtitle}</div>}
+      </div>
       <div className="max-h-[420px] overflow-auto">
         {items.length === 0
           ? <div className="text-center text-gray-400 text-sm py-10">No open items — load first</div>
@@ -1298,6 +1309,7 @@ function ManualPairTab({ reconDate }) {
   const [loading, setLoading] = useState(false)
   const [selBank, setSelBank] = useState(null)
   const [selData, setSelData] = useState(null)
+  const [dataFile, setDataFile] = useState('')   // '' = all files (internal-side file filter)
   const [queue, setQueue] = useState([])
   const [remark, setRemark] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -1318,13 +1330,22 @@ function ManualPairTab({ reconDate }) {
       setBankItems(b.data.items || [])
       setDataItems(d.data.items || [])
       setPairs(p.data.rows || [])
-      setSelBank(null); setSelData(null)
+      setSelBank(null); setSelData(null); setDataFile('')
     } catch (e) { toast.error(e?.response?.data?.detail || 'Failed to load open items') }
     setLoading(false)
   }
 
   const queuedIds = new Set(queue.flatMap(q => [q.bank.id, q.data.id]))
   const diffOf = (b, d) => Math.abs(Number(b?.amount || 0) - Number(d?.amount || 0))
+
+  // Internal-side file-wise filter (client-side — the full list is already loaded).
+  const dataFiles = [...new Set(dataItems.map(r => r.file).filter(Boolean))].sort()
+  const shownData = dataFile ? dataItems.filter(r => r.file === dataFile) : dataItems
+  // Bank-side count breakdown — reconciles the picker's broad count with the report's
+  // narrower "open": rows WITH a bank reference are the report's open items; the rest are
+  // no-reference cash-deposit / informational lines the report doesn't count as open.
+  const bankWithRef = bankItems.filter(r => r.ref).length
+  const bankNoRef = bankItems.length - bankWithRef
 
   const addPair = () => {
     if (!selBank || !selData) { toast('Select one row on each side', { icon: 'ℹ️' }); return }
@@ -1363,7 +1384,7 @@ function ManualPairTab({ reconDate }) {
     <div className="space-y-5">
       <div className="rounded-xl border border-gray-200 bg-white p-4">
         <div className="text-sm font-semibold text-gray-800 mb-1">Manual Match — pick a bank row and an internal row, queue, submit</div>
-        <p className="text-xs text-gray-400 mb-3">Internal side spans every file (Txn Reports — each shown with its source file — KO Withdrawals &amp; KO Deposits). Use a date range to catch a D+1 settlement. Manual pairs persist across re-runs and re-uploads.</p>
+        <p className="text-xs text-gray-400 mb-3">Internal side spans every file (Txn Reports — each shown with its source file — KO Withdrawals &amp; KO Deposits); use the file dropdown on that panel to narrow to one file. Use a date range to catch a D+1 settlement. Manual pairs persist across re-runs and re-uploads.</p>
         <div className="flex flex-wrap items-end gap-3">
           <div><label className="text-xs text-gray-400 block mb-1">From Date</label>
             <input type="date" className="input" value={from} onChange={e => setFrom(e.target.value)} /></div>
@@ -1382,8 +1403,10 @@ function ManualPairTab({ reconDate }) {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <PairPanel title="Bank Statement" tone="text-blue-700 bg-blue-50/60 border-blue-100" items={bankItems}
+          subtitle={bankItems.length ? `${bankWithRef} with a bank reference (the report's "open") · ${bankNoRef} no-reference (cash deposits / informational — pairable here, not counted open in the report)` : undefined}
           selected={selBank} onSelect={setSelBank} queuedIds={queuedIds} />
-        <PairPanel title="Internal / Data (all files)" tone="text-green-700 bg-green-50/60 border-green-100" items={dataItems}
+        <PairPanel title="Internal / Data" tone="text-green-700 bg-green-50/60 border-green-100" items={shownData}
+          filterValue={dataFile} filterOptions={dataFiles} onFilterChange={setDataFile}
           selected={selData} onSelect={setSelData} queuedIds={queuedIds} />
       </div>
 
