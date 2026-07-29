@@ -28,6 +28,7 @@ const PERM_GROUPS = [
       { key: 'override',      label: '⚠ Override / Unmatch',       desc: 'Break matches, bulk override, override status (requires remark)' },
       { key: 'approver',      label: '✓ Approver (Checker)',       desc: 'Maker-checker: can approve/reject other users\' queued manual actions. A maker can never approve their own request.' },
       { key: 'logic_builder', label: 'Logic Builder',              desc: 'Create and manage matching rules' },
+      { key: 'src_manage',    label: 'Manage SRC Codes',           desc: 'Create / activate / deactivate the SRC reason-code catalog used across all products (admins always have this)' },
     ]
   },
   {
@@ -52,7 +53,7 @@ const PERM_GROUPS = [
 const PERMS = PERM_GROUPS.flatMap(g => g.perms.map(p => p.key))
 const PERM_LABELS = Object.fromEntries(PERM_GROUPS.flatMap(g => g.perms.map(p => [p.key, p.label])))
 
-const DEFAULT_PERMS = { upload: true, run_recon: true, src_assign: true, reports: true, data_download: false, logic_builder: false, override: false, manual_match: true, clear_data: false, approver: false, audit_read: false, portal_access: false, portal_approve: false, portal_build: false }
+const DEFAULT_PERMS = { upload: true, run_recon: true, src_assign: true, reports: true, data_download: false, logic_builder: false, src_manage: false, override: false, manual_match: true, clear_data: false, approver: false, audit_read: false, portal_access: false, portal_approve: false, portal_build: false }
 
 export default function Users() {
   const [users, setUsers] = useState([])

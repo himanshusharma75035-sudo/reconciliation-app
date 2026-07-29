@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import { Upload, Play, RefreshCw, X, ChevronLeft, ChevronRight, ArrowLeftRight, ChevronDown, Check, AlertTriangle, Download, Trash2 } from 'lucide-react'
+import { Upload, Play, RefreshCw, X, ChevronLeft, ChevronRight, ArrowLeftRight, ChevronDown, Check, AlertTriangle, Download, Trash2, Tag } from 'lucide-react'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
 import { hasPermission } from '../utils/permissions'
@@ -242,8 +242,8 @@ function RunBar({ process, reconDate, setReconDate, onRun, running, children }) 
   )
 }
 
-// Disposition reason codes for unmatched SBI rows (mirrors backend SRC_CODES)
-import { SRC_CODES } from '../srcCodes'
+// Disposition reason codes for unmatched SBI rows — live catalog via useSrcCodes()
+import { useSrcCodes } from '../srcCodes'
 // Maker-checker: a queued action returns {queued:true, message}; toast "pending" not "done".
 const mcQueued = (data) => {
   if (data?.queued) { toast(data.message || 'Pending approval by another user', { icon: '🕐' }); return true }
@@ -253,6 +253,7 @@ const mcQueued = (data) => {
 // ── Reusable modals ─────────────────────────────────────────────────────────────
 
 function SrcModal({ process, procLabel, row, summary, onClose, onDone }) {
+  const srcCodes = useSrcCodes()
   const [form, setForm] = useState({ src_code: '', src_note: '' })
   const [saving, setSaving] = useState(false)
   const submit = async () => {
@@ -272,7 +273,7 @@ function SrcModal({ process, procLabel, row, summary, onClose, onDone }) {
         <label className="text-xs text-gray-500 block mb-1">Reason code (required)</label>
         <select className="select w-full mb-3" value={form.src_code} onChange={e => setForm({ ...form, src_code: e.target.value })}>
           <option value="">Select a reason…</option>
-          {SRC_CODES.map(c => <option key={c} value={c}>{c}</option>)}
+          {srcCodes.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
         <label className="text-xs text-gray-500 block mb-1">Note (optional)</label>
         <textarea className="input w-full mb-4" rows={3} value={form.src_note} onChange={e => setForm({ ...form, src_note: e.target.value })} placeholder="Optional context for this disposition" />
@@ -1059,6 +1060,12 @@ function UnifiedTab({ reconDate, setReconDate }) {
   const [mmModal, setMmModal] = useState(null)
   const [sel, setSel] = useState(new Set())        // keys `${source}|${id}` — source picks the table
   const [deleting, setDeleting] = useState(false)
+  const srcCodes = useSrcCodes()
+  const [bulkOpen, setBulkOpen] = useState(false)  // bulk-SRC code picker
+  const [bulkCode, setBulkCode] = useState('')
+  const [bulkNote, setBulkNote] = useState('')
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const canSrc = hasPermission('src_assign')
   const PAGE_SIZE = 100
   const canDelete = hasPermission('clear_data')
 
@@ -1117,6 +1124,25 @@ function UnifiedTab({ reconDate, setReconDate }) {
     } catch (e) { toast.error(e.response?.data?.detail || 'Delete failed') }
     finally { setDeleting(false) }
   }
+
+  // Bulk SRC: tag the OPEN (unmatched) rows currently shown (narrow with the
+  // status / process / side / search filters first). SRC is a disposition for open
+  // items, so matched rows are excluded. Each row carries its result process + id,
+  // which is what the SBI overlay assign-src-bulk needs.
+  const taggable = rows.filter(r => r.result_process && r.result_id && (r.status || '').startsWith('Unmatched'))
+  const applyBulkSrc = async () => {
+    if (!bulkCode) return toast.error('Pick a reason code')
+    if (!taggable.length) return
+    setBulkBusy(true)
+    try {
+      const items = taggable.map(r => ({ process: r.result_process, result_id: r.result_id }))
+      const { data: res } = await api.post('/sbi/assign-src-bulk', { items, src_code: bulkCode, src_note: bulkNote.trim() })
+      toast.success(`Tagged ${res.updated} row${res.updated === 1 ? '' : 's'}` + (res.skipped ? ` · ${res.skipped} skipped` : ''))
+      setBulkOpen(false); setBulkCode(''); setBulkNote(''); load()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Bulk SRC failed') }
+    finally { setBulkBusy(false) }
+  }
+
   return (
     <div>
       <ProcessHeader process="p02"
@@ -1135,9 +1161,16 @@ function UnifiedTab({ reconDate, setReconDate }) {
         <div><label className="text-xs text-gray-400 block mb-1">Search</label>
           <input className="input w-40 text-sm" placeholder="ref / KO / CSP…" value={search} onChange={e => setSearch(e.target.value)} /></div>
         {(side || statusF || procF || search) && <button onClick={() => { setSide(''); setStatusF(''); setProcF(''); setSearch('') }} className="btn-ghost text-xs">Clear</button>}
+        {canSrc && taggable.length > 0 && (
+          <button onClick={() => setBulkOpen(true)}
+            className={`${canDelete && sel.size > 0 ? '' : 'ml-auto'} flex items-center gap-1.5 text-xs font-medium text-yellow-700 border border-yellow-200 rounded-lg px-3 py-2 hover:bg-yellow-50`}
+            title="Tag all SRC-eligible rows currently shown — filter first to narrow the set">
+            <Tag size={13} /> Bulk SRC ({taggable.length})
+          </button>
+        )}
         {canDelete && sel.size > 0 && (
           <button onClick={deleteSelected} disabled={deleting}
-            className="ml-auto flex items-center gap-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-lg px-3 py-2 hover:bg-red-50 disabled:opacity-50"
+            className="flex items-center gap-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-lg px-3 py-2 hover:bg-red-50 disabled:opacity-50"
             title="Recycle-binned (restorable); affected dates' results re-run automatically">
             <Trash2 size={13} />
             {deleting ? 'Deleting…' : `Delete selected (${sel.size})`}
@@ -1233,6 +1266,26 @@ function UnifiedTab({ reconDate, setReconDate }) {
         row={{ ...srcModal, id: srcModal.result_id }} onClose={() => setSrcModal(null)} onDone={() => { setSrcModal(null); load() }}
         summary={<>{srcModal.side} · <span className="font-mono">{srcModal.ref || srcModal.ko_csp}</span> · {fmtINR(srcModal.amount)}.</>} />}
       {mmModal && <UnifiedMatchModal entry={mmModal} onClose={() => setMmModal(null)} onDone={() => { setMmModal(null); load() }} />}
+
+      {bulkOpen && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setBulkOpen(false)}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-5" onClick={e => e.stopPropagation()}>
+            <h3 className="font-semibold text-gray-800 mb-1">Bulk SRC — {taggable.length} row{taggable.length === 1 ? '' : 's'}</h3>
+            <p className="text-xs text-gray-500 mb-3">Applies one reason code to every SRC-eligible row currently shown. Narrow with the status / process / side / search filters first. Persists across re-runs.</p>
+            <label className="text-xs text-gray-500 block mb-1">Reason code (required)</label>
+            <select className="select w-full mb-3" value={bulkCode} onChange={e => setBulkCode(e.target.value)}>
+              <option value="">Select a reason…</option>
+              {srcCodes.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <label className="text-xs text-gray-500 block mb-1">Note (optional)</label>
+            <textarea className="input w-full mb-4" rows={2} value={bulkNote} onChange={e => setBulkNote(e.target.value)} placeholder="Optional context for this disposition" />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setBulkOpen(false)} className="btn-ghost">Cancel</button>
+              <button onClick={applyBulkSrc} disabled={bulkBusy || !bulkCode} className="btn-primary">{bulkBusy ? 'Tagging…' : `Tag ${taggable.length}`}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

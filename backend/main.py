@@ -439,9 +439,10 @@ def startup():
         seed_partner_configs(db)
         seed_bank_format_presets(db)
         seed_match_rules(db)
-        from models.database import seed_evalue_accounts, seed_bank_accounts, migrate_sbi_p01_statuses
+        from models.database import seed_evalue_accounts, seed_bank_accounts, migrate_sbi_p01_statuses, seed_src_codes
         seed_evalue_accounts(db)
         seed_bank_accounts(db)
+        seed_src_codes(db)   # SRC reason-code catalog (was the hard-coded SRC_CODES list)
         migrate_sbi_p01_statuses(db)   # relabel legacy P01 CREDITED/PENDING/PARTIAL/EXCESS → matched/unmatched
     except Exception as e:
         print(f"[startup] Seed warning: {e}")

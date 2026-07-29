@@ -27,7 +27,7 @@ const STATUS_META = {
   ignore:           { label: 'Ignored',          cls: 'bg-gray-100 text-gray-500' },
 }
 const OVERRIDE_STATUSES = ['written_off', 'twice_credit', 'wrong_amount', 'adhoc_settlement', 'under_review', 'ignore']
-import { SRC_CODES } from '../srcCodes'
+import { useSrcCodes } from '../srcCodes'
 const SRC_STATUSES = ['unmatched_bank', 'unmatched_load', 'twice_credit', 'wrong_amount', 'src_assigned']
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 const isMatched = s => ['matched_online', 'matched_cash', 'matched_manual', 'interbank_matched'].includes(s)
@@ -186,6 +186,7 @@ export default function Evalue() {
 
 // ─── Reconciliation view (summary + drill-down + manual actions) ───────────────
 function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '' }, setDates = () => {} }) {
+  const srcCodes = useSrcCodes()
   const [expanded, setExpanded] = useState(null)
   const [statusFilter, setStatusFilter] = useState('')
   const [rows, setRows] = useState([])
@@ -238,7 +239,7 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
     config: { title: 'Assign SRC', confirmLabel: 'Assign',
       description: `${row.eko_trxn_id || row.utr || row.id} — current status: ${row.recon_status}${row.src_code ? ` · SRC: ${row.src_code}` : ''}`,
       fields: [
-        { name: 'src_code', label: 'SRC code', type: 'select', options: SRC_CODES, required: true, default: row.src_code || 'UNCLAIMED' },
+        { name: 'src_code', label: 'SRC code', type: 'select', options: srcCodes, required: true, default: row.src_code || 'UNCLAIMED' },
         { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional — recorded with the SRC', default: row.src_note || '' },
       ] },
     action: async (v) => { const { data } = await api.post('/evalue/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); if (!mcQueued(data)) toast.success(`SRC assigned: ${data.src_code}`) },

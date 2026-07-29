@@ -43,7 +43,7 @@ const AGING_BADGE = {
   'D+7+':    { label: 'D+7+',   cls: 'bg-red-100 text-red-700 font-bold' },
 }
 
-import { SRC_CODES } from '../srcCodes'
+import { useSrcCodes } from '../srcCodes'
 
 // Statuses where an SRC tag is offered — open/exception rows across the core ledger
 // AND the module products (E-Value / BBPS), plus src_assigned itself (to re-tag).
@@ -56,6 +56,7 @@ const SRC_ELIGIBLE = new Set([
 const COLS = 18  // checkbox + 16 data cols (incl. Description, CSP, Balance) + actions
 
 export default function OpenItems() {
+  const SRC_CODES = useSrcCodes()   // live catalog (falls back to the static list)
   const [searchParams, setSearchParams] = useSearchParams()
 
   // Seed every filter from the URL so a shared/bookmarked link reproduces the

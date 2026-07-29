@@ -377,9 +377,9 @@ class BbpsBulkSRCIn(BaseModel):
 @router.post("/assign-src")
 def assign_src(body: BbpsSRCIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
     """Assign an SRC code + note to one BBPS row (operator/bank or internal)."""
-    from routes.recon import SRC_CODES
-    if body.src_code not in SRC_CODES:
-        raise HTTPException(400, f"Invalid SRC code. Allowed: {SRC_CODES}")
+    from routes.recon import is_valid_src_code
+    if not is_valid_src_code(db, body.src_code):
+        raise HTTPException(400, f"Invalid SRC code: {body.src_code}")
     Model = BbpsBankTxn if body.side == "bank" else BbpsInternal
     row = db.query(Model).filter(Model.id == body.id).first()
     if not row:
@@ -408,9 +408,9 @@ def assign_src(body: BbpsSRCIn, db: Session = Depends(get_db), user=Depends(get_
 @router.post("/assign-src-bulk")
 def assign_src_bulk(body: BbpsBulkSRCIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
     """Assign one SRC code + note to many BBPS rows in one shot."""
-    from routes.recon import SRC_CODES
-    if body.src_code not in SRC_CODES:
-        raise HTTPException(400, f"Invalid SRC code. Allowed: {SRC_CODES}")
+    from routes.recon import is_valid_src_code
+    if not is_valid_src_code(db, body.src_code):
+        raise HTTPException(400, f"Invalid SRC code: {body.src_code}")
     Model = BbpsBankTxn if body.side == "bank" else BbpsInternal
     rows = db.query(Model).filter(Model.id.in_(body.ids or [])).all()
     queued = maker_checker.intercept(

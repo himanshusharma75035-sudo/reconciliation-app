@@ -228,6 +228,22 @@ class SystemSetting(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
 
+class SrcCode(Base):
+    """Managed catalog of SRC (source / disposition) reason codes. Replaces the
+    hard-coded SRC_CODES list so codes can be added/deactivated from Configuration
+    without a redeploy. Seeded with the original 9 codes; served (active only) at
+    GET /api/recon/src-codes and validated against by every product's assign-src.
+    Codes are deactivated, never hard-deleted, so already-tagged rows stay valid."""
+    __tablename__ = "src_codes"
+
+    id         = Column(String(36),  primary_key=True, default=generate_id)
+    code       = Column(String(40),  unique=True, nullable=False, index=True)  # canonical UPPER_SNAKE
+    label      = Column(String(200), nullable=True)                            # human description
+    is_active  = Column(Boolean,     default=True, index=True)
+    created_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime,    default=datetime.datetime.utcnow)
+
+
 class UploadSession(Base):
     __tablename__ = "upload_sessions"
 
@@ -1430,6 +1446,32 @@ def seed_bank_accounts(db):
                                label=row.get("label"),
                                is_primary=bool(row.get("is_primary", False)),
                                is_active=True, auto_added=False))
+    db.commit()
+
+
+# The original 9 hard-coded SRC codes, now the seed for the managed catalog. Editing
+# these labels is safe (idempotent by code); removing one here does NOT delete a code
+# already in the DB (seed only adds), so a deployed catalog is never truncated.
+DEFAULT_SRC_CODES = [
+    ("UNCLAIMED",      "Unclaimed / no counterpart yet"),
+    ("ADVANCE_CREDIT", "Advance credit received"),
+    ("BANK_CHARGES",   "Bank charges / fees / GST"),
+    ("TWICE_CREDITED", "Credited twice"),
+    ("INTERNAL_TXN",   "Internal / own transaction"),
+    ("DELAYED_TXN",    "Delayed settlement (D+n)"),
+    ("DUPLICATE",      "Duplicate entry"),
+    ("MISSING_TID",    "Missing / mismatched TID"),
+    ("OTHER",          "Other (see note)"),
+]
+
+
+def seed_src_codes(db):
+    """Seed the SRC reason-code catalog with the original 9 codes. Idempotent
+    (keyed on code): adds a code only if absent, never overwrites an operator's
+    edits or deactivations, and never deletes."""
+    for code, label in DEFAULT_SRC_CODES:
+        if not db.query(SrcCode).filter(SrcCode.code == code).first():
+            db.add(SrcCode(code=code, label=label, is_active=True, created_by="system"))
     db.commit()
 
 

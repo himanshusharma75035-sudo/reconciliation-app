@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react'
-import { ShieldCheck, Percent, Activity, RefreshCw, CheckCircle2, XCircle, Plus, Trash2, Pencil, Lightbulb, Search } from 'lucide-react'
+import { ShieldCheck, Percent, Activity, RefreshCw, CheckCircle2, XCircle, Plus, Trash2, Pencil, Lightbulb, Search, Tag } from 'lucide-react'
 import toast from 'react-hot-toast'
 import api from '../utils/api'
 import ActionModal from '../components/ActionModal'
@@ -23,6 +23,10 @@ const TABS = [
 
 export default function Workflow() {
   const [tab, setTab] = useState('approvals')
+  // SRC-code management is visible to admins and to anyone the admin has granted
+  // the 'src_manage' permission — until then it stays admin-only (Rajendra point 3).
+  const canManageSrc = isAdmin() || hasPermission('src_manage')
+  const tabs = [...TABS, ...(canManageSrc ? [{ key: 'src-codes', label: 'SRC Codes', icon: Tag }] : [])]
   return (
     <div>
       <div className="flex items-center gap-2 mb-1">
@@ -31,8 +35,8 @@ export default function Workflow() {
       </div>
       <p className="text-sm text-gray-500 mb-5">Maker-checker approvals · fee verification rules · anomaly scan</p>
 
-      <div className="flex gap-2 mb-5">
-        {TABS.map(({ key, label, icon: Icon }) => (
+      <div className="flex gap-2 mb-5 flex-wrap">
+        {tabs.map(({ key, label, icon: Icon }) => (
           <button key={key} onClick={() => setTab(key)}
             className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === key ? 'bg-primary text-white' : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
             <Icon size={15} />{label}
@@ -44,6 +48,89 @@ export default function Workflow() {
       {tab === 'fees'        && <FeeRulesTab />}
       {tab === 'anomalies'   && <AnomaliesTab />}
       {tab === 'suggestions' && <RuleSuggestionsTab />}
+      {tab === 'src-codes'   && <SrcCodesTab />}
+    </div>
+  )
+}
+
+
+// ═══════════════════════════════ SRC code catalog ════════════════════════════
+
+function SrcCodesTab() {
+  const [rows, setRows] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [code, setCode] = useState('')
+  const [label, setLabel] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const load = () => {
+    setLoading(true)
+    api.get('/recon/src-codes/catalog')
+      .then(({ data }) => setRows(data)).catch(() => toast.error('Failed to load SRC codes'))
+      .finally(() => setLoading(false))
+  }
+  useEffect(() => { load() }, [])
+
+  const create = async () => {
+    if (!code.trim()) return toast.error('Enter a code')
+    setBusy(true)
+    try {
+      const { data } = await api.post('/recon/src-codes', { code, label })
+      toast.success(data.reactivated ? `Reactivated ${data.code}` : `Created ${data.code}`)
+      setCode(''); setLabel(''); load()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Create failed') }
+    finally { setBusy(false) }
+  }
+  const toggle = async (r) => {
+    try {
+      await api.post(`/recon/src-codes/${r.id}/toggle`)
+      toast.success(r.is_active ? `Deactivated ${r.code}` : `Activated ${r.code}`)
+      load()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Update failed') }
+  }
+
+  return (
+    <div className="max-w-3xl space-y-4">
+      <div className="card">
+        <p className="text-xs text-gray-400 mb-3">
+          Reason codes operators pick when tagging an open item (SRC). Codes here apply across
+          <strong> every product</strong>. Deactivating a code hides it from the dropdowns but keeps
+          already-tagged rows intact. Codes are stored in UPPER_SNAKE.
+        </p>
+        <div className="flex items-end gap-2 flex-wrap">
+          <div><label className="block text-xs text-gray-500 mb-1">New code</label>
+            <input className="input text-sm py-1.5" placeholder="e.g. CHARGEBACK" value={code} onChange={e => setCode(e.target.value)} /></div>
+          <div className="flex-1 min-w-[180px]"><label className="block text-xs text-gray-500 mb-1">Description (optional)</label>
+            <input className="input text-sm py-1.5 w-full" placeholder="What it means" value={label} onChange={e => setLabel(e.target.value)} /></div>
+          <button onClick={create} disabled={busy} className="btn-primary text-sm flex items-center gap-1"><Plus size={14} /> Add code</button>
+          <button onClick={load} disabled={loading} className="btn-ghost text-sm flex items-center gap-1"><RefreshCw size={13} /> Refresh</button>
+        </div>
+      </div>
+
+      <div className="card p-0 overflow-hidden">
+        <table className="w-full text-sm">
+          <thead><tr className="border-b border-gray-100 bg-gray-50/50 text-gray-400 text-[10px] uppercase tracking-wide">
+            <th className="py-2 px-4 text-left">Code</th><th className="py-2 px-4 text-left">Description</th>
+            <th className="py-2 px-4 text-left">Status</th><th className="py-2 px-4 text-right">Action</th></tr></thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.id} className="border-b border-gray-50">
+                <td className="py-2 px-4 font-mono text-xs font-semibold text-gray-700">{r.code}</td>
+                <td className="py-2 px-4 text-gray-500">{r.label || '—'}</td>
+                <td className="py-2 px-4">
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${r.is_active ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                    {r.is_active ? 'Active' : 'Inactive'}</span>
+                </td>
+                <td className="py-2 px-4 text-right">
+                  <button onClick={() => toggle(r)} className={`px-3 py-1 rounded text-xs font-medium ${r.is_active ? 'bg-gray-100 text-gray-600 hover:bg-gray-200' : 'bg-green-600 text-white hover:bg-green-700'}`}>
+                    {r.is_active ? 'Deactivate' : 'Activate'}</button>
+                </td>
+              </tr>
+            ))}
+            {rows.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-gray-400 text-xs">No codes yet.</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

@@ -23,6 +23,35 @@ SRC_CODES = [
     "DUPLICATE", "MISSING_TID", "OTHER"
 ]
 
+
+def get_active_src_codes(db) -> list:
+    """Active SRC codes from the managed catalog (SrcCode table), in a stable order.
+    Falls back to the hard-coded seed list ONLY when the table is genuinely empty or
+    unavailable (fresh DB / pre-seed). A seeded table where the operator deactivated
+    every code returns [] (honoured), rather than silently re-enabling the defaults.
+    This is the single source of truth every product's assign-src validates against."""
+    try:
+        from models.database import SrcCode
+        if db.query(SrcCode).count():   # table is seeded — honour it exactly
+            return [c for (c,) in db.query(SrcCode.code)
+                    .filter(SrcCode.is_active == True)
+                    .order_by(SrcCode.created_at, SrcCode.code).all()]
+    except Exception:
+        pass
+    return list(SRC_CODES)
+
+
+def is_valid_src_code(db, code) -> bool:
+    """True if `code` is an active catalog code. Use in every assign-src path."""
+    return code in get_active_src_codes(db)
+
+
+def _normalize_src_code(raw: str) -> str:
+    """Canonicalise a user-entered code to UPPER_SNAKE (letters/digits/underscore)."""
+    import re
+    s = re.sub(r"[^A-Za-z0-9]+", "_", (raw or "").strip()).strip("_").upper()
+    return s[:40]
+
 # ── Pydantic request schemas ───────────────────────────────────────────────────
 class RunReconRequest(BaseModel):
     partner: str
@@ -754,6 +783,8 @@ def do_manual_match_bulk(
 @router.post("/assign-src")
 def do_assign_src(req: SRCRequest, db: Session = Depends(get_db),
                   current_user: User = Depends(require_permission("src_assign"))):
+    if not is_valid_src_code(db, req.src_code):
+        raise HTTPException(status_code=400, detail=f"Invalid SRC code: {req.src_code}")
     txn = assign_src(req.transaction_id, req.src_code, req.src_note, db)
     _log(db, current_user, "assign_src", "transaction", txn.id, {
         "src_code": req.src_code, "src_note": req.src_note
@@ -770,7 +801,7 @@ def do_assign_src_bulk(req: BulkSRCRequest, db: Session = Depends(get_db),
     """
     if not req.transaction_ids:
         raise HTTPException(status_code=400, detail="No transaction IDs provided")
-    if req.src_code not in SRC_CODES:
+    if not is_valid_src_code(db, req.src_code):
         raise HTTPException(status_code=400, detail=f"Invalid SRC code: {req.src_code}")
 
     eligible_statuses = [ReconStatus.unmatched, ReconStatus.amount_mismatch]
@@ -1381,8 +1412,70 @@ def list_runs(partner: Optional[str] = None, db: Session = Depends(get_db),
              "rules_applied": json.loads(r.rules_applied or "[]")} for r in runs]
 
 @router.get("/src-codes")
-def get_src_codes():
-    return SRC_CODES
+def get_src_codes(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Active SRC codes (list of strings) — the dropdown source for every product."""
+    return get_active_src_codes(db)
+
+
+# ── SRC catalog management (admin, or a user granted the 'src_manage' permission) ──
+
+class SrcCodeIn(BaseModel):
+    code: str
+    label: Optional[str] = ""
+
+
+@router.get("/src-codes/catalog")
+def src_codes_catalog(db: Session = Depends(get_db),
+                      current_user: User = Depends(require_permission("src_manage"))):
+    """Full catalog incl. inactive codes, for the management UI."""
+    from models.database import SrcCode
+    rows = db.query(SrcCode).order_by(SrcCode.is_active.desc(), SrcCode.code).all()
+    return [{"id": r.id, "code": r.code, "label": r.label or "",
+             "is_active": bool(r.is_active), "created_by": r.created_by,
+             "created_at": str(r.created_at) if r.created_at else None} for r in rows]
+
+
+@router.post("/src-codes")
+def create_src_code(body: SrcCodeIn, db: Session = Depends(get_db),
+                    current_user: User = Depends(require_permission("src_manage"))):
+    """Create a new SRC code (canonicalised to UPPER_SNAKE). Reactivates a code that
+    was previously deactivated rather than erroring, so codes are never duplicated."""
+    from models.database import SrcCode
+    code = _normalize_src_code(body.code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Code must contain letters or digits.")
+    existing = db.query(SrcCode).filter(SrcCode.code == code).first()
+    if existing:
+        if existing.is_active:
+            raise HTTPException(status_code=409, detail=f"SRC code '{code}' already exists.")
+        existing.is_active = True
+        if body.label:
+            existing.label = body.label[:200]
+        db.commit()
+        _log(db, current_user, "src_code_reactivated", "src_code", existing.id, {"code": code})
+        return {"id": existing.id, "code": code, "reactivated": True}
+    row = SrcCode(code=code, label=(body.label or "")[:200], is_active=True,
+                  created_by=current_user.username)
+    db.add(row)
+    db.commit()
+    _log(db, current_user, "src_code_created", "src_code", row.id, {"code": code, "label": body.label})
+    return {"id": row.id, "code": code, "reactivated": False}
+
+
+@router.post("/src-codes/{code_id}/toggle")
+def toggle_src_code(code_id: str, db: Session = Depends(get_db),
+                    current_user: User = Depends(require_permission("src_manage"))):
+    """Activate / deactivate a code. Deactivating hides it from the dropdowns but
+    leaves already-tagged rows untouched (the code is never deleted)."""
+    from models.database import SrcCode
+    row = db.query(SrcCode).filter(SrcCode.id == code_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="SRC code not found")
+    row.is_active = not bool(row.is_active)
+    db.commit()
+    _log(db, current_user, "src_code_toggled", "src_code", row.id,
+         {"code": row.code, "is_active": row.is_active})
+    return {"id": row.id, "code": row.code, "is_active": row.is_active}
 
 
 # ─── Mismatch Drill-down ──────────────────────────────────────────────────────

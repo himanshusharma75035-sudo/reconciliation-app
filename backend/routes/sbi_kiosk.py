@@ -3090,13 +3090,13 @@ def assign_src(
     current_user=Depends(require_permission("src_assign")),
 ):
     """Tag an SBI result row with an SRC code + note. Persists across re-runs (overlay)."""
-    from routes.recon import SRC_CODES
+    from routes.recon import is_valid_src_code
     p = (body.process or "").lower()
     model = {"p01": SBIP01Result, "p02": SBIP02Result, "p03": SBIP03Result, "p04": SBIP04Result}.get(p)
     if not model:
         raise HTTPException(status_code=400, detail="process must be one of p01..p04")
-    if body.src_code not in SRC_CODES:
-        raise HTTPException(status_code=400, detail=f"Invalid SRC code. Allowed: {SRC_CODES}")
+    if not is_valid_src_code(db, body.src_code):
+        raise HTTPException(status_code=400, detail=f"Invalid SRC code: {body.src_code}")
     row = db.query(model).filter(model.id == body.result_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Result row not found")
@@ -3152,6 +3152,75 @@ def delete_src_assignment(
         pass
     db.commit()
     return {"deleted": sa_id}
+
+
+class SBIBulkSRCItem(BaseModel):
+    process: str        # p01 | p02 | p03 | p04
+    result_id: str
+
+
+class SBIBulkSRCIn(BaseModel):
+    items: List[SBIBulkSRCItem]
+    src_code: str
+    src_note: str = ""
+
+
+@router.post("/assign-src-bulk")
+def assign_src_bulk(
+    body: SBIBulkSRCIn,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_permission("src_assign")),
+):
+    """Tag MANY SBI result rows with one SRC code + note in a single shot (overlay,
+    parity with core /recon/assign-src-bulk). Each item is {process, result_id};
+    rows that can't be keyed/found are skipped and counted, not fatal."""
+    from routes.recon import is_valid_src_code
+    if not is_valid_src_code(db, body.src_code):
+        raise HTTPException(status_code=400, detail=f"Invalid SRC code: {body.src_code}")
+    if not body.items:
+        raise HTTPException(status_code=400, detail="No rows provided")
+    models = {"p01": SBIP01Result, "p02": SBIP02Result, "p03": SBIP03Result, "p04": SBIP04Result}
+    note = (body.src_note or "")[:500]
+    updated = skipped = 0
+    seen = set()   # two unified rows can map to one P0x result — tag it once
+    for it in body.items:
+        p = (it.process or "").lower()
+        if (p, it.result_id) in seen:
+            continue
+        seen.add((p, it.result_id))
+        model = models.get(p)
+        if not model:
+            skipped += 1; continue
+        row = db.query(model).filter(model.id == it.result_id).first()
+        if not row:
+            skipped += 1; continue
+        row_dict = {c.name: getattr(row, c.name) for c in model.__table__.columns}
+        key = _src_key(p, row_dict)
+        if not key:
+            skipped += 1; continue
+        existing = db.query(SBISrcAssignment).filter(
+            SBISrcAssignment.recon_date == row.recon_date,
+            SBISrcAssignment.process == p,
+            SBISrcAssignment.match_key == key,
+        ).first()
+        if existing:
+            existing.src_code = body.src_code
+            existing.src_note = note
+            existing.created_by = current_user.username
+        else:
+            db.add(SBISrcAssignment(recon_date=row.recon_date, process=p, match_key=key,
+                                    src_code=body.src_code, src_note=note,
+                                    created_by=current_user.username))
+        updated += 1
+    try:
+        db.add(AuditLog(user_id=current_user.id, username=current_user.username,
+                        action="sbi_assign_src_bulk", action_type="human",
+                        entity_type="sbi", entity_id=None,
+                        detail=json.dumps({"src_code": body.src_code, "updated": updated, "skipped": skipped})))
+    except Exception:
+        pass
+    db.commit()
+    return {"updated": updated, "skipped": skipped, "src_code": body.src_code}
 
 
 @router.get("/summary")

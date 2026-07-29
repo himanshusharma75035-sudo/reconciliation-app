@@ -323,6 +323,26 @@ privileged path rather than inventing a looser one. This class of bug is invisib
 suite and in a "does it work" demo — an **adversarial review that tries to escalate scope** is what
 surfaces it before deploy.
 
+**When a hard-coded list becomes a managed table, "no active rows" ≠ "unconfigured".** Turning a
+fixed code list (reason codes, presets) into an editable catalog usually keeps a fallback: if the
+table is empty, fall back to the built-in seed so a fresh DB still works. The trap is writing that
+fallback as `if not active_rows: return SEED` — because a *seeded* table where the operator has
+**deactivated every entry** also produces an empty active set, so the code silently resurrects all
+the built-in defaults exactly when someone deliberately turned them all off. Distinguish "the table
+has zero rows" (genuinely unconfigured → seed) from "rows exist but none are active" (a real choice
+→ honour the empty result). Also give the query an explicit `ORDER BY`: dropping the hard-coded
+list loses its curated order, and DB-insertion order is not a contract. Both are invisible until an
+operator exercises the edge (deactivate-all), so a test that only deactivates *one* entry misses it.
+
+**A permission gate that admins bypass gives every admin-minted API key full authority.** A common
+`require_permission` shape short-circuits on `role == "admin"` before reading the permission set. If
+scoped API keys are synthesised by cloning their (admin) creator's principal and overriding only
+`.permissions`, that clone keeps `role == "admin"` — so the key bypasses *every* permission gate and
+its declared scope is silently ignored. New permission-gated endpoints inherit this the moment they
+ship. The fix belongs at the auth layer (give the key-principal a non-privileged role, or consult
+permissions for key-principals regardless of role), not in each endpoint — but know that "gated by a
+new permission" does **not** mean "safe from a scoped key" until that's fixed.
+
 ---
 
 ## 7. Operations & deployment

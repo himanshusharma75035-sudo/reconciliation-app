@@ -20,7 +20,7 @@ const STATUS_META = {
   under_review:          { label: 'Under Review', cls: 'bg-yellow-50 text-yellow-700' },
 }
 const OVERRIDE = ['matched', 'failed_refunded', 'failed_pending_refund', 'refunded_but_success', 'written_off', 'under_review']
-import { SRC_CODES } from '../srcCodes'
+import { useSrcCodes } from '../srcCodes'
 const SRC_ASSIGNABLE = ['unmatched_bank', 'unmatched_internal', 'failed_pending_refund', 'refunded_but_success', 'amount_mismatch', 'src_assigned']
 const inr = n => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })
 // Maker-checker: a queued action returns {queued:true, message}; toast "pending" not "done".
@@ -114,6 +114,7 @@ export default function Bbps() {
 }
 
 function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDates }) {
+  const srcCodes = useSrcCodes()
   const [status, setStatus] = useState('')
   const [provider, setProvider] = useState('')
   const [rows, setRows] = useState([])
@@ -187,7 +188,7 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
     config: { title: 'Assign SRC', confirmLabel: 'Assign',
       description: `${row.client_ref || row.eko_trxn_id || row.id} — current status: ${row.recon_status}`,
       fields: [
-        { name: 'src_code', label: 'SRC code', type: 'select', options: SRC_CODES, required: true, default: row.src_code || 'UNCLAIMED' },
+        { name: 'src_code', label: 'SRC code', type: 'select', options: srcCodes, required: true, default: row.src_code || 'UNCLAIMED' },
         { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional context for this SRC assignment' },
       ] },
     action: async (v) => { const { data } = await api.post('/bbps/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); if (!mcQueued(data)) toast.success(`SRC assigned: ${data.src_code}`) },
