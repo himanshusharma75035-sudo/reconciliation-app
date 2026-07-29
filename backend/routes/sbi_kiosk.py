@@ -930,8 +930,11 @@ def run_p02(
                     break
 
         if is_reversal:
-            match_status = 'Reversal'
-            success = 'Success' if matched_txn else 'Fail'
+            # A DR+CR pair sharing one reference cancels out — it IS reconciled, not a separate
+            # bucket. Classify as Matched (finance-ops: "either matched or unmatched, never
+            # reversal"); the reversal nature is preserved in reversal_type for the Reversals report.
+            match_status = 'Matched'
+            success = 'Success'
         elif matched_txn:
             # Validate amount — SBI paisa tolerance (₹0.01, finance-ops-approved; was ₹1,
             # unsupported by the data: 0 amount mismatches across 27,187 validated matches).
@@ -966,7 +969,9 @@ def run_p02(
 
     db.commit()
     summary = {s: sum(1 for r in results if r.match_status == s)
-               for s in ('Matched', 'Unmatched', 'Partial', 'Reversal')}
+               for s in ('Matched', 'Unmatched', 'Partial')}
+    # reversal legs are Matched now (they cancel out); surface the count separately for info.
+    summary['Reversal'] = sum(1 for r in results if (r.reversal_type or '') not in ('', 'No'))
     _audit(db, current_user, "sbi_run_p02", {"recon_date": recon_date, **summary})
     return {"recon_date": recon_date, "total": len(results), "summary": summary}
 
@@ -2037,7 +2042,7 @@ def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=Non
             _sheet(w, "P04 Pending",
                    [r for r in recs["p04"] if r.get("action_required") != "NONE" and not r.get("action_done")], _P04_XCOLS)
             _sheet(w, "Reversals",
-                   [r for r in recs["p02"] if r.get("match_status") == "Reversal"], _P02_XCOLS)
+                   [r for r in recs["p02"] if r.get("reversal_type") in ("Reversal Debit", "Reversal Credit")], _P02_XCOLS)
             srcs = db.query(SBISrcAssignment).filter(SBISrcAssignment.recon_date == rd).all() if rd else []
             _sheet(w, "SRC Log",
                    [{"recon_date": s.recon_date, "process": s.process, "match_key": s.match_key,
@@ -2169,7 +2174,7 @@ def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=Non
 
         elif t == "reversals":
             recs = [r for r in _load_process_recs(db, "p02", rd, df_, dt_, with_bank_desc=True)
-                    if r.get("match_status") == "Reversal"]
+                    if r.get("reversal_type") in ("Reversal Debit", "Reversal Credit")]
             recs.sort(key=lambda r: (r.get("reference_number") or "", r.get("bank_type") or ""))
             _sheet(w, "Reversals", recs, _P02_XCOLS)
 

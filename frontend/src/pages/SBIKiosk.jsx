@@ -644,7 +644,7 @@ function P02Tab({ reconDate, setReconDate }) {
     setRunning(true)
     try {
       const { data: r } = await api.post('/sbi/run/p02', null, { params: { recon_date: reconDate } })
-      toast.success(`P02: ${r.summary.Matched || 0} matched, ${r.summary.Unmatched || 0} unmatched, ${r.summary.Reversal || 0} reversals`)
+      toast.success(`P02: ${r.summary.Matched || 0} matched (incl ${r.summary.Reversal || 0} reversal legs), ${r.summary.Unmatched || 0} unmatched`)
       setPage(1); loadResults()
     } catch (err) { toast.error(err.response?.data?.detail || 'P02 failed') }
     finally { setRunning(false) }
@@ -719,7 +719,7 @@ function P02Tab({ reconDate, setReconDate }) {
                         className={`border-b border-gray-50 hover:bg-gray-50 ${grouped ? 'border-l-2 border-l-purple-300' : ''} ${grp[i].samePrev ? 'border-t-0' : ''}`}>
                         <td className="px-3 py-2 align-top">
                           <StatusBadge process="p02" status={r.match_status} /><SrcBadge row={r} />
-                          {r.match_status === 'Reversal' && <div className="text-[10px] text-purple-500 mt-0.5">{drcr ? 'debit leg' : 'credit leg'}</div>}
+                          {r.reversal_type && r.reversal_type !== 'No' && <div className="text-[10px] text-gray-400 mt-0.5">reversal leg ({drcr ? 'debit' : 'credit'})</div>}
                         </td>
                         {/* Bank side — always present */}
                         <td className="px-3 py-2 align-top">
@@ -741,13 +741,13 @@ function P02Tab({ reconDate, setReconDate }) {
                                 <div className="text-[11px] text-gray-500">{r.report_txn_type || '—'}{r.report_status && <span className="ml-1 text-gray-400">· {r.report_status}</span>}</div>
                                 {(r.report_journal || r.manual_counterpart) && <div className="text-[11px] font-mono text-gray-400">{r.manual_counterpart || `jrnl ${r.report_journal}`}</div>}
                               </div>
-                            : <span className="text-[11px] text-gray-300 italic">{r.match_status === 'Reversal' ? '— reversal, no report —' : '— no report match —'}</span>}
+                            : <span className="text-[11px] text-gray-300 italic">{r.reversal_type && r.reversal_type !== 'No' ? '— reversal, no report —' : '— no report match —'}</span>}
                         </td>
                         <td className="px-3 py-2 text-right align-top">{hasReport(r) ? <Delta a={r.bank_amount} b={r.report_amount} /> : <span className="text-gray-300">—</span>}</td>
                         <td className="px-3 py-2 text-center whitespace-nowrap align-top">
                           {r.match_status === 'Manual_Matched'
                             ? <button onClick={() => undoManualMatch(r, loadResults)} title={r.manual_remark || ''} className="text-[11px] text-amber-700 hover:underline">↩ undo</button>
-                            : ((r.match_status || '').startsWith('Unmatched') || r.match_status === 'Partial' || r.match_status === 'Reversal')
+                            : ((r.match_status || '').startsWith('Unmatched') || r.match_status === 'Partial')
                               ? <span className="inline-flex items-center gap-2">
                                   {(r.match_status || '').startsWith('Unmatched') &&
                                     <button onClick={() => setMmModal(r)} className="text-[11px] text-primary hover:underline">match</button>}

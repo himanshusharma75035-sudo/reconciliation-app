@@ -128,7 +128,7 @@ def test_single_date_reconciliation_workbook_contract(db):
               for r in _rows(bank)}     # openpyxl reads empty cells back as None
     assert status[R1] == "Matched"
     assert status[RX] == "Unmatched"
-    assert status[RV] == "Reversal"
+    assert status[RV] == "Matched"          # reversal legs cancel out — reconciled (still listed on the duplicates sheet)
     assert status[""] == "Matched (Settlement)"        # the EKO DEDUCTION debit
     assert _headers(wb["Duplicate Txn in Bank Stmt"]) == DUP_COLS
     assert len(_rows(wb["Duplicate Txn in Bank Stmt"])) == 2   # both reversal legs

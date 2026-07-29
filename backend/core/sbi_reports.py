@@ -230,7 +230,8 @@ def reconcile(db, recon_date: str) -> dict:
         elif is_settle_debit:
             status = "Unmatched Settlement"
         elif ref in dup_refs:
-            status = "Reversal"
+            status = "Matched"          # DR+CR reversal legs cancel out — reconciled (still listed
+                                        # on the Reversals sheet via _is_dup)
         elif ref:
             status = "Unmatched"
         else:

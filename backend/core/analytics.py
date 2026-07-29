@@ -23,6 +23,7 @@ _MATCHED = {
     "internal_matched",                                        # core: internal self-match (NEFT D+1 / internal pass) — a real match
     "matched_online", "matched_cash", "matched_manual",        # e-value
     "sbi_matched",                                             # (label form)
+    "reversal",                                               # SBI P02: a DR+CR pair (same ref) cancels out — reconciled, never a separate bucket
     "failed_refunded",                                        # bbps: Failed+Refunded pair IS reconciled (bbps_engine.RECON_OK)
 }
 _UNMATCHED = {
@@ -33,7 +34,7 @@ _UNMATCHED = {
 # core-ledger 'amount_mismatch') — must count as a mismatch, not fall through to other.
 _MISMATCH = {"amount_mismatch", "wrong_amount", "partial"}
 # everything else (src_assigned, duplicate, failed, bank_debit, transaction_fee,
-# fund_transfer, fee_matched, reversal, …) → "other"
+# fund_transfer, fee_matched, …) → "other"
 
 
 def _bucket(status: str) -> str:
