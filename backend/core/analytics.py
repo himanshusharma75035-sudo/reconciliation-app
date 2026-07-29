@@ -195,10 +195,54 @@ def _open_ageing(db, date_from=None, date_to=None):
             "total_count": total, "total_value": total_val}
 
 
+# ── Analytics result cache ────────────────────────────────────────────────────
+# build_analytics scans the ledger + SBI/E-Value tables; even with the covering indexes a wide
+# range costs a couple of seconds. The result only changes when a recon/upload runs (a few times
+# a day), so cache it briefly — single-worker process, so a module dict is safe. The key includes
+# the DB bind id so unit tests (each with their own in-memory engine) never share results.
+import time as _time
+import os as _os
+_ANALYTICS_TTL = float(_os.getenv("ANALYTICS_CACHE_TTL", "60"))
+_ANALYTICS_CACHE = {}   # (bind_id, date_from, date_to, product, side) -> (expires_at, result)
+
+
+def _bind_id(db):
+    try:
+        return id(db.get_bind())
+    except Exception:
+        return 0
+
+
+def _cache_get(key):
+    hit = _ANALYTICS_CACHE.get(key)
+    if hit and hit[0] > _time.time():
+        return hit[1]
+    return None
+
+
+def _cache_put(key, val):
+    now = _time.time()
+    if len(_ANALYTICS_CACHE) > 64:                       # prune expired, then hard-cap
+        for k in [k for k, v in _ANALYTICS_CACHE.items() if v[0] <= now]:
+            _ANALYTICS_CACHE.pop(k, None)
+        if len(_ANALYTICS_CACHE) > 64:
+            _ANALYTICS_CACHE.clear()
+    _ANALYTICS_CACHE[key] = (now + _ANALYTICS_TTL, val)
+
+
+def clear_analytics_cache():
+    """Invalidate the analytics cache (e.g. after a recon/upload) so the dashboard updates now."""
+    _ANALYTICS_CACHE.clear()
+
+
 def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     from sqlalchemy import func as F
     from models.database import (Transaction, EvalueBankTxn, EvalueWalletLoad,
                                  SBIP02Result)
+    _ck = (_bind_id(db), date_from, date_to, product, side)
+    _hit = _cache_get(_ck)
+    if _hit is not None:
+        return _hit
     try:
         from models.database import BbpsBankTxn, BbpsInternal
     except Exception:
@@ -440,7 +484,7 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
     prod_options = [{"product": g, "label": glabel}
                     for g, glabel in sorted(group_options.items(), key=lambda x: x[1])]
 
-    return {
+    result = {
         "date_from": date_from, "date_to": date_to,
         "product": product, "side": side,
         "totals": totals,
@@ -456,6 +500,8 @@ def build_analytics(db, date_from=None, date_to=None, product=None, side=None):
         # Additive: ageing of open (unmatched) items — count + ₹ per age bucket.
         "open_ageing": _open_ageing(db, date_from, date_to),
     }
+    _cache_put(_ck, result)
+    return result
 
 
 def _statv(status) -> str:

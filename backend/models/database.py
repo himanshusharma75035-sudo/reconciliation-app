@@ -1839,10 +1839,51 @@ def _run_migrations():
             conn.commit()
 
 
+# Covering indexes that keep the analytics dashboard fast as the data grows (the group-by hot
+# paths do index-only scans instead of full-table scans). create_all only indexes NEW tables, so
+# existing DBs need an idempotent add. (name, table, columns-DDL).
+_PERF_INDEXES = [
+    ("ix_txn_cover",           "transactions",     "(row_type, recon_date, partner, side, recon_status, amount)"),
+    ("ix_sbip02_cover",        "sbi_p02_results",  "(recon_date, match_status, bank_amount)"),
+    ("ix_sbip03_date_status",  "sbi_p03_results",  "(recon_date, match_status)"),
+]
+
+
+def _ensure_perf_indexes():
+    """Idempotently create the analytics covering indexes. Index adds never change behaviour;
+    each is guarded by an existence check and any failure is swallowed (never blocks startup)."""
+    try:
+        with engine.connect() as conn:
+            if _is_sqlite:
+                for name, table, cols in _PERF_INDEXES:
+                    try:
+                        conn.execute(_text(f"CREATE INDEX IF NOT EXISTS {name} ON {table} {cols}"))
+                    except Exception:
+                        pass
+                conn.commit()
+            else:
+                from sqlalchemy import text
+                db_name = conn.execute(text("SELECT DATABASE()")).scalar()
+                for name, table, cols in _PERF_INDEXES:
+                    try:
+                        exists = conn.execute(text(
+                            "SELECT 1 FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=:db "
+                            "AND TABLE_NAME=:tbl AND INDEX_NAME=:idx LIMIT 1"),
+                            {"db": db_name, "tbl": table, "idx": name}).scalar()
+                        if not exists:
+                            conn.execute(text(f"CREATE INDEX {name} ON {table} {cols}"))
+                    except Exception:
+                        pass
+                conn.commit()
+    except Exception:
+        pass
+
+
 def init_db():
     """Create all tables and run safe column migrations on startup."""
     Base.metadata.create_all(bind=engine)
     _run_migrations()
+    _ensure_perf_indexes()
 
 
 def seed_audit_read_grandfather(db):
