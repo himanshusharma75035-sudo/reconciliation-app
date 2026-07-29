@@ -474,6 +474,30 @@ async def upload_ko_limits(
 
 # ── P02: Transaction Report Upload ────────────────────────────────────────────
 
+def _sbi_settlement_accounts():
+    """Configured SBI Kiosk settlement-account identifier(s), read from the
+    gitignored instance/seed_accounts.json ("sbi_settlement_accounts": [...]).
+    Real account numbers never live in the repo. Returns [] when unconfigured,
+    which makes the Other-Transactions account filter FAIL OPEN (insert every
+    row) so a mis-configured instance never silently drops the whole file."""
+    try:
+        from models.database import _load_instance_seed_accounts
+        vals = _load_instance_seed_accounts().get("sbi_settlement_accounts", []) or []
+        return [str(v).strip() for v in vals if str(v).strip()]
+    except Exception:
+        return []
+
+
+def _keep_txn_report_row(my_product, fa, ta, settle_accts) -> bool:
+    """Whether a Transaction-Report row should be ingested. For the "Other
+    Transactions" file only, a row is kept when its From OR To account contains a
+    configured SBI settlement account; every other file — and any file when the
+    settlement account is unconfigured — keeps all rows (fail open)."""
+    if my_product != "Other Transactions" or not settle_accts:
+        return True
+    return any(a in (fa or "") or a in (ta or "") for a in settle_accts)
+
+
 @router.post("/upload/txn-report")
 async def upload_txn_report(
     file: UploadFile = File(...),
@@ -514,7 +538,13 @@ async def upload_txn_report(
 
     today = str(datetime.date.today())
     source = file.filename
-    inserted = 0
+    my_product = canonical_product(source)
+    # Point-4 (Rajendra): in the "Other Transactions" file, only rows that touch our SBI
+    # settlement account (From OR To account) are ours to reconcile — a customer↔customer
+    # ATM fund-transfer must NOT be ingested. Applies to that file ONLY; fails open when
+    # the account is unconfigured. The account value comes from gitignored instance config.
+    settle_accts = _sbi_settlement_accounts()
+    inserted = skipped_non_settlement = 0
 
     # Parse first, insert after — this upload REPLACES its own scope instead of appending.
     parsed = []
@@ -536,8 +566,6 @@ async def upload_txn_report(
     # path) replaces its own prior rows and can add new entries, never double them.
     replaced = 0
     if file_dates:
-        from core.sbi_reports import canonical_product
-        my_product = canonical_product(source)
         prior_files = [sf for (sf,) in db.query(SBITxnReport.source_file)
                        .filter(SBITxnReport.txn_date.in_(file_dates)).distinct().all()
                        if canonical_product(sf) == my_product]
@@ -548,6 +576,13 @@ async def upload_txn_report(
                         .delete(synchronize_session=False))
 
     for raw_dt, txn_date, row in parsed:
+        fa = _clip(gv(row, 'from_account'), 30)
+        ta = _clip(gv(row, 'to_account'), 30)
+        # Other-Transactions only: skip rows whose From AND To account both miss our
+        # settlement account (customer↔customer transfers we don't reconcile).
+        if not _keep_txn_report_row(my_product, fa, ta, settle_accts):
+            skipped_non_settlement += 1
+            continue
         try:
             db.add(SBITxnReport(
                 id              = generate_id(),
@@ -558,8 +593,8 @@ async def upload_txn_report(
                 txn_date        = _clip(txn_date, 10),
                 reference_number= _clip(gv(row, 'reference_number'), 100),
                 txn_type        = _clip(gv(row, 'type_of_transaction'), 80),
-                from_account    = _clip(gv(row, 'from_account'), 30),
-                to_account      = _clip(gv(row, 'to_account'), 30),
+                from_account    = fa,
+                to_account      = ta,
                 amount          = _sf(row.get(gc('amount'), 0)),
                 customer_charge = _sf(row.get(gc('customer_charge'), 0)),
                 journal_number  = _clip(gv(row, 'journal_number'), 30),
@@ -572,11 +607,13 @@ async def upload_txn_report(
         except Exception as _e:
             logger.warning(f"routes/sbi_kiosk.py: {_e}")  # db.commit()
     _audit(db, current_user, "sbi_upload_txn_report",
-           {"filename": source, "inserted": inserted, "replaced": replaced})
+           {"filename": source, "inserted": inserted, "replaced": replaced,
+            "skipped_non_settlement": skipped_non_settlement})
     # Reconcile ONLY the dates this file touched — not every business date. A full re-run
     # (22 dates × P01-P04) took minutes and blocked the single worker, freezing the app on
     # every upload. `dates=[]` (a file with no parseable dates) → skip, don't fall back to all.
     return {"inserted": inserted, "replaced": replaced, "filename": source,
+            "skipped_non_settlement": skipped_non_settlement,
             "auto_recon": _auto_run_after_upload(db, current_user, dates=sorted(file_dates))}
 
 

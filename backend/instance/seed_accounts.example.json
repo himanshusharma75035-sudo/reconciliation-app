@@ -5,5 +5,7 @@
   ],
   "evalue_accounts": [
     { "bank_name": "EXAMPLE BANK", "account_number": "000099998888777", "reco_acc_no": "EXB-8777" }
-  ]
+  ],
+  "_comment_sbi": "sbi_settlement_accounts: identifier(s) of the SBI Kiosk settlement account as they appear in the 'Other Transactions' file's From/To Account column (the file masks the number, e.g. XXXXXX12345 — put the visible suffix, e.g. '12345'). A row in the Other-Transactions file is ingested only if its From OR To account contains one of these. Leave empty to ingest every Other-Transactions row (fail-open).",
+  "sbi_settlement_accounts": []
 }
