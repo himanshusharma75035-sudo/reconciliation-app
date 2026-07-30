@@ -1730,7 +1730,7 @@ function ReadinessPanel({ refreshKey, onReconciled, reconDate, setReconDate }) {
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
                 <MiniStat label="Bank statement" value={day.bank} />
                 <MiniStat label="Txn report" value={day.txn_report} warn={day.bank && !day.txn_report} />
-                <MiniStat label="KO limits" value={day.ko_limits} />
+                <MiniStat label="KO limits" value={day.ko_limits} warn={day.bank && !day.ko_limits} />
                 <MiniStat label="Cash holding" value={day.cash_holding} />
                 <MiniStat label="Limit failures" value={day.limit_failures} />
                 <div className="rounded-lg border border-gray-100 bg-white p-2.5 text-center flex flex-col justify-center">
@@ -1738,9 +1738,18 @@ function ReadinessPanel({ refreshKey, onReconciled, reconDate, setReconDate }) {
                   <div className="text-[11px] text-gray-500 mt-0.5">P02 match</div>
                 </div>
               </div>
+              {(day.missing || []).length > 0 && (
+                <div className="mt-3 flex items-center gap-2 flex-wrap text-[11px] bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                  <span className="text-red-600 font-semibold">⚠ Missing file{day.missing.length > 1 ? 's' : ''} for this day:</span>
+                  {day.missing.map(f => (
+                    <span key={f} className="px-2 py-0.5 rounded-full bg-white text-red-600 border border-red-200 font-medium">{f}</span>
+                  ))}
+                  <span className="text-red-400">— upload it to reconcile this date.</span>
+                </div>
+              )}
               {day.source_files_total > 0 && (
                 <div className="mt-3 flex items-center gap-2 flex-wrap text-[11px]">
-                  <span className="text-gray-400">Source files:</span>
+                  <span className="text-gray-400">Transaction-report files:</span>
                   <span className={`font-semibold ${day.source_files_have === day.source_files_total ? 'text-emerald-600' : 'text-amber-600'}`}>
                     {day.source_files_have}/{day.source_files_total} present
                   </span>

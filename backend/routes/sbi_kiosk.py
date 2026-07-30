@@ -2587,8 +2587,14 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
             "p02_reconciled": reconciled,
             # rate counts reversals as reconciled (they net to zero) — they no longer drag it
             "p02_rate": round(100 * reconciled / tot, 1) if tot else None,
+            # Required source files for a business date — flags the P01 gap (KO Limits)
+            # too, not just the P02 ones. A settlement without its KO Limits withdrawal
+            # file can't reconcile, so a missing KO Limits must show even when the six
+            # transaction-report products are all present ("6/6").
             "missing": [name for name, avail in (
-                ("Bank statement", bank.get(d)), ("Transaction report", txn.get(d)))
+                ("Bank statement", bank.get(d)),
+                ("Transaction report", txn.get(d)),
+                ("KO Limits", kolim.get(d)))
                 if not avail],
         })
 
