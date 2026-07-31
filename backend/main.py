@@ -415,6 +415,26 @@ def startup():
         _register_config_audit(SessionLocal)
     except Exception as _e:
         print(f"[startup] config_audit register skipped: {_e}")
+    # Reporting-cache invalidation: bust the dashboard + exec-analytics result caches after any
+    # commit on the MAIN session, so the Dashboard/digest recompute on the next read instead of
+    # serving a pre-write aggregate (the caches are otherwise TTL-only). Scoped to SessionLocal
+    # only — the portal/builder worktree DB and unit-test engines use their own sessions, so they
+    # are unaffected. Read-only cache clear: it can never change any matching/data behaviour, and
+    # the handler is bulletproofed so it can never break a commit. (A per-endpoint bust() is the
+    # stricter-isolation alternative if ever preferred — see docs/skills.md.)
+    try:
+        from sqlalchemy import event as _sa_event
+        from core.dash_cache import bust as _bust_report_caches
+        if not getattr(SessionLocal, "_recon_cache_bust_registered", False):
+            @_sa_event.listens_for(SessionLocal, "after_commit")
+            def _bust_report_caches_after_commit(_session):
+                try:
+                    _bust_report_caches()
+                except Exception:
+                    pass
+            SessionLocal._recon_cache_bust_registered = True
+    except Exception as _e:
+        print(f"[startup] report-cache invalidation register skipped: {_e}")
     # Index creation and one-off data repairs must NOT be able to crash startup —
     # a single hiccup here would otherwise take the whole API down. Each is
     # independent and safe to skip for this boot.

@@ -54,3 +54,20 @@ def dash_put(key, val):
 def clear_dash_cache():
     """Invalidate the whole dashboard cache (e.g. after a recon/upload) so panels update now."""
     _CACHE.clear()
+
+
+def bust():
+    """Invalidate BOTH short-TTL reporting caches (this dashboard cache AND the exec
+    analytics cache) after any write that changes reconciliation data, so the Dashboard,
+    Analytics and the digest recompute on the next read instead of serving a pre-write
+    aggregate. Cheap (two dict clears) and safe to over-call — the caches are read-only and
+    self-heal within the TTL, so an extra bust only costs one recompute. NEVER raises."""
+    try:
+        _CACHE.clear()
+    except Exception:
+        pass
+    try:
+        from core.analytics import clear_analytics_cache
+        clear_analytics_cache()
+    except Exception:
+        pass

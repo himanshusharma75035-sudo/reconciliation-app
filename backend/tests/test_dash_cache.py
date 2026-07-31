@@ -61,3 +61,12 @@ def test_cap_is_enforced():
     for i in range(dc._CAP + 60):
         dc.dash_put(dc.dash_key("panel", db, i=i), i)
     assert len(dc._CACHE) <= dc._CAP + 1   # never grows unbounded
+
+
+def test_bust_clears_cache_and_never_raises():
+    db = _DB(_Bind())
+    k = dc.dash_key("panel", db, a=1)
+    dc.dash_put(k, "v")
+    dc.bust()                        # clears the dash cache (+ best-effort the analytics cache)
+    assert dc.dash_get(k) is None
+    dc.bust()                        # idempotent / safe to over-call
