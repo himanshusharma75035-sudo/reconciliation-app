@@ -943,6 +943,28 @@ def run_p02(
         if any(t.debit > 0 for t in txns) and any(t.credit > 0 for t in txns)
     }
 
+    # Settlement deferral to P01 (mirrors core.sbi_reports.reconcile). A settlement debit
+    # (EKO DEDUCTION, is_settlement) has NO counterpart in the BC transaction report — it
+    # reconciles in P01 by (KO id, deduct/business date). Without this it falls through to a
+    # plain 'Unmatched', which every reader of this table (dashboard, exec digest, P02 window,
+    # exports) then mis-reports as a customer exception — while the operator report already
+    # shows it 'Matched (Settlement)'. Read P01 for the settlement deduct dates (P01 runs
+    # before P02 in _run_all_dates) plus a same-date KO-Withdrawal fallback, so the P02 table
+    # agrees with the report. D+1/D+2: a still-pending settlement is 'Unmatched Settlement'
+    # and flips to 'Matched (Settlement)' on the next run once P01 settles it.
+    _settle_dd = {(bt.deduct_date or recon_date) for bt in bank_txns
+                  if bt.is_settlement and (bt.debit or 0) > 0}
+    p01_matched = set()
+    if _settle_dd:
+        for x in db.query(SBIP01Result).filter(
+                SBIP01Result.recon_date.in_(_settle_dd), SBIP01Result.status == "matched").all():
+            p01_matched.add(((x.ko_id or "").strip(), x.recon_date))
+    ko_wdl = {}   # (ko_id, round(amount,2)) -> [SBIKOLimits KO-Withdrawal rows] — same-date fallback
+    for k in db.query(SBIKOLimits).filter(SBIKOLimits.txn_date == recon_date,
+                                          SBIKOLimits.txn_type == "KO Withdrawal").all():
+        ko_wdl.setdefault(((k.ko_id or "").strip(), round(k.amount or 0, 2)), []).append(k)
+    used_kw = set()
+
     results = []
     used_txn_ids = set()
 
@@ -950,6 +972,7 @@ def run_p02(
         ref = bt.ref_number
         bank_type = 'DR' if bt.debit > 0 else 'CR'
         bank_amount = bt.debit if bt.debit > 0 else bt.credit
+        is_settle_debit = bool(bt.is_settlement) and (bt.debit or 0) > 0
 
         # Reversal detection
         is_reversal = ref in reversal_refs
@@ -978,9 +1001,22 @@ def run_p02(
             amt_diff = abs(bank_amount - (matched_txn.amount or 0))
             match_status = 'Matched' if amt_diff <= 0.01 else 'Partial'
             success = matched_txn.status or 'Success'
-        elif not ref:
-            match_status = 'Unmatched'
-            success = 'Fail'
+        elif is_settle_debit:
+            # Defer to P01 (see the settlement-deferral note above): a settlement debit
+            # reconciles by (KO id, deduct/business date), not against the BC transaction
+            # report. So it is never a plain 'Unmatched' customer exception.
+            _ko  = (bt.ko_id or "").strip()
+            _biz = bt.deduct_date or recon_date
+            if (_ko, _biz) in p01_matched:
+                match_status = 'Matched (Settlement)'; success = 'Success'
+            else:
+                _cands = [k for k in ko_wdl.get((_ko, round(bt.debit or 0, 2)), [])
+                          if id(k) not in used_kw]
+                if _cands:
+                    used_kw.add(id(_cands[0]))
+                    match_status = 'Matched (Settlement)'; success = 'Success'
+                else:
+                    match_status = 'Unmatched Settlement'; success = 'Fail'
         else:
             match_status = 'Unmatched'
             success = 'Fail'
@@ -1005,8 +1041,10 @@ def run_p02(
         results.append(result)
 
     db.commit()
-    summary = {s: sum(1 for r in results if r.match_status == s)
-               for s in ('Matched', 'Unmatched', 'Partial')}
+    from collections import Counter
+    # Count every status actually produced (incl. the settlement literals 'Matched (Settlement)'
+    # / 'Unmatched Settlement'), so the audit + response reflect the true breakdown.
+    summary = dict(Counter(r.match_status for r in results))
     # reversal legs are Matched now (they cancel out); surface the count separately for info.
     summary['Reversal'] = sum(1 for r in results if (r.reversal_type or '') not in ('', 'No'))
     _audit(db, current_user, "sbi_run_p02", {"recon_date": recon_date, **summary})
@@ -1515,7 +1553,10 @@ def _r(n) -> str:
 
 
 # Rows whose unified status counts as reconciled (excluded from the pair-picker's open lists).
-_MATCHED_UNIFIED = {"Matched", "Manual_Matched"}
+# Reconciled P02 statuses (also safe for P03, which never carries the settlement literal):
+# a settlement debit reconciled in P01 is "Matched (Settlement)" and must count as matched
+# in every report + rate, matching core.sbi_reports.reconcile and the dashboard.
+_MATCHED_UNIFIED = {"Matched", "Manual_Matched", "Matched (Settlement)"}
 
 
 def _row_disc(source, row):
@@ -1977,11 +2018,11 @@ def _proc_overview(p: str, recs: list) -> dict:
         amt_ok = 0.0
         note = "matched = no action needed; amount = pending corrections"
     else:
-        matched = sum(1 for r in recs if r.get("match_status") in ("Matched", "Manual_Matched"))
+        matched = sum(1 for r in recs if r.get("match_status") in _MATCHED_UNIFIED)
         amt_field = "bank_amount" if p == "p02" else "txn_amount"
         amt_all = sum((r.get(amt_field) or r.get("bank_amount") or 0) for r in recs)
         amt_ok = sum((r.get(amt_field) or r.get("bank_amount") or 0) for r in recs
-                     if r.get("match_status") in ("Matched", "Manual_Matched"))
+                     if r.get("match_status") in _MATCHED_UNIFIED)
         note = "matched incl. manual matches"
     return {"process": p.upper(), "sheet": _SBI_EXPORTS[p][0], "total": total,
             "matched": matched, "open": total - matched,
@@ -2073,9 +2114,9 @@ def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=Non
             _sheet(w, "Exceptions P01",
                    [r for r in recs["p01"] if r.get("status") != "matched"], _P01_XCOLS)
             _sheet(w, "Exceptions P02",
-                   [r for r in recs["p02"] if r.get("match_status") not in ("Matched", "Manual_Matched")], _P02_XCOLS)
+                   [r for r in recs["p02"] if r.get("match_status") not in _MATCHED_UNIFIED], _P02_XCOLS)
             _sheet(w, "Exceptions P03",
-                   [r for r in recs["p03"] if r.get("match_status") not in ("Matched", "Manual_Matched")], _P03_XCOLS)
+                   [r for r in recs["p03"] if r.get("match_status") not in _MATCHED_UNIFIED], _P03_XCOLS)
             _sheet(w, "P04 Pending",
                    [r for r in recs["p04"] if r.get("action_required") != "NONE" and not r.get("action_done")], _P04_XCOLS)
             _sheet(w, "Reversals",
@@ -2096,9 +2137,9 @@ def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=Non
         elif t == "exceptions":
             p01 = [r for r in _load_process_recs(db, "p01", rd, df_, dt_) if r.get("status") != "matched"]
             p02 = [r for r in _load_process_recs(db, "p02", rd, df_, dt_, with_bank_desc=True)
-                   if r.get("match_status") not in ("Matched", "Manual_Matched")]
+                   if r.get("match_status") not in _MATCHED_UNIFIED]
             p03 = [r for r in _load_process_recs(db, "p03", rd, df_, dt_)
-                   if r.get("match_status") not in ("Matched", "Manual_Matched")]
+                   if r.get("match_status") not in _MATCHED_UNIFIED]
             p04 = [r for r in _load_process_recs(db, "p04", rd, df_, dt_)
                    if r.get("action_required") != "NONE" and not r.get("action_done")]
             _sheet(w, "P01 Not Credited", p01, _P01_XCOLS)
@@ -2142,9 +2183,9 @@ def build_sbi_report_xlsx(db, type, recon_date=None, date_from=None, date_to=Non
                 return out
             p01r = _load_process_recs(db, "p01", rd, df_, dt_)
             p02a = _agg(_load_process_recs(db, "p02", rd, df_, dt_), "ko_id", "bank_amount",
-                        ("Matched", "Manual_Matched"))
+                        _MATCHED_UNIFIED)
             p03a = _agg(_load_process_recs(db, "p03", rd, df_, dt_), "csp_code", "txn_amount",
-                        ("Matched", "Manual_Matched"))
+                        _MATCHED_UNIFIED)
             p01a = {}
             for r in p01r:
                 k = r.get("ko_id") or "(blank)"
@@ -2568,8 +2609,11 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
     rows = []
     for d in dates:
         p = p02.get(d, {}); tot = sum(p.values())
-        m = p.get("Matched", 0); rev = p.get("Reversal", 0)
-        reconciled = m + rev   # a reversal is a net-zero DR+CR pair — reconciled, not open
+        m = p.get("Matched", 0) + p.get("Matched (Settlement)", 0); rev = p.get("Reversal", 0)
+        # a reversal nets to zero, and a settlement debit reconciles in P01 (by KO + deduct
+        # date) — both are reconciled, not open. "Unmatched Settlement" (pending P01, D+1/D+2)
+        # legitimately stays unreconciled here.
+        reconciled = m + rev
         sf = src_files.get(d, {})
         present = [pr for pr in PRODUCTS if sf.get(pr)]
         missing_files = [pr for pr in PRODUCTS if not sf.get(pr)]
@@ -2599,7 +2643,7 @@ def readiness(db: Session = Depends(get_db), current_user=Depends(get_current_us
         })
 
     from models.database import SBICSPMaster
-    p02_m = sum(p.get("Matched", 0) for p in p02.values())
+    p02_m = sum(p.get("Matched", 0) + p.get("Matched (Settlement)", 0) for p in p02.values())
     p02_rev = sum(p.get("Reversal", 0) for p in p02.values())
     p02_recon = p02_m + p02_rev
     p02_t = sum(sum(p.values()) for p in p02.values())
@@ -3259,8 +3303,13 @@ def get_summary(
     health rate across the four processes (P01 settlement, P02 bank↔txn,
     P03 CSP↔txn↔bank, P04 wallet balance). Date-range aware on the result tables."""
     from sqlalchemy import func as _f
-    GOOD = {"credited", "matched", "reconciled", "ok", "none", "no_action",
-            "balanced", "success", "settled", "no action"}
+    from core.dash_cache import dash_key, dash_get, dash_put
+    _ck = dash_key("sbi_summary", db, date_from=date_from, date_to=date_to)
+    _hit = dash_get(_ck)
+    if _hit is not None:
+        return _hit
+    GOOD = {"credited", "matched", "matched (settlement)", "reconciled", "ok", "none",
+            "no_action", "balanced", "success", "settled", "no action"}
 
     counts = {
         "bank_statement":  db.query(SBIBankTransaction).count(),
@@ -3288,7 +3337,7 @@ def get_summary(
 
     tot     = p01["total"] + p02["total"] + p03["total"] + p04["total"]
     matched = p01["matched"] + p02["matched"] + p03["matched"] + p04["matched"]
-    return {
+    return dash_put(_ck, {
         "counts":      counts,
         "has_data":    any(counts.values()),
         "processes":   {"p01": p01, "p02": p02, "p03": p03, "p04": p04},
@@ -3296,7 +3345,7 @@ def get_summary(
         "matched":     matched,
         "exceptions":  tot - matched,
         "match_rate":  round(matched / tot * 100, 1) if tot else None,
-    }
+    })
 
 
 @router.get("/upload-status")

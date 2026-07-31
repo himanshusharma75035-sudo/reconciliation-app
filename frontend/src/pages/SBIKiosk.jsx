@@ -33,8 +33,10 @@ const META = {
   },
   p02: {
     Matched:        { label: 'Matched',        tone: 'green',  hint: 'Bank line and transaction-report line agree on the 20-digit reference.' },
+    'Matched (Settlement)': { label: 'Matched (Settlement)', tone: 'green', hint: 'Settlement debit (EKO DEDUCTION) reconciled in P01 by KO + deduct date — not a customer transaction, so it has no transaction-report line.' },
     Partial:        { label: 'Amount differs', tone: 'orange', hint: 'Reference matched but the bank and report amounts differ by more than ₹1.' },
     Unmatched:      { label: 'Unmatched',      tone: 'red',    hint: 'No transaction-report line carries this reference (report file may be missing for this date).' },
+    'Unmatched Settlement': { label: 'Settlement pending', tone: 'amber', hint: 'Settlement debit not yet reconciled in P01 (D+1/D+2) — resolves when the KO Limits / next-day files load. Not a customer exception.' },
     Reversal:       { label: 'Reversal',       tone: 'purple', hint: 'The same reference appears as both a debit and a credit — the two legs are bracketed together.' },
     Manual_Matched: { label: 'Manual',         tone: 'amber',  hint: 'Resolved by hand; persists across re-runs.' },
   },
@@ -1010,8 +1012,8 @@ function P04Tab({ reconDate, setReconDate }) {
 // ── Unified ledger — every bank & data entry + how each reconciled ──────────────
 
 const U_TONE = {
-  Matched: 'green', Reversal: 'purple', Partial: 'orange', 'Amount Mismatch': 'orange',
-  Pending: 'amber', Excess: 'purple', Unmatched: 'red', 'Not reconciled': 'gray', Manual_Matched: 'amber',
+  Matched: 'green', 'Matched (Settlement)': 'green', Reversal: 'purple', Partial: 'orange', 'Amount Mismatch': 'orange',
+  Pending: 'amber', Excess: 'purple', Unmatched: 'red', 'Unmatched Settlement': 'amber', 'Not reconciled': 'gray', Manual_Matched: 'amber',
 }
 function UStatus({ s }) {
   return <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${TONE[U_TONE[s] || 'gray']}`}>{s}</span>

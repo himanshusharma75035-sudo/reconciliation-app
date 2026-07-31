@@ -24,6 +24,7 @@ _MATCHED = {
     "matched_online", "matched_cash", "matched_manual",        # e-value
     "sbi_matched",                                             # (label form)
     "reversal",                                               # SBI P02: a DR+CR pair (same ref) cancels out — reconciled, never a separate bucket
+    "matched (settlement)",                                    # SBI P02: settlement debit reconciled in P01 (deferred) — a real match, not an open item
     "failed_refunded",                                        # bbps: Failed+Refunded pair IS reconciled (bbps_engine.RECON_OK)
 }
 _UNMATCHED = {
@@ -61,6 +62,8 @@ _OTHER_LABELS = {
     "reversal_matched": "Reversal (matched)", "reversal": "Reversal",
     "bank_debit": "Bank debit", "transaction_fee": "Fee", "fee_matched": "Fee (matched)",
     "fund_transfer": "Fund transfer", "settlement_credit": "Settlement credit",
+    "unmatched settlement": "Settlement pending (P01)",   # SBI P02: settlement debit not yet reconciled in P01 (D+1/D+2) — not a customer exception
+
     "src_assigned": "Source-assigned", "twice_credit": "Twice credit",
     "under_review": "Under review", "ignore": "Ignored",
 }
@@ -105,8 +108,11 @@ def _kiosk_processes(db, date_from=None, date_to=None):
          {"matched": "matched", "unmatched": "unmatched",
           "credited": "matched", "pending": "unmatched", "partial": "unmatched", "excess": "unmatched"}),
         ("P02 · Bank ↔ Txn",     SBIP02Result, SBIP02Result.match_status,    SBIP02Result.bank_amount,
-         # a reversal is a net-zero DR+CR pair → reconciled, counted as matched (Kiosk decision)
-         {"matched": "matched", "unmatched": "unmatched", "partial": "mismatch", "reversal": "matched"}),
+         # a reversal is a net-zero DR+CR pair → reconciled, counted as matched (Kiosk decision);
+         # a settlement debit reconciles in P01 → "matched (settlement)" is matched, and
+         # "unmatched settlement" (pending P01, D+1/D+2) is neither matched nor a customer open item.
+         {"matched": "matched", "matched (settlement)": "matched", "unmatched": "unmatched",
+          "unmatched settlement": "other", "partial": "mismatch", "reversal": "matched"}),
         ("P03 · Money out ↔ in", SBIP03Result, SBIP03Result.match_status,    SBIP03Result.txn_amount,
          {"matched": "matched", "unmatched_txnreport": "unmatched", "unmatched_bank": "unmatched"}),
         ("P04 · Wallet balance", SBIP04Result, SBIP04Result.action_required, SBIP04Result.action_amount,
