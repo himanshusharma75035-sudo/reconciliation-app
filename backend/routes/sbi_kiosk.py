@@ -1602,6 +1602,22 @@ def _r(n) -> str:
 # a settlement debit reconciled in P01 is "Matched (Settlement)" and must count as matched
 # in every report + rate, matching core.sbi_reports.reconcile and the dashboard.
 _MATCHED_UNIFIED = {"Matched", "Manual_Matched", "Matched (Settlement)"}
+# A source-FAILED txn that never reconciled is CLOSED (the attempt failed, no money moved) — a
+# terminal disposition, NOT an exception. It carries the "Failed" unified status and, like the
+# matched set, is excluded from the pair-picker's open lists. Kept SEPARATE from
+# _MATCHED_UNIFIED so it stays its own honest bucket in the all-entries report (never inflates
+# the match rate). Analytics is P02/P03-result-based, so failed txn rows never reached it — this
+# only cleans the unified view + pair-picker.
+_CLOSED_UNIFIED = _MATCHED_UNIFIED | {"Failed"}
+
+
+def _is_txn_failed(status):
+    """A SBITxnReport row is 'failed' iff its stored status is present, non-blank and not
+    'success' (case/space-insensitive) — the Success-whitelist INVERSE, matching run_p03 and
+    core.sbi_reports so a Success is NEVER reclassified. Covers 'Failure', 'T_EXP',
+    'Failure/Timed Out', …; a blank/None status is left alone (stays Unmatched)."""
+    s = (status or "").strip().lower()
+    return bool(s) and s != "success"
 
 
 def _row_disc(source, row):
@@ -1774,6 +1790,13 @@ def _unified_entries(db, recon_date, include_deposits=False, sides=None):
                 e.update(status=st, process="P03", also_p03=(pr.match_status == "Matched"),
                          result_id=pr.id, result_process="p03", _result=pr,
                          counterpart=(f"Bank credit {_r(pr.bank_amount)}" if pr.bank_amount is not None else None))
+        # Terminal 'Failed (closed)' disposition (read-time; behavior-contract #17 → no re-ingest).
+        # A source-FAILED txn (status != Success) that did NOT reconcile is a closed item — no
+        # money moved, nothing to pair — so it must not sit "open" in the pair-picker or read as
+        # an exception. Fire ONLY on an un-matched row (a failed txn that DID move money is already
+        # P02-Matched above and stays Matched). Distinct "Failed" bucket, never folded into Matched.
+        if e["status"] not in _MATCHED_UNIFIED and _is_txn_failed(t.status):
+            e["status"] = "Failed"
         entries.append(e)
 
     # ---- data side: KO withdrawals ----
@@ -3015,7 +3038,7 @@ def manual_pair_open_items(
                     report_open_ids = None   # fail open — fall back to the raw unified set
         for e in _unified_entries(db, d, include_deposits=True, sides={side}):
             e.pop("_result", None)
-            if e["side"] != side or e["status"] in _MATCHED_UNIFIED:
+            if e["side"] != side or e["status"] in _CLOSED_UNIFIED:   # matched OR failed(closed) → not open
                 continue
             if side == "bank" and report_open_ids is not None and e["id"] not in report_open_ids:
                 continue
