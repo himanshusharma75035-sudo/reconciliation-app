@@ -2878,6 +2878,48 @@ def list_manual_matches(
 # labelled by its source file), KO Withdrawals and KO Deposits — NOT Limit Failures /
 # Cash Holding (they have no bank counterpart).
 
+# ── Pair-picker report-open cache ──────────────────────────────────────────────
+# The bank side of the picker keeps only rows the reconciliation report classifies as open
+# (the 76->37 alignment), which means calling core.sbi_reports.reconcile(db, d) per date — the
+# dominant ~6s/date cost on Load. reconcile is a pure, read-only function of the date's source
+# rows, so memoise its bank-open id-set behind a cheap data fingerprint: any insert/delete/re-run
+# for the date (or ANY P01 re-run, since a settlement reconciles by its D+1/D+2 deduct date) moves
+# the fingerprint and busts the entry. Used ONLY by the pair-picker below — the report exports keep
+# calling reconcile() directly, so their output is unchanged.
+_REPORT_OPEN = {"Unmatched", "Unmatched Settlement", "No Txn Number"}
+_PICKER_OPEN_CACHE = {}          # date -> (fingerprint, frozenset(open_bank_ids))
+_PICKER_OPEN_CACHE_MAX = 64
+
+def _picker_open_fingerprint(db, d):
+    from sqlalchemy import func as _F
+    def cm(model, *filt):
+        return db.query(_F.count(model.id), _F.max(model.created_at)).filter(*filt).one()
+    return (
+        cm(SBIBankTransaction, SBIBankTransaction.txn_date == d),
+        cm(SBITxnReport,       SBITxnReport.txn_date == d),
+        cm(SBIKOLimits,        SBIKOLimits.txn_date == d, SBIKOLimits.txn_type == "KO Withdrawal"),
+        # P01 reconciles settlements by their deduct date (D+1/D+2), so a P01 re-run for ANY date
+        # can change reconcile(d)'s settlement status — fingerprint P01 globally.
+        db.query(_F.count(SBIP01Result.id), _F.max(SBIP01Result.created_at)).one(),
+    )
+
+def _picker_report_open_ids(db, d):
+    """Cached wrapper over sbi_reports.reconcile for the pair-picker's bank-open filter. Returns the
+    SAME set reconcile would produce, memoised behind the data fingerprint. Never used by exports."""
+    from core.sbi_reports import reconcile as _reconcile
+    fp = _picker_open_fingerprint(db, d)
+    hit = _PICKER_OPEN_CACHE.get(d)
+    if hit and hit[0] == fp:
+        return hit[1]
+    rep = _reconcile(db, d)
+    open_ids = frozenset(r.get("_id") for r in rep.get("bank_recs", [])
+                         if r.get("Match Status") in _REPORT_OPEN)
+    if len(_PICKER_OPEN_CACHE) >= _PICKER_OPEN_CACHE_MAX:
+        _PICKER_OPEN_CACHE.clear()
+    _PICKER_OPEN_CACHE[d] = (fp, open_ids)
+    return open_ids
+
+
 @router.get("/manual-match/open-items")
 def manual_pair_open_items(
     side: str,                       # bank | data
@@ -2903,19 +2945,20 @@ def manual_pair_open_items(
     # report is the finance-ops source of truth, so for the BANK side we keep only rows the
     # report itself classifies as open (Unmatched / Unmatched Settlement / No Txn Number) —
     # making the picker's open count reconcile with the report. Data side is unaffected.
-    _REPORT_OPEN = {"Unmatched", "Unmatched Settlement", "No Txn Number"}
     rows = []
     for d in dates:
         report_open_ids = None
         if side == "bank":
-            try:
-                from core.sbi_reports import reconcile as _reconcile
-                rep = _reconcile(db, d)
-                report_open_ids = {r.get("_id") for r in rep.get("bank_recs", [])
-                                   if r.get("Match Status") in _REPORT_OPEN}
-            except Exception as _e:
-                logger.warning(f"manual-match open-items: report align skipped for {d}: {_e}")
-                report_open_ids = None   # fail open — fall back to the raw unified set
+            # Zero-bank date (e.g. KO-limits-only): reconcile() produces no bank rows, so the
+            # report-open set is provably empty — skip the reconcile pass entirely.
+            if db.query(SBIBankTransaction.id).filter(SBIBankTransaction.txn_date == d).first() is None:
+                report_open_ids = frozenset()
+            else:
+                try:
+                    report_open_ids = _picker_report_open_ids(db, d)   # cached; == reconcile()'s bank-open set
+                except Exception as _e:
+                    logger.warning(f"manual-match open-items: report align skipped for {d}: {_e}")
+                    report_open_ids = None   # fail open — fall back to the raw unified set
         for e in _unified_entries(db, d, include_deposits=True):
             e.pop("_result", None)
             if e["side"] != side or e["status"] in _MATCHED_UNIFIED:
