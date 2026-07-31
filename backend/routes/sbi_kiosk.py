@@ -1112,6 +1112,23 @@ def run_p03(
         key = (b.ko_id, round(b.credit, 2))
         bank_by_ko_amt.setdefault(key, []).append(b)
 
+    # ADDITIVE truncated-KO recovery (2026-07-31): the bank statement truncates the KO id inside
+    # its description, so the (ko, amount) key above misses genuine matches whose bank credit
+    # carries the SAME 20-digit txn reference as the report row (~2,244 across the data). Build a
+    # SECOND index keyed by the bank credit's 20-digit reference (via core.sbi_reports helpers, the
+    # report layer's own extractor). This is a pure ADD-ON used only as a FALLBACK below: it never
+    # changes the (ko, amount) results and only consumes credits that pass left unused — so Matched
+    # can only grow, never shrink. (The reverted attempt REPLACED the key instead, which correctly
+    # refused the ~1,760/day money-IN false positives that P03 intentionally keeps but had no true
+    # counterpart to offer them — money-IN matches live in bank DEBITS, the still-open P02/P03
+    # merge — so Matched dropped 34321->26619. This additive pass cannot reproduce that.)
+    from core.sbi_reports import _valid_ref as _sbi_valid_ref, _extract_bank_ref as _sbi_bank_ref
+    bank_by_ref = {}
+    for b in bank_credits:
+        _r = _sbi_bank_ref(b)
+        if _r:
+            bank_by_ref.setdefault(_r, []).append(b)
+
     results = []
     used_bank_ids = set()
 
@@ -1139,6 +1156,28 @@ def run_p03(
                     best_shift = 0
         return best, best_shift if best else 999
 
+    def _find_bank_by_ref(ref, amount, txn_date_str, max_shift=2):
+        """FALLBACK finder: match by the shared 20-digit txn reference (used when the bank KO id
+        is truncated so the (ko, amount) key misses). Requires the SBI ±0.01 amount tolerance and
+        the same ±max_shift-day proximity + one-to-one (used_bank_ids) discipline as _find_bank."""
+        if not ref:
+            return None, 999
+        from datetime import date as _date
+        best, best_shift = None, 999
+        for b in bank_by_ref.get(ref, []):
+            if b.id in used_bank_ids:
+                continue
+            if abs((b.credit or 0) - amount) > 0.01:      # SBI paisa tolerance
+                continue
+            try:
+                t = _date.fromisoformat(txn_date_str); bd = _date.fromisoformat(b.txn_date)
+                shift = (bd - t).days
+            except Exception:
+                shift = 0
+            if abs(shift) <= max_shift and abs(shift) < abs(best_shift):
+                best, best_shift = b, shift
+        return (best, best_shift) if best else (None, 999)
+
     # Match each transaction report row against bank credits
     for txn in txn_rows:
         ko = txn.ko_id
@@ -1146,6 +1185,11 @@ def run_p03(
         mode = csp_modes.get(ko, 'Unknown')
 
         bank_match, shift = _find_bank(ko, amt, txn.txn_date, max_shift=2)
+        via_ref = False
+        if not bank_match and _sbi_valid_ref((txn.reference_number or "").strip()):
+            # (ko, amount) missed — try the shared 20-digit reference (bank KO id truncated).
+            bank_match, shift = _find_bank_by_ref((txn.reference_number or "").strip(), amt, txn.txn_date, max_shift=2)
+            via_ref = bank_match is not None
 
         if bank_match:
             used_bank_ids.add(bank_match.id)
@@ -1167,7 +1211,8 @@ def run_p03(
                 match_status    = 'Matched',
                 date_shift      = shift,
                 match_priority  = priority,
-                notes           = f"Shift {shift:+d}d" if shift != 0 else '',
+                notes           = ('Matched by txn ref (bank KO truncated)' if via_ref
+                                   else (f"Shift {shift:+d}d" if shift != 0 else '')),
             )
         else:
             result = SBIP03Result(
