@@ -1259,6 +1259,11 @@ def dashboard_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    from core.dash_cache import dash_key, dash_get, dash_put
+    _ck = dash_key("dashboard_summary", db, date_from=date_from, date_to=date_to)
+    _hit = dash_get(_ck)
+    if _hit is not None:
+        return _hit
     # ── Resolve active partners dynamically ───────────────────────────────────
     # 1. All partners that actually have transactions in the DB
     txn_partner_q = db.query(Transaction.partner).filter(Transaction.partner.isnot(None))
@@ -1381,7 +1386,7 @@ def dashboard_summary(
                 })
             result[side][partner] = rows
 
-    return result
+    return dash_put(_ck, result)
 
 @router.get("/distinct-dates")
 def distinct_dates(
@@ -1683,6 +1688,11 @@ def pg_settlement_summary(
     Used by Dashboard PG panel and Reports page.
     """
     from sqlalchemy import func
+    from core.dash_cache import dash_key, dash_get, dash_put
+    _ck = dash_key("pg_settlement", db, date_from=date_from, date_to=date_to)
+    _hit = dash_get(_ck)
+    if _hit is not None:
+        return _hit
 
     q = db.query(
         Transaction.recon_date,
@@ -1714,7 +1724,7 @@ def pg_settlement_summary(
             "fees_total":  fees,
         })
 
-    return {
+    return dash_put(_ck, {
         "rows": result,
         "summary": {
             "txn_count":   sum(r["txn_count"]   for r in result),
@@ -1722,7 +1732,7 @@ def pg_settlement_summary(
             "net_total":   round(sum(r["net_total"]   for r in result), 2),
             "fees_total":  round(sum(r["fees_total"]  for r in result), 2),
         }
-    }
+    })
 
 
 # ─── Shared serializer ────────────────────────────────────────────────────────

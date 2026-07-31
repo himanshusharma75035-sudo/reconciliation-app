@@ -942,7 +942,13 @@ def funds_position(
 ):
     import datetime as _dt
     from core.funds import get_funds_position
-    return get_funds_position(db, as_of or str(_dt.date.today()))
+    from core.dash_cache import dash_key, dash_get, dash_put
+    as_of = as_of or str(_dt.date.today())
+    _ck = dash_key("funds_position", db, as_of=as_of)
+    _hit = dash_get(_ck)
+    if _hit is not None:
+        return _hit
+    return dash_put(_ck, get_funds_position(db, as_of))
 
 
 @router.get("/funds-position/export")

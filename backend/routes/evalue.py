@@ -533,6 +533,11 @@ def summary(date_from: str = Query(""), date_to: str = Query(""),
             db: Session = Depends(get_db), user=Depends(get_current_user)):
     """Per-account roll-up of the latest recon state (SQL aggregates — no full-table loads)."""
     from sqlalchemy import func
+    from core.dash_cache import dash_key, dash_get, dash_put
+    _ck = dash_key("evalue_summary", db, date_from=date_from, date_to=date_to)
+    _hit = dash_get(_ck)
+    if _hit is not None:
+        return _hit
     STAT = ["matched_online", "matched_cash", "matched_manual", "interbank_matched",
             "twice_credit", "wrong_amount", "unmatched_bank", "transaction_fee", "bank_debit",
             "src_assigned"]
@@ -576,7 +581,7 @@ def summary(date_from: str = Query(""), date_to: str = Query(""),
             **c, "match_rate": round(matched / (credits or 1) * 100, 1),
         })
     rows.sort(key=lambda r: r["reco_acc_no"])
-    return {"accounts": rows}
+    return dash_put(_ck, {"accounts": rows})
 
 
 @router.get("/results")

@@ -180,6 +180,11 @@ def summary(date_from: str = Query(""), date_to: str = Query(""),
             db: Session = Depends(get_db), user=Depends(get_current_user)):
     # PERF: aggregate in SQL (GROUP BY) instead of loading entire tables.
     from sqlalchemy import func
+    from core.dash_cache import dash_key, dash_get, dash_put
+    _ck = dash_key("bbps_summary", db, date_from=date_from, date_to=date_to)
+    _hit = dash_get(_ck)
+    if _hit is not None:
+        return _hit
     STAT = ["matched", "failed_refunded", "failed_pending_refund", "refunded_but_success",
             "amount_mismatch", "unmatched_bank"]
 
@@ -208,12 +213,12 @@ def summary(date_from: str = Query(""), date_to: str = Query(""),
     unmatched_internal = sum(c for (s, c) in internal_counts if s == "unmatched_internal")
     exceptions = sum(c for (_p, s, c) in bank_counts
                      if s in ("failed_pending_refund", "refunded_but_success", "amount_mismatch"))
-    return {
+    return dash_put(_ck, {
         "overall": {**rollup(), "internal_rows": internal_rows,
                     "unmatched_internal": unmatched_internal,
                     "exceptions": exceptions},
         "by_provider": [{"provider": p, **rollup(p)} for p in providers],
-    }
+    })
 
 
 @router.get("/results")
