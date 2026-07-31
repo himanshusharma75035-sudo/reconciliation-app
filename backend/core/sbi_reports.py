@@ -167,11 +167,37 @@ def reconcile(db, recon_date: str) -> dict:
     # ko_wdl fallback below applies unchanged.
     _settle_dd = {(b.deduct_date or recon_date) for b in bank
                   if b.is_settlement and (b.debit or 0) > 0}
-    p01_matched = set()
+    # PER-AMOUNT deferral: a settlement is reconciled iff its amount paired in P01 for (KO, deduct
+    # date) — covers fully-matched days AND a clean pair on a PARTIAL day (some withdrawals not yet
+    # settled), matching the P01 tab and P02. A legacy P01 row (no matched_amounts) falls back to
+    # the old all-or-nothing 'matched' status.
+    import json as _json
+    from collections import Counter as _Counter
+    _p01_rows = {}
     if _settle_dd:
-        for x in db.query(SBIP01Result).filter(
-                SBIP01Result.recon_date.in_(_settle_dd), SBIP01Result.status == "matched").all():
-            p01_matched.add(((x.ko_id or "").strip(), x.recon_date))
+        for x in db.query(SBIP01Result).filter(SBIP01Result.recon_date.in_(_settle_dd)).all():
+            _p01_rows[((x.ko_id or "").strip(), x.recon_date)] = x
+    _p01_ctr = {}
+
+    def _p01_settles(ko, biz, amount):
+        r = _p01_rows.get((ko, biz))
+        if r is None:
+            return False
+        if (ko, biz) not in _p01_ctr:
+            raw = getattr(r, "matched_amounts", None)
+            try:
+                amts = [round(float(a), 2) for a in _json.loads(raw)] if raw else []
+            except Exception:
+                amts = []
+            _p01_ctr[(ko, biz)] = _Counter(amts) if amts else None   # empty → status fallback
+        c = _p01_ctr[(ko, biz)]
+        if c is None:
+            return r.status == "matched"
+        a = round(float(amount or 0), 2)
+        if c.get(a, 0) > 0:
+            c[a] -= 1
+            return True
+        return False
 
     bank_recs = []
     used_src = set()
@@ -210,7 +236,7 @@ def reconcile(db, recon_date: str) -> dict:
         elif is_settle_debit:
             n_settle += 1
             biz = b.deduct_date or recon_date
-            if ((b.ko_id or "").strip(), biz) in p01_matched:
+            if _p01_settles((b.ko_id or "").strip(), biz, b.debit or 0):
                 p01_settled = True; n_settle_matched += 1     # P01 reconciled it by its deduct date
             else:
                 cands = [k for k in ko_wdl.get(((b.ko_id or "").strip(), round(b.debit or 0, 2)), [])
@@ -575,7 +601,7 @@ def _write_reconciliation_workbook(results) -> io.BytesIO:
 
 
 # ── Report B: Source_Files_Match_Status (source-centric, per-product sheets) ────
-_P01_LABEL = {"matched": "Matched", "unmatched": "Unmatched",
+_P01_LABEL = {"matched": "Matched", "unmatched": "Unmatched", "partial": "Partial",
               # legacy statuses (pre-2026-07-27) fold into the two-state model
               "CREDITED": "Matched", "PENDING": "Unmatched",
               "EXCESS": "Unmatched", "PARTIAL": "Unmatched"}

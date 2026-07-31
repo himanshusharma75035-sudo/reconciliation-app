@@ -1056,10 +1056,14 @@ class SBIP01Result(Base):
     wallet_withdrawn= Column(MONEY, default=0)    # from KO Limits Config KO Withdrawal
     bank_settled    = Column(MONEY, default=0)    # from Bank Statement EKOSETTLEMENT
     difference      = Column(MONEY, default=0)
-    status          = Column(String(20))          # matched / unmatched (since 2026-07-27)
+    status          = Column(String(20))          # matched / partial / unmatched (partial since 2026-07-31)
     deduct_date     = Column(String(10))          # business date (from bank description); P01 matches on this
     bank_txn_date   = Column(String(10))          # actual bank statement date
     notes           = Column(Text)
+    # JSON list of the amounts that PAIRED 1:1 in this KO-day (both legs of a pair carry the same
+    # amount). Lets every reader resolve per-row matched/open on a 'partial' day. '[]'/NULL on a
+    # legacy row → readers fall back to the all-or-nothing status. Populated by run_p01.
+    matched_amounts = Column(Text, default="[]")
     created_at      = Column(DateTime, default=datetime.datetime.utcnow)
 
 
@@ -1842,6 +1846,8 @@ def _run_migrations():
         ],
         # Opt-in "attach executive dashboard" flag on scheduled reports
         "report_subscriptions": [("include_dashboard", "BOOLEAN")],
+        # P01 per-pair detail (sub-pair matching, 2026-07-31): amounts that paired 1:1 in a KO-day
+        "sbi_p01_results": [("matched_amounts", "TEXT")],
     }
 
     with engine.connect() as conn:

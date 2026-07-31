@@ -7,9 +7,10 @@ Invariants:
 1. A settlement posted a day (or two) LATER still matches its withdrawal, because we
    match on the deduct_date from the description — not the bank txn_date. (The old D+1
    bug read PENDING on day D + EXCESS on day D+1.)
-2. Statuses are only 'matched' / 'unmatched' — never CREDITED/PENDING/PARTIAL/EXCESS.
+2. Statuses are 'matched' / 'partial' / 'unmatched' — never legacy CREDITED/PENDING/EXCESS.
+   ('partial' since 2026-07-31: some withdrawals paired 1:1, a residual amount remains.)
 3. A KO is 'matched' iff every withdrawal has a settlement of the same amount AND no
-   settlement is left over. A split KO (part settled) → 'unmatched'.
+   settlement is left over. Some paired + a residual → 'partial'; nothing paired → 'unmatched'.
 4. Matching is per-withdrawal by exact amount (±0.01), so two equal withdrawals need
    two settlements.
 5. Settlements with no deduct_date fall back to their posting date (nothing dropped).
@@ -55,7 +56,7 @@ def _status(db, ko, date=D):
 def test_same_day_full_settlement_is_matched(db):
     _wdl(db, "KO1", 50000.0); _settle(db, "KO1", 50000.0); db.commit()
     out = run_p01(D, None, db, USER)
-    assert out["summary"] == {"matched": 1, "unmatched": 0}
+    assert out["summary"] == {"matched": 1, "partial": 0, "unmatched": 0}
     assert _status(db, "KO1") == "matched"
 
 
@@ -65,27 +66,27 @@ def test_d1_settlement_still_matches_on_business_date(db):
     _settle(db, "KO1", 90000.0, deduct_date=D, posting_date=D1)
     db.commit()
     out = run_p01(D, None, db, USER)
-    assert out["summary"] == {"matched": 1, "unmatched": 0}
+    assert out["summary"] == {"matched": 1, "partial": 0, "unmatched": 0}
     r = db.query(SBIP01Result).filter(SBIP01Result.ko_id == "KO1").one()
     assert r.status == "matched"
     assert r.bank_txn_date == D1        # posted next day
     assert r.deduct_date == D           # reconciled on the business date
 
 
-def test_split_ko_is_unmatched(db):
-    # ₹47k settled, ₹56k never settled → the KO is unmatched (no PARTIAL)
+def test_split_ko_is_partial(db):
+    # ₹47k settled, ₹56k never settled → the 47k pair is matched, the 56k residual open → partial
     _wdl(db, "KO1", 47000.0); _wdl(db, "KO1", 56000.0)
     _settle(db, "KO1", 47000.0); db.commit()
     out = run_p01(D, None, db, USER)
-    assert out["summary"] == {"matched": 0, "unmatched": 1}
-    assert _status(db, "KO1") == "unmatched"
+    assert out["summary"] == {"matched": 0, "partial": 1, "unmatched": 0}
+    assert _status(db, "KO1") == "partial"
 
 
 def test_two_equal_withdrawals_need_two_settlements(db):
     _wdl(db, "KO1", 50000.0); _wdl(db, "KO1", 50000.0)
     _settle(db, "KO1", 50000.0); db.commit()     # only one settlement
-    out = run_p01(D, None, db, USER)
-    assert _status(db, "KO1") == "unmatched"      # one withdrawal still open
+    run_p01(D, None, db, USER)
+    assert _status(db, "KO1") == "partial"        # one paired, one withdrawal still open
     # now add the second settlement and re-run → matched
     _settle(db, "KO1", 50000.0); db.commit()
     run_p01(D, None, db, USER)
@@ -93,10 +94,10 @@ def test_two_equal_withdrawals_need_two_settlements(db):
 
 
 def test_bank_settlement_with_no_withdrawal_is_unmatched(db):
-    # missing KO Limits file: settlement exists, no withdrawal → unmatched (not EXCESS)
+    # missing KO Limits file: settlement exists, no withdrawal → nothing pairs → unmatched (not EXCESS)
     _settle(db, "KO9", 20000.0); db.commit()
     out = run_p01(D, None, db, USER)
-    assert out["summary"] == {"matched": 0, "unmatched": 1}
+    assert out["summary"] == {"matched": 0, "partial": 0, "unmatched": 1}
     assert _status(db, "KO9") == "unmatched"
 
 

@@ -24,6 +24,7 @@ function refOrBlank(s) { const t = (s || '').trim(); return _REF_PLACEHOLDER.has
 const META = {
   p01: {
     matched:   { label: 'Matched',   tone: 'green', hint: 'Every wallet withdrawal for this operator matched a bank settlement of the same amount, on its business date (even if the bank posted it a day or two later).' },
+    partial:   { label: 'Partial',   tone: 'amber', hint: 'Some withdrawals for this KO matched a settlement 1:1 and are closed; the rest are still open (not yet settled) — only the residual amount needs action, not the whole day.' },
     unmatched: { label: 'Unmatched', tone: 'red',   hint: 'A withdrawal with no matching settlement (not settled yet, or the KO Limits file for that date isn’t uploaded), or a bank settlement with no withdrawal.' },
     // legacy statuses fold into the two-state model (for any pre-migration rows)
     CREDITED:  { label: 'Matched',   tone: 'green', hint: '' },
@@ -544,7 +545,7 @@ function P01Tab({ reconDate, setReconDate }) {
 
   // status counts for the cards (from the loaded rows — P01 returns the full set).
   // Seed both states so the two cards always render (a zero bucket still shows).
-  const counts = { matched: 0, unmatched: 0 }
+  const counts = { matched: 0, partial: 0, unmatched: 0 }
   ;(data?.rows || []).forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1 })
   const g = data?.grand || {}
 

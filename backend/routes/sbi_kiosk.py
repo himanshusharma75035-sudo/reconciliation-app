@@ -809,6 +809,72 @@ async def upload_limit_failures(
             "auto_recon": _auto_run_after_upload(db, current_user, dates=sorted(file_dates))}
 
 
+# ── P01 pairing — the SINGLE definition of a settlement↔withdrawal pair ───────────
+# P01 pairs a KO's wallet withdrawals against its bank settlements 1:1 by amount, per business
+# (deduct) date. The engine records WHICH amounts paired (matched_amounts) so every reader — the
+# unified view, the pair-picker, P02's settlement deferral and the operator report — resolves the
+# SAME per-row matched/open, instead of tainting a whole KO-day when one amount is short. In this
+# data settlements are never batched (0/1989 matched days have amounts that don't line up 1:1), so
+# 1:1 amount pairing is exact; a residual (a withdrawal not yet settled) stays open on its own.
+_P01_TOL = 0.01
+
+
+def _p01_greedy_pairs(wdls, setls, tol=_P01_TOL):
+    """Greedy 1:1 amount pairing (deterministic — sorted). Returns (matched_amounts,
+    n_unmatched_wdl, n_unmatched_setl). THE single pairing definition used by the engine AND
+    every reader, so they never disagree."""
+    wl = sorted(round(a or 0, 2) for a in wdls)
+    sl = sorted(round(s or 0, 2) for s in setls)
+    used = [False] * len(sl)
+    matched, unmatched_wdl = [], 0
+    for a in wl:
+        hit = next((i for i, s in enumerate(sl) if not used[i] and abs(s - a) <= tol), None)
+        if hit is not None:
+            used[hit] = True
+            matched.append(a)
+        else:
+            unmatched_wdl += 1
+    return matched, unmatched_wdl, sum(1 for u in used if not u)
+
+
+def _p01_status(matched, n_uw, n_us, had_wdl):
+    """'matched' → every amount on both sides paired (and there WAS a withdrawal) — IDENTICAL to
+    the old all-or-nothing rule, so the matched-day count is unchanged. 'unmatched' → nothing
+    paired. 'partial' → some pairs matched but a residual remains on either side (NEW)."""
+    if had_wdl and n_uw == 0 and n_us == 0:
+        return 'matched'
+    return 'partial' if matched else 'unmatched'
+
+
+def _p01_matched_counter(result):
+    """Counter of a P01 result row's paired amounts, for per-row read resolution. Returns None
+    when there are NO recorded pairs (legacy row with NULL matched_amounts, OR an empty '[]') so
+    the caller falls back to the all-or-nothing status — a real 'matched' row from run_p01 always
+    has a non-empty list, so the per-amount path only ever runs on rows that actually recorded
+    pairs (matched/partial)."""
+    from collections import Counter
+    raw = getattr(result, "matched_amounts", None)
+    if not raw:
+        return None
+    try:
+        amts = [round(float(a), 2) for a in json.loads(raw)]
+    except Exception:
+        return None
+    return Counter(amts) if amts else None
+
+
+def _p01_take(counter, status, amount):
+    """Is THIS row's amount a matched pair? Consumes one from the counter so two same-amount rows
+    resolve correctly. Legacy (counter None) → matched iff the whole KO-day is 'matched'."""
+    if counter is None:
+        return status == 'matched'
+    a = round(float(amount or 0), 2)
+    if counter.get(a, 0) > 0:
+        counter[a] -= 1
+        return True
+    return False
+
+
 # ── P01: Run Settlement Reconciliation ────────────────────────────────────────
 
 @router.post("/run/p01")
@@ -860,38 +926,31 @@ def run_p01(
                 "reason": "no P01 settlement source data for this date", "total_kos": 0}
     db.query(SBIP01Result).filter(SBIP01Result.recon_date == recon_date).delete()
 
-    TOL = 0.01
     results = []
     for ko in set(wdl_by_ko) | set(setl_by_ko):
-        wdls  = sorted(wdl_by_ko.get(ko, []))
-        setls = sorted(setl_by_ko.get(ko, []), key=lambda x: x[0])
-        used  = [False] * len(setls)
-        unmatched_wdl = 0
-        for a in wdls:                                  # greedy 1:1 by amount
-            hit = next((i for i, (s, _td) in enumerate(setls)
-                        if not used[i] and abs(s - a) <= TOL), None)
-            if hit is not None:
-                used[hit] = True
-            else:
-                unmatched_wdl += 1
-        unmatched_setl = sum(1 for u in used if not u)
-        # matched only when BOTH sides pair up completely (and there was a withdrawal)
-        status = 'matched' if (wdls and unmatched_wdl == 0 and unmatched_setl == 0) else 'unmatched'
-        wallet_amt = round(sum(wdls), 2)
-        bank_amt   = round(sum(s for s, _ in setls), 2)
-        bank_td    = max((td for _, td in setls), default='') if setls else ''
+        wdls  = wdl_by_ko.get(ko, [])
+        setl_pairs = setl_by_ko.get(ko, [])
+        # greedy 1:1 by amount (shared with every reader); record WHICH amounts paired
+        matched, unmatched_wdl, unmatched_setl = _p01_greedy_pairs(wdls, [s for s, _ in setl_pairs])
+        status = _p01_status(matched, unmatched_wdl, unmatched_setl, bool(wdls))
+        wallet_amt = round(sum(round(a or 0, 2) for a in wdls), 2)
+        bank_amt   = round(sum(s for s, _ in setl_pairs), 2)
+        bank_td    = max((td for _, td in setl_pairs), default='') if setl_pairs else ''
         results.append(SBIP01Result(
             id=generate_id(), recon_date=recon_date, ko_id=ko,
             wallet_withdrawn=wallet_amt, bank_settled=bank_amt,
             difference=round(bank_amt - wallet_amt, 2), status=status,
             deduct_date=recon_date, bank_txn_date=bank_td,
+            matched_amounts=json.dumps(sorted(matched)),
             notes=(f"settled later ({bank_td}) — matched on business date {recon_date}"
-                   if status == 'matched' and bank_td and bank_td != recon_date else ''),
+                   if status == 'matched' and bank_td and bank_td != recon_date
+                   else (f"{len(matched)} pair(s) matched, {unmatched_wdl} wdl + {unmatched_setl} settle open"
+                         if status == 'partial' else '')),
         ))
     for r in results:
         db.add(r)
     db.commit()
-    summary = {s: sum(1 for r in results if r.status == s) for s in ('matched', 'unmatched')}
+    summary = {s: sum(1 for r in results if r.status == s) for s in ('matched', 'partial', 'unmatched')}
     _audit(db, current_user, "sbi_run_p01", {"recon_date": recon_date, **summary})
     return {"recon_date": recon_date, "total_kos": len(results), "summary": summary}
 
@@ -954,11 +1013,22 @@ def run_p02(
     # and flips to 'Matched (Settlement)' on the next run once P01 settles it.
     _settle_dd = {(bt.deduct_date or recon_date) for bt in bank_txns
                   if bt.is_settlement and (bt.debit or 0) > 0}
-    p01_matched = set()
+    p01_rows = {}
     if _settle_dd:
-        for x in db.query(SBIP01Result).filter(
-                SBIP01Result.recon_date.in_(_settle_dd), SBIP01Result.status == "matched").all():
-            p01_matched.add(((x.ko_id or "").strip(), x.recon_date))
+        for x in db.query(SBIP01Result).filter(SBIP01Result.recon_date.in_(_settle_dd)).all():
+            p01_rows[((x.ko_id or "").strip(), x.recon_date)] = x
+    _p01_settle_ctr2 = {}
+    def _p01_settles(ko, biz, amount):
+        """A settlement is reconciled iff its amount PAIRED in P01 for (KO, deduct date) — covers
+        fully-matched days AND a clean pair on a partial day. Consumes per (ko, biz) so two
+        same-amount settlements resolve correctly. Legacy P01 row (no matched_amounts) → falls back
+        to the old all-or-nothing 'matched' status via _p01_take."""
+        r = p01_rows.get((ko, biz))
+        if r is None:
+            return False
+        if (ko, biz) not in _p01_settle_ctr2:
+            _p01_settle_ctr2[(ko, biz)] = _p01_matched_counter(r)
+        return _p01_take(_p01_settle_ctr2[(ko, biz)], r.status, amount)
     ko_wdl = {}   # (ko_id, round(amount,2)) -> [SBIKOLimits KO-Withdrawal rows] — same-date fallback
     for k in db.query(SBIKOLimits).filter(SBIKOLimits.txn_date == recon_date,
                                           SBIKOLimits.txn_type == "KO Withdrawal").all():
@@ -1007,7 +1077,7 @@ def run_p02(
             # report. So it is never a plain 'Unmatched' customer exception.
             _ko  = (bt.ko_id or "").strip()
             _biz = bt.deduct_date or recon_date
-            if (_ko, _biz) in p01_matched:
+            if _p01_settles(_ko, _biz, bt.debit or 0):
                 match_status = 'Matched (Settlement)'; success = 'Success'
             else:
                 _cands = [k for k in ko_wdl.get((_ko, round(bt.debit or 0, 2)), [])
@@ -1736,6 +1806,18 @@ def _unified_entries(db, recon_date, include_deposits=False, sides=None):
     entries = []
     want_bank = sides is None or "bank" in sides
     want_data = sides is None or "data" in sides
+    # Per-row P01 resolution: on a 'partial' KO-day, a withdrawal/settlement is matched iff its
+    # amount is one of that day's paired amounts (matched_amounts). Consume from a per-(date,ko)
+    # counter so two same-amount rows resolve correctly; the two legs of a pair consume from
+    # SEPARATE side counters (both start = matched_amounts). Legacy rows (no matched_amounts) fall
+    # back to the all-or-nothing status via _p01_take.
+    _p01_wdl_ctr, _p01_settle_ctr = {}, {}
+
+    def _p01_leg_status(store, date_key, ko, result, amount, matched_label, open_label):
+        key = (date_key, ko)
+        if key not in store:
+            store[key] = _p01_matched_counter(result)
+        return matched_label if _p01_take(store[key], result.status, amount) else open_label
 
     def _new(sidev, src, row_id, ref, ko, amt, date, drcr, narration, file="", disc=""):
         return {"side": sidev, "source": src, "id": row_id, "ref": ref or "", "ko_csp": ko or "",
@@ -1752,11 +1834,13 @@ def _unified_entries(db, recon_date, include_deposits=False, sides=None):
         if b.is_settlement:
             e = _new("bank", "Bank Settlement", b.id, _clean_refno(b.ref_number), b.ko_id, amt, b.txn_date, drcr, b.description,
                      disc=_row_disc("Bank Settlement", b))
-            # settlement reconciles under its business (deduct) date, not the posting date
-            r = p01_idx.get(((b.deduct_date or recon_date), b.ko_id))
+            # settlement reconciles under its business (deduct) date, not the posting date;
+            # per-row: matched iff THIS settlement's amount paired in P01 (partial-day aware)
+            bd = b.deduct_date or recon_date
+            r = p01_idx.get((bd, b.ko_id))
             if r:
-                e.update(status=_P01_UNIFIED_STATUS.get(r.status, r.status), process="P01",
-                         counterpart=f"Wallet out {_r(r.wallet_withdrawn)}", result_id=r.id,
+                e.update(status=_p01_leg_status(_p01_settle_ctr, bd, b.ko_id, r, amt, "Matched", "Unmatched"),
+                         process="P01", counterpart=f"Wallet out {_r(r.wallet_withdrawn)}", result_id=r.id,
                          result_process="p01", _result=r)
         else:
             e = _new("bank", "Bank Statement", b.id, _clean_refno(b.ref_number), b.ko_id, amt, b.txn_date, drcr, b.description,
@@ -1806,8 +1890,9 @@ def _unified_entries(db, recon_date, include_deposits=False, sides=None):
                  disc=_row_disc("KO Withdrawal", w))
         r = p01_by_ko.get(w.ko_id)
         if r:
-            e.update(status=_P01_UNIFIED_STATUS.get(r.status, r.status), process="P01",
-                     counterpart=f"Bank settled {_r(r.bank_settled)}", result_id=r.id,
+            # per-row: this withdrawal is matched iff its amount paired in P01 (partial-day aware)
+            e.update(status=_p01_leg_status(_p01_wdl_ctr, recon_date, w.ko_id, r, w.amount or 0, "Matched", "Unmatched"),
+                     process="P01", counterpart=f"Bank settled {_r(r.bank_settled)}", result_id=r.id,
                      result_process="p01", _result=r)
         entries.append(e)
 
