@@ -131,6 +131,7 @@ class APIKey(Base):
     key_hash     = Column(String(64), unique=True, nullable=False)  # SHA-256 hex
     key_prefix   = Column(String(10), nullable=False)           # first 8 chars for identification
     permissions  = Column(Text, default='{"upload":true,"run_recon":true,"src_assign":false,"reports":true,"logic_builder":false}')
+    allowed_products = Column(Text, default="[]")   # per-key product scope; [] = inherit the creator's
     is_active    = Column(Boolean, default=True)
     created_by   = Column(String(36), ForeignKey("users.id"))
     last_used_at = Column(DateTime, nullable=True)
@@ -1826,7 +1827,7 @@ def _run_migrations():
         "bbps_internal": [
             ("src_code", "VARCHAR(50)"), ("src_note", "VARCHAR(500)"),
         ],
-        "api_keys": [("allowed_ips", "VARCHAR(500)")],
+        "api_keys": [("allowed_ips", "VARCHAR(500)"), ("allowed_products", "TEXT")],
         "partner_configs": [("settlement_carry_days", "INTEGER")],
         "users": [("allowed_products", "TEXT")],
         # Per-rule side-pairing scope (Rajendra 2026-07-27). Existing rows ALTER-in

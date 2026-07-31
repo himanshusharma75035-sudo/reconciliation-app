@@ -405,6 +405,7 @@ class APIKeyCreate(BaseModel):
     permissions: Optional[dict] = None   # None = use default scoped permissions
     expires_days: Optional[int] = None   # None = never expires
     allowed_ips: Optional[str] = None    # CSV of IPs/CIDRs; None = any IP
+    allowed_products: Optional[list] = None  # per-key product scope; [] / None = inherit the creator's
 
 @router.post("/api-keys")
 def create_api_key(
@@ -429,6 +430,7 @@ def create_api_key(
         created_by  = current_user.id,
         expires_at  = expires_at,
         allowed_ips = (body.allowed_ips or "").strip() or None,
+        allowed_products = json.dumps(body.allowed_products or []),
     )
     db.add(key)
     db.commit()
@@ -450,6 +452,7 @@ def list_api_keys(
     keys = db.query(APIKey).order_by(APIKey.created_at.desc()).all()
     return [{"id": k.id, "name": k.name, "description": k.description,
              "key_prefix": k.key_prefix, "is_active": k.is_active,
+             "allowed_products": json.loads(getattr(k, "allowed_products", None) or "[]"),
              "last_used_at": str(k.last_used_at) if k.last_used_at else None,
              "expires_at": str(k.expires_at) if k.expires_at else "never",
              "created_at": str(k.created_at)} for k in keys]

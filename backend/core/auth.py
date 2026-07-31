@@ -211,6 +211,15 @@ def get_current_user(
         creator_copy.full_name   = f"{api_key.name} [API key]"
         creator_copy.is_api_key  = True
         creator_copy.role        = "user"
+        # Product scope: a key uses its OWN allowed_products when it declares any; otherwise it
+        # inherits the creator's — so an unscoped key is bounded by its creator, never broader,
+        # and a scoped key can be narrower than its creator but never exceed the intended set.
+        try:
+            _kp = getattr(api_key, "allowed_products", None)
+            if _kp and json.loads(_kp):
+                creator_copy.allowed_products = _kp
+        except Exception:
+            pass
         set_actor(db, creator_copy)   # additive: attribute config/entitlement changes to this principal
         _enforce_viewer_scope(creator_copy, request)
         return creator_copy

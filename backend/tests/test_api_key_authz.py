@@ -38,6 +38,47 @@ def test_jwt_user_is_not_admin():
 def test_api_key_without_admin_scope_is_not_admin():
     assert is_admin_principal(_key({"upload": True, "reports": True})) is False
 
+
+# ── per-key product scope: check_product_access honours the KEY's own scope ─────
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from models.database import Base
+from core.auth import check_product_access
+
+
+@pytest.fixture
+def pdb():
+    e = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(e)
+    s = sessionmaker(bind=e, autoflush=False, autocommit=False)()
+    yield s
+    s.close()
+
+
+def _keyp(perms=None, products=None):
+    # A key principal carrying its OWN product scope (what get_current_user now sets).
+    return SimpleNamespace(role="user", is_api_key=True,
+                           permissions=json.dumps(perms or {}),
+                           allowed_products=json.dumps(products or []))
+
+
+def test_key_own_product_scope_allows(pdb):
+    check_product_access(pdb, _keyp(products=["fino"]), "fino")          # in scope → no raise
+
+
+def test_key_own_product_scope_denies_others(pdb):
+    with pytest.raises(HTTPException) as ex:
+        check_product_access(pdb, _keyp(products=["evalue"]), "fino")    # fino not in ["evalue"]
+    assert ex.value.status_code == 403
+
+
+def test_key_empty_scope_is_all_products(pdb):
+    check_product_access(pdb, _keyp(products=[]), "fino")                # empty = all → no raise
+
+
+def test_admin_key_bypasses_product_scope(pdb):
+    check_product_access(pdb, _keyp(perms={"admin": True}, products=["evalue"]), "fino")  # admin → no raise
+
 def test_api_key_with_admin_scope_is_admin():
     assert is_admin_principal(_key({"admin": True})) is True
 
