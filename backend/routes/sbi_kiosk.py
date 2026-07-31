@@ -1674,13 +1674,20 @@ def _apply_pairs(db, entries):
     return entries
 
 
-def _unified_entries(db, recon_date, include_deposits=False):
+def _unified_entries(db, recon_date, include_deposits=False, sides=None):
     """Build the flat list of every bank + data source entry for ONE business date, each
     tagged with recon status/process/counterpart and its manual-pair overlay. Returns
     entries carrying a private '_result' handle (caller must pop it). Shared by get_unified
     (the SBI Kiosk 'All Entries' view and the all-entries report) and the manual-match
     pair-picker. `include_deposits` adds KO Deposit rows — OFF by default so the unified
-    page and the all-entries report stay byte-identical to before."""
+    page and the all-entries report stay byte-identical to before.
+
+    `sides` (a set like {"bank"} / {"data"}) builds ONLY that side's rows — the pair-picker
+    shows one side and discarded the other, so building both was ~half wasted work (the data
+    side alone is thousands of rows). SAFE because a row's status comes from the P01/P02/P03
+    RESULT indexes (always built), never from the other side's entry list, and _apply_pairs
+    processes each entry independently by its own side. Default None → BOTH sides → every
+    existing caller is byte-identical."""
     # P01 results indexed by (business_date, ko). A settlement posted on recon_date may
     # belong to an EARLIER business date (its deduct_date) where its P01 match now lives,
     # so load recon_date PLUS those deduct dates. Withdrawal side keys on recon_date;
@@ -1711,6 +1718,8 @@ def _unified_entries(db, recon_date, include_deposits=False):
             p03_by_txn[(x.csp_code, round(float(x.txn_amount), 2), x.ref_number or "")] = x
 
     entries = []
+    want_bank = sides is None or "bank" in sides
+    want_data = sides is None or "data" in sides
 
     def _new(sidev, src, row_id, ref, ko, amt, date, drcr, narration, file="", disc=""):
         return {"side": sidev, "source": src, "id": row_id, "ref": ref or "", "ko_csp": ko or "",
@@ -1721,7 +1730,7 @@ def _unified_entries(db, recon_date, include_deposits=False):
                 "manual_pair_id": None, "_disc": disc, "_result": None}
 
     # ---- bank side ----
-    for b in db.query(SBIBankTransaction).filter(SBIBankTransaction.txn_date == recon_date).all():
+    for b in (db.query(SBIBankTransaction).filter(SBIBankTransaction.txn_date == recon_date).all() if want_bank else []):
         drcr = "DR" if (b.debit or 0) > 0 else ("CR" if (b.credit or 0) > 0 else "")
         amt = (b.debit or 0) if (b.debit or 0) > 0 else (b.credit or 0)
         if b.is_settlement:
@@ -1749,7 +1758,7 @@ def _unified_entries(db, recon_date, include_deposits=False):
         entries.append(e)
 
     # ---- data side: transaction reports ----
-    for t in db.query(SBITxnReport).filter(SBITxnReport.txn_date == recon_date).all():
+    for t in (db.query(SBITxnReport).filter(SBITxnReport.txn_date == recon_date).all() if want_data else []):
         amt = t.amount or 0
         e = _new("data", "Txn Report", t.id, t.reference_number, t.ko_id, amt, t.txn_date, "", t.txn_type,
                  file=canonical_product(t.source_file), disc=_row_disc("Txn Report", t))
@@ -1768,8 +1777,8 @@ def _unified_entries(db, recon_date, include_deposits=False):
         entries.append(e)
 
     # ---- data side: KO withdrawals ----
-    for w in db.query(SBIKOLimits).filter(SBIKOLimits.txn_type == "KO Withdrawal",
-                                          SBIKOLimits.txn_date == recon_date).all():
+    for w in (db.query(SBIKOLimits).filter(SBIKOLimits.txn_type == "KO Withdrawal",
+                                           SBIKOLimits.txn_date == recon_date).all() if want_data else []):
         e = _new("data", "KO Withdrawal", w.id, "", w.ko_id, w.amount or 0, w.txn_date, "", "KO Withdrawal",
                  disc=_row_disc("KO Withdrawal", w))
         r = p01_by_ko.get(w.ko_id)
@@ -1780,7 +1789,7 @@ def _unified_entries(db, recon_date, include_deposits=False):
         entries.append(e)
 
     # ---- data side: KO deposits (pair-picker only; OFF for the unified page + report) ----
-    if include_deposits:
+    if include_deposits and want_data:
         for w in db.query(SBIKOLimits).filter(SBIKOLimits.txn_type == "KO Deposit",
                                               SBIKOLimits.txn_date == recon_date).all():
             entries.append(_new("data", "KO Deposit", w.id, "", w.ko_id, w.amount or 0, w.txn_date, "", "KO Deposit",
@@ -3004,7 +3013,7 @@ def manual_pair_open_items(
                 except Exception as _e:
                     logger.warning(f"manual-match open-items: report align skipped for {d}: {_e}")
                     report_open_ids = None   # fail open — fall back to the raw unified set
-        for e in _unified_entries(db, d, include_deposits=True):
+        for e in _unified_entries(db, d, include_deposits=True, sides={side}):
             e.pop("_result", None)
             if e["side"] != side or e["status"] in _MATCHED_UNIFIED:
                 continue
