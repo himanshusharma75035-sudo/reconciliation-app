@@ -120,8 +120,8 @@ def test_single_date_reconciliation_workbook_contract(db):
     summ = wb["Summary"]
     assert summ.cell(row=2, column=1).value == "Total Bank Statement Transactions"
     assert summ.cell(row=2, column=2).value == 5
-    # 16 metric rows → the by-source-file block title sits at computed row 19
-    assert summ.cell(row=19, column=1).value == "Matched Count by Source File"
+    # 15 metric rows (failures now split out of "unmatched") → block title at computed row 18
+    assert summ.cell(row=18, column=1).value == "Matched Count by Source File"
     bank = wb["Bank Statement (Reconciled)"]
     assert _headers(bank) == BANK_COLS
     status = {(r[_col(bank, "Extracted Txn No. (20-digit)")] or ""): r[_col(bank, "Match Status")]
@@ -142,12 +142,32 @@ def test_single_date_source_match_workbook_contract(db):
     assert "AEPS Withdrawal Transaction Rep" in wb.sheetnames   # 31-char truncation
     total = [r for r in _rows(wb["Summary"]) if r[0] == "TOTAL"][0]
     # D1: s(R1) matched, s(R2) unmatched-Success, placeholder NA
-    assert total[1:] == (2, 1, 1, 1, 0, 1)
+    # cols now: Total, Matched, Unmatched(review=Success), Failed(closed), Not Applicable
+    assert total[1:] == (2, 1, 1, 0, 1)
     ls = wb["Limit & Settlement"]
     assert len(_rows(ls)) == 1
     assert _rows(ls)[0][_col(ls, "Settlement Status (P01)")] == "Matched"   # status='matched'
     wd = wb["Withdrawal"]
     assert _headers(wd) == PROD_COLS
+
+
+def test_failed_source_row_is_closed_not_unmatched(db):
+    # a Failure txn with no bank match → 'Failed' (closed), OUT of "unmatched" — aligns with the app
+    _bank(db, D1, ref=R1, debit=100.0, desc=f"POS {R1}")
+    _src(db, D1, R1, 100.0)                                        # matched
+    _src(db, D1, R2, 200.0, status="Success")                     # a genuine gap → Unmatched
+    _src(db, D1, "61960000000000009999", 300.0, status="Failure") # failed → closed
+    db.commit()
+    from core.sbi_reports import reconcile
+    rep = reconcile(db, D1)
+    t = rep["totals"]
+    assert t["source_matched"] == 1
+    assert t["source_unmatched"] == 1     # the Success gap only — NOT the failure
+    assert t["source_failed"] == 1        # the failure, counted separately (closed)
+    ms = {r["Reference Number"]: r["Match Status"] for r in rep["source_recs"]}
+    assert ms[R2] == "Unmatched" and ms["61960000000000009999"] == "Failed"
+    # the failure is NOT in the "Unmatched Source Records" review list
+    assert all(r["Reference Number"] != "61960000000000009999" for r in rep["unmatched_source"])
 
 
 # ── 2/3. range: sums + no cross-date matching + duplicates date column ─────────
@@ -158,7 +178,7 @@ def test_range_never_matches_across_dates(db):
     assert summ.cell(row=2, column=1).value == "Business Dates Covered"
     assert f"{D1} → {D2} (2 date(s) with data)" in str(summ.cell(row=2, column=2).value)
     assert summ.cell(row=3, column=2).value == 6          # bank_total = 5 + 1
-    assert summ.cell(row=20, column=1).value == "Matched Count by Source File"
+    assert summ.cell(row=19, column=1).value == "Matched Count by Source File"
     bank = wb["Bank Statement (Reconciled)"]
     by_ref = {r[_col(bank, "Extracted Txn No. (20-digit)")]: r for r in _rows(bank)}
     # THE invariant: D1 bank ref RX must stay Unmatched even though a D2 source
@@ -184,8 +204,8 @@ def test_range_source_match_per_date_p01_and_sums(db):
     _fixture(db)
     wb = _wb(build_source_match_report_range(db, [D1, D2]))
     total = [r for r in _rows(wb["Summary"]) if r[0] == "TOTAL"][0]
-    # 4 valid-ref rows (R1, R2, R3, RX-probe): 2 matched, 2 unmatched-Success, 1 NA
-    assert total[1:] == (4, 2, 2, 2, 0, 1)
+    # 4 valid-ref rows (R1, R2, R3, RX-probe): 2 matched, 2 unmatched-Success, 0 Failed, 1 NA
+    assert total[1:] == (4, 2, 2, 0, 1)
     ls = wb["Limit & Settlement"]
     rows = _rows(ls)
     assert [r[_col(ls, "Sr. No.")] for r in rows] == [1, 2]
@@ -205,7 +225,7 @@ def test_single_element_range_keeps_legacy_shape(db):
     wb = _wb(build_reconciliation_report_range(db, [D1]))
     summ = wb["Summary"]
     assert summ.cell(row=2, column=1).value == "Total Bank Statement Transactions"
-    assert summ.cell(row=19, column=1).value == "Matched Count by Source File"
+    assert summ.cell(row=18, column=1).value == "Matched Count by Source File"
     assert _headers(wb["Duplicate Txn in Bank Stmt"]) == DUP_COLS
 
 

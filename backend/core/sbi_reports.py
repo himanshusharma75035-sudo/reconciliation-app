@@ -286,7 +286,7 @@ def reconcile(db, recon_date: str) -> dict:
         })
 
     # ── source-side classification ─────────────────────────────────────────────
-    per_product = {p: {"total": 0, "matched": 0, "unmatched": 0,
+    per_product = {p: {"total": 0, "matched": 0, "unmatched": 0, "failed": 0,
                        "unmatched_success": 0, "unmatched_failure": 0, "not_applicable": 0}
                    for p in PRODUCTS}
     source_recs = []                                # every source row, annotated
@@ -294,7 +294,7 @@ def reconcile(db, recon_date: str) -> dict:
     for s in src:
         m = src_meta[id(s)]
         prod = m["product"]
-        pp = per_product.setdefault(prod, {"total": 0, "matched": 0, "unmatched": 0,
+        pp = per_product.setdefault(prod, {"total": 0, "matched": 0, "unmatched": 0, "failed": 0,
                                            "unmatched_success": 0, "unmatched_failure": 0,
                                            "not_applicable": 0})
         src_seq[prod] += 1
@@ -305,13 +305,14 @@ def reconcile(db, recon_date: str) -> dict:
         elif m["match_bank_seq"] is not None:
             match_status = "Matched"
             pp["matched"] += 1
-        else:
-            match_status = "Unmatched"
+        elif status.lower() == "success":
+            match_status = "Unmatched"           # a genuine gap to review
             pp["unmatched"] += 1
-            if status.lower() == "success":
-                pp["unmatched_success"] += 1
-            else:
-                pp["unmatched_failure"] += 1
+            pp["unmatched_success"] += 1
+        else:
+            match_status = "Failed"              # closed — the txn failed, no money moved; NOT an
+            pp["failed"] += 1                    # exception, so it leaves "unmatched" (aligns with the app)
+            pp["unmatched_failure"] += 1
         # 'total' counts only bank-reconcilable rows (exclude Not Applicable from denom)
         if m["valid"]:
             pp["total"] += 1
@@ -344,7 +345,8 @@ def reconcile(db, recon_date: str) -> dict:
         "amount_mismatches": n_amt_mismatch,
         "source_total": sum(pp["total"] for pp in per_product.values()),
         "source_matched": sum(pp["matched"] for pp in per_product.values()),
-        "source_unmatched": sum(pp["unmatched"] for pp in per_product.values()),
+        "source_unmatched": sum(pp["unmatched"] for pp in per_product.values()),   # Success gaps only
+        "source_failed": sum(pp["failed"] for pp in per_product.values()),          # closed (failed txns)
         "source_unmatched_success": sum(pp["unmatched_success"] for pp in per_product.values()),
         "source_unmatched_failure": sum(pp["unmatched_failure"] for pp in per_product.values()),
         "source_not_applicable": sum(pp["not_applicable"] for pp in per_product.values()),
@@ -435,8 +437,10 @@ def _highlight_by_match(ws, rows, match_col_idx, status_col_idx):
             key = "x"
         elif ms == "Unmatched Settlement":
             key = "o"                       # settlement debit with no KO Withdrawal — review
+        elif ms == "Failed":
+            key = "x"                       # closed (txn failed, no money moved) — grey, not a review item
         elif ms == "Unmatched":
-            key = "o" if st == "success" else "r"
+            key = "o"                       # Success-only gap now (failures are 'Failed') — review
         if key:
             ws.cell(row=i, column=match_col_idx).fill = fills[key]
 
@@ -529,9 +533,8 @@ def _write_reconciliation_workbook(results) -> io.BytesIO:
             {"Metric": "Amount Mismatches Among Matched Rows", "Value": t["amount_mismatches"]},
             {"Metric": "", "Value": ""},
             {"Metric": "Total Records Across All 6 Source Files (excl. Not Applicable)", "Value": t["source_total"]},
-            {"Metric": "Source Records NOT Found in Bank Statement", "Value": t["source_unmatched"]},
-            {"Metric": "  — of which Status=Success (needs review)", "Value": t["source_unmatched_success"]},
-            {"Metric": "  — of which Status=Failure (expected)", "Value": t["source_unmatched_failure"]},
+            {"Metric": "Unmatched — Success (a genuine gap to review)", "Value": t["source_unmatched"]},
+            {"Metric": "Failed (txn failed, no money moved — closed, not an exception)", "Value": t["source_failed"]},
             {"Metric": "Not-Applicable source rows (non-20-digit ref)", "Value": t["source_not_applicable"]},
             {"Metric": "Duplicate Txn Numbers in Bank Stmt (DR+CR)", "Value": dup_ref_count},
         ]
@@ -541,7 +544,7 @@ def _write_reconciliation_workbook(results) -> io.BytesIO:
         start = len(summ) + 3
         ws.cell(row=start, column=1, value="Matched Count by Source File").font = \
             __import__("openpyxl").styles.Font(bold=True)
-        hdr = ["Source File", "Matched Bank Rows", "Total Records in File", "Unmatched (mostly Failed)"]
+        hdr = ["Source File", "Matched Bank Rows", "Total Records in File", "Unmatched (review)", "Failed (closed)"]
         for j, h in enumerate(hdr, start=1):
             ws.cell(row=start + 1, column=j, value=h).font = __import__("openpyxl").styles.Font(bold=True)
         for k, p in enumerate(PRODUCTS, start=start + 2):
@@ -550,6 +553,7 @@ def _write_reconciliation_workbook(results) -> io.BytesIO:
             ws.cell(row=k, column=2, value=pp.get("matched", 0))
             ws.cell(row=k, column=3, value=pp.get("total", 0))
             ws.cell(row=k, column=4, value=pp.get("unmatched", 0))
+            ws.cell(row=k, column=5, value=pp.get("failed", 0))
 
         # Bank Statement (Reconciled) — per-date blocks concatenated chronologically.
         # 'Bank Stmt Row' deliberately keeps its per-date meaning (the row's position in
@@ -630,19 +634,19 @@ def _write_source_match_workbook(db, results) -> io.BytesIO:
             pp = per_product.get(p, {})
             rows.append({
                 "Source File": p, "Total Records": pp.get("total", 0),
-                "Matched": pp.get("matched", 0), "Unmatched": pp.get("unmatched", 0),
-                "Unmatched - Success": pp.get("unmatched_success", 0),
-                "Unmatched - Failure": pp.get("unmatched_failure", 0),
+                "Matched": pp.get("matched", 0),
+                "Unmatched (review)": pp.get("unmatched", 0),
+                "Failed (closed)": pp.get("failed", 0),
                 "Not Applicable": pp.get("not_applicable", 0),
             })
         rows.append({"Source File": "TOTAL", "Total Records": t["source_total"],
-                     "Matched": t["source_matched"], "Unmatched": t["source_unmatched"],
-                     "Unmatched - Success": t["source_unmatched_success"],
-                     "Unmatched - Failure": t["source_unmatched_failure"],
+                     "Matched": t["source_matched"],
+                     "Unmatched (review)": t["source_unmatched"],
+                     "Failed (closed)": t["source_failed"],
                      "Not Applicable": t["source_not_applicable"]})
         _write_sheet(writer, "Summary", rows,
-                     ["Source File", "Total Records", "Matched", "Unmatched",
-                      "Unmatched - Success", "Unmatched - Failure", "Not Applicable"])
+                     ["Source File", "Total Records", "Matched", "Unmatched (review)",
+                      "Failed (closed)", "Not Applicable"])
         # Range mode: flag half-loaded days below the table (same computed-offset
         # pattern as Report A's matched-by-source-file block) so a missing upload
         # can't read as a day of real gaps.
