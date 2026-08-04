@@ -234,7 +234,8 @@ def results(side: str = Query("bank", pattern="^(bank|internal)$"), status: str 
         return [{"id": b.id, "provider": b.provider, "client_ref": b.client_ref, "operator_ref": b.operator_ref,
                  "amount": b.amount, "status": b.status, "transaction_date": b.transaction_date,
                  "service_name": b.service_name, "operator_name": b.operator_name, "reason": b.reason,
-                 "recon_status": b.recon_status, "match_id": b.match_id, "match_note": b.match_note} for b in rows]
+                 "recon_status": b.recon_status, "match_id": b.match_id, "match_note": b.match_note,
+                 "src_code": b.src_code, "src_note": b.src_note} for b in rows]
     q = db.query(BbpsInternal)
     if status:   q = q.filter(BbpsInternal.recon_status == status)
     if provider: q = q.filter(BbpsInternal.provider == provider)
@@ -243,7 +244,8 @@ def results(side: str = Query("bank", pattern="^(bank|internal)$"), status: str 
     return [{"id": i.id, "eko_trxn_id": i.eko_trxn_id, "provider": i.provider, "amount": i.amount,
              "status": i.status, "is_refunded": i.is_refunded, "transaction_date": i.transaction_date,
              "csp_code": i.csp_code, "merchant_name": i.merchant_name, "cell_number": i.cell_number,
-             "recon_status": i.recon_status, "match_id": i.match_id, "match_note": i.match_note} for i in rows]
+             "recon_status": i.recon_status, "match_id": i.match_id, "match_note": i.match_note,
+             "src_code": i.src_code, "src_note": i.src_note} for i in rows]
 
 
 # ─── Export ───────────────────────────────────────────────────────────────────

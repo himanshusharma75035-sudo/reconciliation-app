@@ -606,6 +606,7 @@ def results(
             "amount": b.amount, "channel": b.channel, "utr": b.utr, "atm_ref": b.atm_ref,
             "branch": b.branch, "mobile": b.mobile, "recon_status": b.recon_status,
             "match_id": b.match_id, "match_note": b.match_note,
+            "src_code": b.src_code, "src_note": b.src_note,
         } for b in rows]
     else:
         q = db.query(EvalueWalletLoad).filter(EvalueWalletLoad.reco_acc_no == reco_acc_no)
@@ -624,6 +625,7 @@ def results(
             "amount": l.amount, "load_mode": l.load_mode, "utr_number": l.utr_number,
             "eko_trxn_id": l.eko_trxn_id, "recon_status": l.recon_status,
             "match_id": l.match_id, "match_note": l.match_note,
+            "src_code": l.src_code, "src_note": l.src_note,
         } for l in rows]
 
 

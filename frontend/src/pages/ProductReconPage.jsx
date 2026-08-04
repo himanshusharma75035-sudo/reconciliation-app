@@ -230,7 +230,7 @@ function ProductReconTab({ slug, partners }) {
       fields: [
         // "No SRC" (only when already tagged) removes the tag — the row reverts to its prior state.
         { name: 'code', label: 'SRC code', type: 'select',
-          options: [...(row.src_code ? [{ value: '__none__', label: 'No SRC (remove tag)' }] : []), ...srcCodes],
+          options: [...((row.src_code || row.recon_status === 'src_assigned') ? [{ value: '__none__', label: 'No SRC (remove tag)' }] : []), ...srcCodes],
           required: true, default: row.src_code || (srcCodes[0] || '') },
         { name: 'note', label: 'Note', placeholder: 'optional', default: row.src_note || '' },
       ],

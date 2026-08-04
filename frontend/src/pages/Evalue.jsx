@@ -241,7 +241,7 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
       fields: [
         // "No SRC" (only when already tagged) removes the tag — the row reverts to its prior state.
         { name: 'src_code', label: 'SRC code', type: 'select',
-          options: [...(row.src_code ? [{ value: '__none__', label: 'No SRC (remove tag)' }] : []), ...srcCodes],
+          options: [...((row.src_code || row.recon_status === 'src_assigned') ? [{ value: '__none__', label: 'No SRC (remove tag)' }] : []), ...srcCodes],
           required: true, default: row.src_code || 'UNCLAIMED' },
         { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional — recorded with the SRC', default: row.src_note || '' },
       ] },
@@ -637,7 +637,7 @@ function RowsTable({ rows, onUnmatch, onOverride, onAssignSrc, onRemoveSrc }) {
                     <button title="Override status" onClick={() => onOverride(r)} className="p-1 rounded hover:bg-amber-50 text-amber-600"><Tag size={12} /></button>
                     {SRC_STATUSES.includes(r.recon_status) &&
                       <button title="Assign SRC" onClick={() => onAssignSrc(r)} className="p-1 rounded hover:bg-yellow-50 text-yellow-600"><Coins size={12} /></button>}
-                    {r.src_code &&
+                    {(r.src_code || r.recon_status === 'src_assigned') &&
                       <button title="Remove SRC" onClick={() => onRemoveSrc(r)} className="p-1 rounded hover:bg-gray-100 text-gray-500 text-[11px] font-bold leading-none">✕</button>}
                   </div>
                 </td>

@@ -136,3 +136,29 @@ def test_sbi_remove_deletes_overlay(db):
     assert db.query(SBISrcAssignment).count() == 1
     remove_src(SBISRCRemoveIn(process="p02", result_id="r1"), db=db, current_user=USER)
     assert db.query(SBISrcAssignment).count() == 0    # overlay gone → row reverts to untagged
+
+
+# ── results serialization MUST expose src_code/src_note ───────────────────────
+# Regression: E-Value & BBPS /results omitted src_code, so the frontend row had no code —
+# the SRC badge, the remove ✕, AND the dropdown "No SRC" option all silently never rendered
+# even though the row was src_assigned. The code MUST reach the client for removal to be usable.
+def test_evalue_results_expose_src_code(db):
+    from routes.evalue import results, assign_src, EvalueSRCIn
+    db.add(EvalueBankTxn(id="er1", reco_acc_no="A", txn_date=RD, utr="U", amount=5.0,
+                         dr_cr="CR", recon_status="unmatched_bank"))
+    db.commit()
+    assign_src(EvalueSRCIn(id="er1", side="bank", src_code="OTHER", src_note="n"), db=db, user=USER)
+    row = next(r for r in results(reco_acc_no="A", side="bank", status="", date_from="",
+                                  date_to="", db=db, user=USER) if r["id"] == "er1")
+    assert row["src_code"] == "OTHER" and row["src_note"] == "n"
+
+
+def test_bbps_results_expose_src_code(db):
+    from routes.bbps import results, assign_src, BbpsSRCIn
+    db.add(BbpsBankTxn(id="br1", provider="moneyart", client_ref="C1", amount=10.0,
+                       status="Success", transaction_date=RD, recon_status="unmatched_bank"))
+    db.commit()
+    assign_src(BbpsSRCIn(id="br1", side="bank", src_code="DUPLICATE"), db=db, user=USER)
+    row = next(r for r in results(side="bank", status="", provider="", date_from="",
+                                  date_to="", db=db, user=USER) if r["id"] == "br1")
+    assert row["src_code"] == "DUPLICATE"

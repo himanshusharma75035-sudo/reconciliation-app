@@ -190,7 +190,7 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
       fields: [
         // "No SRC" (only when already tagged) removes the tag — the row reverts to its prior state.
         { name: 'src_code', label: 'SRC code', type: 'select',
-          options: [...(row.src_code ? [{ value: '__none__', label: 'No SRC (remove tag)' }] : []), ...srcCodes],
+          options: [...((row.src_code || row.recon_status === 'src_assigned') ? [{ value: '__none__', label: 'No SRC (remove tag)' }] : []), ...srcCodes],
           required: true, default: row.src_code || 'UNCLAIMED' },
         { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional context for this SRC assignment' },
       ] },
@@ -303,7 +303,7 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
                     {r.match_id && <button title="Unmatch" onClick={() => unmatch(r.match_id)} className="p-1 rounded hover:bg-red-50 text-red-500"><Undo2 size={12} /></button>}
                     <button title="Override" onClick={() => override(r)} className="p-1 rounded hover:bg-amber-50 text-amber-600"><Tag size={12} /></button>
                     {SRC_ASSIGNABLE.includes(r.recon_status) && <button title="Assign SRC" onClick={() => assignSrc(r)} className="p-1 rounded hover:bg-yellow-50 text-yellow-700"><Tags size={12} /></button>}
-                    {r.src_code && <button title="Remove SRC" onClick={() => removeSrc(r)} className="p-1 rounded hover:bg-gray-100 text-gray-500 text-[11px] font-bold leading-none">✕</button>}
+                    {(r.src_code || r.recon_status === 'src_assigned') && <button title="Remove SRC" onClick={() => removeSrc(r)} className="p-1 rounded hover:bg-gray-100 text-gray-500 text-[11px] font-bold leading-none">✕</button>}
                   </div></td>
                 </tr>
               )
