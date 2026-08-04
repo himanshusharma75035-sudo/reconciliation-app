@@ -1733,24 +1733,30 @@ def _apply_pairs(db, entries):
         return entries
     pairs = db.query(SBIManualPair).all()
     if pairs:
-        by_bank = {p.bank_key: p for p in pairs if p.bank_key}
-        by_data = {p.data_key: p for p in pairs if p.data_key}
-        used_bank_ids, used_data_ids = set(), set()
+        # ONE key space: bank/bankset vs txr/kow/kod prefixes are disjoint, so a single lookup
+        # resolves every entry regardless of side — handling bank↔data AND data↔data (KO
+        # Withdrawal ↔ KO Deposit) pairs identically. Each leg is consumed once per (pair, leg),
+        # so business-identical rows can never phantom-reconcile more than one row.
+        by_key = {}
+        for p in pairs:
+            if p.bank_key:
+                by_key.setdefault(p.bank_key, []).append((p, "bank"))
+            if p.data_key:
+                by_key.setdefault(p.data_key, []).append((p, "data"))
+        used = set()   # (pair.id, leg) already applied
         for e in entries:
             k = _pair_key(e["side"], e["source"], e["ko_csp"], e["ref"], e["date"],
                           e["drcr"], e["amount"], e.get("_disc"))
-            if e["side"] == "bank":
-                p = by_bank.get(k)
-                if not p or p.id in used_bank_ids:
-                    continue
-                used_bank_ids.add(p.id)
-                other_src, other_amt = p.data_source, p.data_amount
-            else:
-                p = by_data.get(k)
-                if not p or p.id in used_data_ids:
-                    continue
-                used_data_ids.add(p.id)
-                other_src, other_amt = p.bank_source, p.bank_amount
+            cand = by_key.get(k)
+            if not cand:
+                continue
+            hit = next(((p, leg) for (p, leg) in cand if (p.id, leg) not in used), None)
+            if not hit:
+                continue
+            p, leg = hit
+            used.add((p.id, leg))
+            other_src, other_amt = (p.data_source, p.data_amount) if leg == "bank" \
+                else (p.bank_source, p.bank_amount)
             e["status"] = "Manual_Matched"
             e["process"] = "Manual"
             e["manual_pair_id"] = p.id
@@ -3170,6 +3176,9 @@ class ManualPairIn(BaseModel):
     # depends on regenerable source ids (behavior-contract #17 — ids change on re-upload).
     bank_id: Optional[str] = None
     data_id: Optional[str] = None
+    # When set, the LEFT leg (bank_id) is actually a DATA row of this source type — enables
+    # internal↔internal pairing (KO Withdrawal ↔ KO Deposit). Absent ⇒ left leg is a bank row.
+    bank_data_source: Optional[str] = None
     bank_key: Optional[str] = None
     data_key: Optional[str] = None
     bank_source: Optional[str] = None
@@ -3204,8 +3213,9 @@ def create_manual_pairs(
     # maker-checker gate, so a queued/approved pair survives a re-upload (#17). A replayed
     # pair already carries its keys and skips the source-row lookup entirely.
     existing = db.query(SBIManualPair).all()
-    used_bank = {p.bank_key for p in existing}
-    used_data = {p.data_key for p in existing}
+    # One key space (bank/bankset vs txr/kow/kod are disjoint) so a row can be at most ONE leg of
+    # ONE pair — required for internal↔internal, where a KO row could be either leg.
+    used_keys = {p.bank_key for p in existing if p.bank_key} | {p.data_key for p in existing if p.data_key}
     resolved, results, errors, warned = [], [], 0, 0
     for pr in body.pairs:
         try:
@@ -3215,10 +3225,25 @@ def create_manual_pairs(
                 dd = {"key": pr.data_key, "source": pr.data_source,
                       "amount": float(pr.data_amount or 0), "date": pr.data_date}
             else:                                                # fresh submit: resolve source rows
-                b = db.query(SBIBankTransaction).filter(SBIBankTransaction.id == pr.bank_id).first()
-                if not b:
-                    raise ValueError("Bank row not found")
-                bd = _bank_descriptor(b)
+                # LEFT leg: a bank row by default; a DATA row (KO Withdrawal/Deposit/Txn Report)
+                # when bank_data_source is set → enables internal↔internal (KO Wdl ↔ KO Dep).
+                lsrc = pr.bank_data_source
+                if lsrc:
+                    if lsrc in ("KO Withdrawal", "KO Deposit"):
+                        lrow = db.query(SBIKOLimits).filter(SBIKOLimits.id == pr.bank_id,
+                                                            SBIKOLimits.txn_type == lsrc).first()
+                    elif lsrc == "Txn Report":
+                        lrow = db.query(SBITxnReport).filter(SBITxnReport.id == pr.bank_id).first()
+                    else:
+                        raise ValueError(f"Unsupported left source '{lsrc}'")
+                    if not lrow:
+                        raise ValueError(f"{lsrc} row not found")
+                    bd = _data_descriptor(lrow, lsrc)
+                else:
+                    b = db.query(SBIBankTransaction).filter(SBIBankTransaction.id == pr.bank_id).first()
+                    if not b:
+                        raise ValueError("Bank row not found")
+                    bd = _bank_descriptor(b)
                 ds = pr.data_source
                 if ds == "Txn Report":
                     row = db.query(SBITxnReport).filter(SBITxnReport.id == pr.data_id).first()
@@ -3231,12 +3256,14 @@ def create_manual_pairs(
                     raise ValueError(f"{ds} row not found")
                 dd = _data_descriptor(row, ds)
 
-            if bd["key"] in used_bank:
-                raise ValueError("Bank row already manually matched")
-            if dd["key"] in used_data:
+            if bd["key"] == dd["key"]:
+                raise ValueError("Cannot pair a row with itself")
+            if bd["key"] in used_keys:
+                raise ValueError("Left row already manually matched")
+            if dd["key"] in used_keys:
                 raise ValueError("Internal row already manually matched")
-            used_bank.add(bd["key"])
-            used_data.add(dd["key"])
+            used_keys.add(bd["key"])
+            used_keys.add(dd["key"])
             diff = round(abs(bd["amount"] - dd["amount"]), 2)
             resolved.append({"bank_key": bd["key"], "data_key": dd["key"],
                              "bank_source": bd["source"], "data_source": dd["source"],

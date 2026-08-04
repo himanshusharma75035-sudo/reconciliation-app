@@ -1407,6 +1407,10 @@ function ManualPairTab({ reconDate }) {
   const [remark, setRemark] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [pairs, setPairs] = useState([])
+  // Match mode: 'bank_data' = Bank ↔ Internal (default); 'ko' = KO Withdrawal ↔ KO Deposit
+  // (internal↔internal — Rajendra). Switching clears the selection so the two legs never mix.
+  const [mode, setMode] = useState('bank_data')
+  const switchMode = (m) => { if (m === mode) return; setMode(m); setSelBank(null); setSelData(null) }
 
   useEffect(() => { setFrom(reconDate); setTo(reconDate) }, [reconDate])
 
@@ -1447,11 +1451,17 @@ function ManualPairTab({ reconDate }) {
   // Bank-side breakdown (report's open = with-ref + no-ref cash deposits).
   const bankWithRef = shownBank.filter(r => r.ref).length
   const bankNoRef = shownBank.length - bankWithRef
+  // KO mode pulls BOTH legs from the internal side (filtered by type). The Amount box narrows
+  // both, so typing 56000 shows the ₹56,000 withdrawal + its offsetting ₹56,000 deposit.
+  const koWithdrawals = dataItems.filter(r => r.source === 'KO Withdrawal' && amtMatch(r))
+  const koDeposits = dataItems.filter(r => r.source === 'KO Deposit' && amtMatch(r))
+  const leftItems = mode === 'ko' ? koWithdrawals : shownBank
+  const rightItems = mode === 'ko' ? koDeposits : shownData
 
   const addPair = () => {
     if (!selBank || !selData) { toast('Select one row on each side', { icon: 'ℹ️' }); return }
     if (queuedIds.has(selBank.id) || queuedIds.has(selData.id)) { toast('Row already queued', { icon: '⚠️' }); return }
-    setQueue(q => [...q, { bank: selBank, data: selData }])
+    setQueue(q => [...q, { bank: selBank, data: selData, mode }])
     setSelBank(null); setSelData(null)
   }
   const removeQ = i => setQueue(q => q.filter((_, idx) => idx !== i))
@@ -1461,7 +1471,11 @@ function ManualPairTab({ reconDate }) {
     if (remark.trim().length < 5) { toast.error('A remark (≥5 characters) is required'); return }
     setSubmitting(true)
     try {
-      const payload = { pairs: queue.map(q => ({ bank_id: q.bank.id, data_id: q.data.id, data_source: q.data.source })), remark: remark.trim() }
+      const payload = { pairs: queue.map(q => ({
+        bank_id: q.bank.id, data_id: q.data.id, data_source: q.data.source,
+        // KO mode: the LEFT leg is itself a data row (KO Withdrawal), flag it for the backend.
+        ...(q.mode === 'ko' ? { bank_data_source: q.bank.source } : {}),
+      })), remark: remark.trim() }
       const { data } = await api.post('/sbi/manual-match/pair', payload)
       if (data.queued) { toast(data.message || 'Queued for approval', { icon: '🕒' }); setQueue([]); setRemark('') }
       else {
@@ -1484,8 +1498,18 @@ function ManualPairTab({ reconDate }) {
   return (
     <div className="space-y-5">
       <div className="rounded-xl border border-gray-200 bg-white p-4">
-        <div className="text-sm font-semibold text-gray-800 mb-1">Manual Match — pick a bank row and an internal row, queue, submit</div>
-        <p className="text-xs text-gray-400 mb-3">Internal side spans every file (Txn Reports — each shown with its source file — KO Withdrawals &amp; KO Deposits); use the file dropdown on that panel to narrow to one file, and the <strong>Amount</strong> box to filter both sides to one value. Use a date range to catch a D+1 settlement. Manual pairs persist across re-runs and re-uploads.</p>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+          <div className="text-sm font-semibold text-gray-800">
+            {mode === 'ko' ? 'Manual Match — pair a KO Withdrawal with a KO Deposit' : 'Manual Match — pick a bank row and an internal row, queue, submit'}
+          </div>
+          <div className="inline-flex rounded-lg border border-gray-200 overflow-hidden text-xs shrink-0">
+            <button onClick={() => switchMode('bank_data')} className={`px-3 py-1.5 font-medium ${mode === 'bank_data' ? 'bg-primary text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>Bank ↔ Internal</button>
+            <button onClick={() => switchMode('ko')} className={`px-3 py-1.5 font-medium border-l border-gray-200 ${mode === 'ko' ? 'bg-primary text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}>KO Withdrawal ↔ KO Deposit</button>
+          </div>
+        </div>
+        <p className="text-xs text-gray-400 mb-3">{mode === 'ko'
+          ? <>Pair a <strong>KO Withdrawal</strong> against its offsetting <strong>KO Deposit</strong> (both internal — no bank leg). Use the <strong>Amount</strong> box to line up matching values, and a date range to catch a next-day reversal. Pairs persist across re-runs and re-uploads.</>
+          : <>Internal side spans every file (Txn Reports — each shown with its source file — KO Withdrawals &amp; KO Deposits); use the file dropdown on that panel to narrow to one file, and the <strong>Amount</strong> box to filter both sides to one value. Use a date range to catch a D+1 settlement. Manual pairs persist across re-runs and re-uploads.</>}</p>
         <div className="flex flex-wrap items-end gap-3">
           <div><label className="text-xs text-gray-400 block mb-1">From Date</label>
             <input type="date" className="input" value={from} onChange={e => setFrom(e.target.value)} /></div>
@@ -1512,19 +1536,19 @@ function ManualPairTab({ reconDate }) {
       {!canEdit && <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">You have read-only access — manual matching needs the <span className="font-semibold">src_assign</span> permission.</div>}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <PairPanel title="Bank Statement" tone="text-blue-700 bg-blue-50/60 border-blue-100" items={shownBank}
-          subtitle={shownBank.length ? `Matches the reconciliation report's open bank items · ${bankWithRef} with a bank reference · ${bankNoRef} cash-deposit / no-reference` : undefined}
+        <PairPanel title={mode === 'ko' ? 'KO Withdrawal' : 'Bank Statement'} tone="text-blue-700 bg-blue-50/60 border-blue-100" items={leftItems}
+          subtitle={mode === 'bank_data' && shownBank.length ? `Matches the reconciliation report's open bank items · ${bankWithRef} with a bank reference · ${bankNoRef} cash-deposit / no-reference` : undefined}
           selected={selBank} onSelect={setSelBank} queuedIds={queuedIds} />
-        <PairPanel title="Internal / Data" tone="text-green-700 bg-green-50/60 border-green-100" items={shownData}
-          filterValue={dataFile} filterOptions={dataFiles} onFilterChange={setDataFile}
+        <PairPanel title={mode === 'ko' ? 'KO Deposit' : 'Internal / Data'} tone="text-green-700 bg-green-50/60 border-green-100" items={rightItems}
+          filterValue={mode === 'bank_data' ? dataFile : undefined} filterOptions={mode === 'bank_data' ? dataFiles : undefined} onFilterChange={mode === 'bank_data' ? setDataFile : undefined}
           selected={selData} onSelect={setSelData} queuedIds={queuedIds} />
       </div>
 
       {/* selection → add-to-queue bar */}
       <div className="rounded-xl border border-gray-200 bg-gray-50/60 p-3 flex flex-wrap items-center gap-3">
-        <div className="text-xs text-gray-500">Bank: {selBank ? <span className="font-mono text-gray-800">{selBank.file} · {fmtINR(selBank.amount)}</span> : <span className="text-gray-400">none</span>}</div>
+        <div className="text-xs text-gray-500">{mode === 'ko' ? 'KO Withdrawal' : 'Bank'}: {selBank ? <span className="font-mono text-gray-800">{selBank.file} · {fmtINR(selBank.amount)}</span> : <span className="text-gray-400">none</span>}</div>
         <ArrowLeftRight size={15} className="text-gray-400" />
-        <div className="text-xs text-gray-500">Internal: {selData ? <span className="font-mono text-gray-800">{selData.file} · {fmtINR(selData.amount)}</span> : <span className="text-gray-400">none</span>}</div>
+        <div className="text-xs text-gray-500">{mode === 'ko' ? 'KO Deposit' : 'Internal'}: {selData ? <span className="font-mono text-gray-800">{selData.file} · {fmtINR(selData.amount)}</span> : <span className="text-gray-400">none</span>}</div>
         {selBank && selData && diffOf(selBank, selData) > 0.01 &&
           <span className="text-[11px] text-amber-700 bg-amber-100 rounded-full px-2 py-0.5 flex items-center gap-1"><AlertTriangle size={11} />Amounts differ by {fmtINR(diffOf(selBank, selData))}</span>}
         <button onClick={addPair} disabled={!selBank || !selData || !canEdit} className="btn-ghost text-sm flex items-center gap-1.5 ml-auto"><Check size={14} /> Add pair to queue</button>

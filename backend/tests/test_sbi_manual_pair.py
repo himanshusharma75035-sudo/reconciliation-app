@@ -207,6 +207,52 @@ def test_distinct_datetime_rows_can_both_be_paired(db):
     assert all(r["status"] == "Manual_Matched" for r in ko_rows) and len(ko_rows) == 2
 
 
+# ── internal ↔ internal: KO Withdrawal ↔ KO Deposit (Rajendra 2026-08) ──────────
+def _pair_data(db, left, left_source, right, right_source, remark=REMARK):
+    """Pair two DATA-side rows (left leg flagged via bank_data_source)."""
+    return create_manual_pairs(
+        ManualPairBulkIn(pairs=[ManualPairIn(bank_id=left.id, bank_data_source=left_source,
+                                             data_id=right.id, data_source=right_source)],
+                         remark=remark),
+        db=db, current_user=USER)
+
+
+def test_ko_withdrawal_paired_with_ko_deposit(db):
+    w = _ko(db, ko="KO1", amount=56000.0, txn_type="KO Withdrawal")
+    d = _ko(db, ko="KO1", amount=56000.0, txn_type="KO Deposit")
+    out = _pair_data(db, w, "KO Withdrawal", d, "KO Deposit")
+    assert out["paired"] == 1 and out["errors"] == 0
+    # KO Withdrawal flips to Manual_Matched in the unified page; counterpart is the KO Deposit
+    ko_rows = [r for r in _unified_rows(db) if r["source"] == "KO Withdrawal"]
+    assert len(ko_rows) == 1 and ko_rows[0]["status"] == "Manual_Matched"
+    assert "KO Deposit" in ko_rows[0]["counterpart"]
+    # both rows leave the pair-picker (both now closed)
+    data = manual_pair_open_items(side="data", date_from=DATE, db=db, current_user=USER)
+    kinds = [e["file"] for e in data["items"]]
+    assert "KO Withdrawal" not in kinds and "KO Deposit" not in kinds
+
+
+def test_ko_pair_unpair_reopens_both(db):
+    w = _ko(db, ko="KO1", amount=56000.0, txn_type="KO Withdrawal")
+    d = _ko(db, ko="KO1", amount=56000.0, txn_type="KO Deposit")
+    out = _pair_data(db, w, "KO Withdrawal", d, "KO Deposit")
+    delete_manual_pair(out["results"][0]["pair_id"], db=db, current_user=USER)
+    data = manual_pair_open_items(side="data", date_from=DATE, db=db, current_user=USER)
+    kinds = sorted(e["file"] for e in data["items"])
+    assert "KO Withdrawal" in kinds and "KO Deposit" in kinds   # both open again
+
+
+def test_ko_deposit_cannot_be_paired_twice(db):
+    # a KO Deposit already used as the right leg can't be reused (merged used_keys across legs)
+    w1 = _ko(db, ko="KO1", amount=56000.0, txn_type="KO Withdrawal", dt="2026-06-20 09:00:00")
+    w2 = _ko(db, ko="KO1", amount=56000.0, txn_type="KO Withdrawal", dt="2026-06-20 10:00:00")
+    d = _ko(db, ko="KO1", amount=56000.0, txn_type="KO Deposit")
+    assert _pair_data(db, w1, "KO Withdrawal", d, "KO Deposit")["paired"] == 1
+    out = _pair_data(db, w2, "KO Withdrawal", d, "KO Deposit")   # reuse the same deposit
+    assert out["paired"] == 0 and out["errors"] == 1
+    assert "already" in out["results"][0]["error"].lower()
+
+
 def test_resolved_keys_path_is_id_independent(db):
     # Simulates the maker-checker replay: the pair is re-created from STABLE keys with no
     # source-row ids (which regenerate on re-upload, #17), and still applies.
