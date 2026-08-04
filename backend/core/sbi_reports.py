@@ -22,7 +22,7 @@ from collections import defaultdict
 
 import pandas as pd
 
-from models.database import SBIBankTransaction, SBITxnReport, SBIKOLimits, SBIP01Result
+from models.database import SBIBankTransaction, SBITxnReport, SBIKOLimits, SBIP01Result, SBIManualPair
 
 # ── matching constants ────────────────────────────────────────────────────────
 TOL = 0.01                                   # SBI paisa tolerance (contract-wide)
@@ -332,6 +332,70 @@ def reconcile(db, recon_date: str) -> dict:
             "Matched Bank Txn Date": m["match_bank_date"] or "",
         })
 
+    # ── operator manual-pair overlay (read-time) ────────────────────────────────
+    # Manual pairs (SBIManualPair, from the two-sided pair-picker) reconcile a bank row against an
+    # internal row and PERSIST across recon re-runs / file re-uploads. reconcile() re-derives its
+    # own matches by 20-digit ref and cannot see these overlays, so a manually-matched row would
+    # still print open in BOTH operator workbooks (Rajendra 2026-08: "my manual matches don't show
+    # in the report"). Overlay them here — keyed by the SAME stable business key the picker wrote —
+    # so the workbooks reflect the operator's matches. NO-OP / byte-identical when no pairs exist.
+    _mpairs = db.query(SBIManualPair).all()
+    if _mpairs:
+        from routes.sbi_kiosk import _bank_descriptor, _data_descriptor   # lazy: avoids circular import
+        _by_key = {}
+        for _p in _mpairs:
+            if _p.bank_key:
+                _by_key.setdefault(_p.bank_key, []).append(_p)
+            if _p.data_key:
+                _by_key.setdefault(_p.data_key, []).append(_p)
+        _used = set()
+
+        def _pair_for(key):
+            for _p in _by_key.get(key, ()):
+                if (_p.id, key) not in _used:
+                    _used.add((_p.id, key))
+                    return _p
+            return None
+
+        # bank side: a paired bank row the report left open becomes 'Manual Matched'
+        _rec_by_id = {r["_id"]: r for r in bank_recs}
+        for b in bank:
+            rec = _rec_by_id.get(b.id)
+            if not rec or rec["Match Status"] not in ("Unmatched", "Unmatched Settlement", "No Txn Number"):
+                continue
+            mp = _pair_for(_bank_descriptor(b)["key"])
+            if not mp:
+                continue
+            prior = rec["Match Status"]
+            rec["Match Status"] = "Manual Matched"
+            rec["Matched Source File"] = f"Manual: {mp.data_source or 'internal'}"
+            rec["Matched Transaction Type"] = mp.data_source or ""
+            rec["Source Amount"] = mp.data_amount if mp.data_amount is not None else ""
+            rec["Amount Match"] = "Yes" if abs((mp.bank_amount or 0) - (mp.data_amount or 0)) <= TOL else "No"
+            if prior == "Unmatched":
+                n_ref_not_found -= 1
+            elif prior == "No Txn Number":
+                n_no_ref -= 1
+            elif prior == "Unmatched Settlement":
+                n_settle_open -= 1
+            n_matched += 1
+
+        # source side (Txn Report legs): a paired source row becomes 'Manual Matched'
+        for _j, s in enumerate(src):
+            rec = source_recs[_j]
+            if rec["Match Status"] != "Unmatched":
+                continue
+            mp = _pair_for(_data_descriptor(s, "Txn Report")["key"])
+            if not mp:
+                continue
+            rec["Match Status"] = "Manual Matched"
+            rec["Matched Bank Stmt Row"] = "manual"
+            pp = per_product.get(rec["product"])
+            if pp:
+                pp["unmatched"] = max(0, pp.get("unmatched", 0) - 1)
+                pp["unmatched_success"] = max(0, pp.get("unmatched_success", 0) - 1)
+                pp["matched"] = pp.get("matched", 0) + 1
+
     totals = {
         "bank_total": len(bank),
         "bank_with_ref": n_with_ref,
@@ -431,7 +495,7 @@ def _highlight_by_match(ws, rows, match_col_idx, status_col_idx):
         ms = r.get("Match Status", "")
         st = (r.get("Status", "") or "").lower()
         key = None
-        if ms in ("Matched", "Matched (Settlement)"):
+        if ms in ("Matched", "Matched (Settlement)", "Manual Matched"):
             key = "g"
         elif ms == "Not Applicable":
             key = "x"

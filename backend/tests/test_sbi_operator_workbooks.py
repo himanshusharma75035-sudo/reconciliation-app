@@ -22,7 +22,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from models.database import (Base, SBIBankTransaction, SBIKOLimits, SBIP01Result,
+from models.database import (Base, User, SBIBankTransaction, SBIKOLimits, SBIP01Result,
                              SBITxnReport)
 from core.sbi_reports import (build_reconciliation_report,
                               build_reconciliation_report_range,
@@ -168,6 +168,33 @@ def test_failed_source_row_is_closed_not_unmatched(db):
     assert ms[R2] == "Unmatched" and ms["61960000000000009999"] == "Failed"
     # the failure is NOT in the "Unmatched Source Records" review list
     assert all(r["Reference Number"] != "61960000000000009999" for r in rep["unmatched_source"])
+
+
+def test_manual_pair_shows_as_matched_in_operator_report(db):
+    # Rajendra 2026-08: a manually-paired bank+source row must read 'Manual Matched' in the
+    # operator workbook and DROP OUT of the unmatched review lists. reconcile() re-derives
+    # matches by ref and can't see the pair overlay — the overlay is applied read-time here.
+    from core.sbi_reports import reconcile
+    from routes.sbi_kiosk import create_manual_pairs, ManualPairBulkIn, ManualPairIn
+    U = User(id="u1", username="raj", role="user", permissions='{"src_assign": true}')
+    BR, SR = "62101614158300009999", "62101614158300008888"     # two distinct 20-digit refs
+    _bank(db, D1, ref=BR, debit=500.0, desc=f"POS {BR}")        # unmatched bank row
+    _src(db, D1, SR, 500.0, status="Success")                   # unmatched Success source row
+    db.commit()
+    b = db.query(SBIBankTransaction).filter(SBIBankTransaction.ref_number == BR).first()
+    t = db.query(SBITxnReport).filter(SBITxnReport.reference_number == SR).first()
+    rep0 = reconcile(db, D1)                                     # before pairing: both open
+    assert next(r for r in rep0["bank_recs"] if r["Extracted Txn No. (20-digit)"] == BR)["Match Status"] == "Unmatched"
+    assert next(r for r in rep0["source_recs"] if r["Reference Number"] == SR)["Match Status"] == "Unmatched"
+    create_manual_pairs(ManualPairBulkIn(
+        pairs=[ManualPairIn(bank_id=b.id, data_id=t.id, data_source="Txn Report")],
+        remark="operator confirmed"), db=db, current_user=U)
+    rep = reconcile(db, D1)                                      # after pairing
+    assert next(r for r in rep["bank_recs"] if r["Extracted Txn No. (20-digit)"] == BR)["Match Status"] == "Manual Matched"
+    assert next(r for r in rep["source_recs"] if r["Reference Number"] == SR)["Match Status"] == "Manual Matched"
+    # both leave the review lists
+    assert all(r["Extracted Txn No. (20-digit)"] != BR for r in rep["unmatched_bank"])
+    assert all(r["Reference Number"] != SR for r in rep["unmatched_source"])
 
 
 def test_partial_ko_settlement_is_per_row_not_partial(db):
