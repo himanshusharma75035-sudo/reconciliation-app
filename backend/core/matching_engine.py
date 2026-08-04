@@ -1107,6 +1107,10 @@ def assign_src(transaction_id: str, src_code: str, src_note: str, db: Session) -
     txn = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not txn:
         raise ValueError(f"Transaction {transaction_id} not found")
+    # Remember the status BEFORE tagging so remove-src can revert to it. Guard against
+    # re-tagging an already-src_assigned row (would otherwise overwrite the true prior status).
+    if txn.recon_status != ReconStatus.src_assigned:
+        txn.prev_recon_status = str(txn.recon_status)
     txn.src_code = src_code
     txn.src_note = src_note
     txn.recon_status = ReconStatus.src_assigned

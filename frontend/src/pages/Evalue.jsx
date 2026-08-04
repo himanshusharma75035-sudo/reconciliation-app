@@ -244,6 +244,11 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
       ] },
     action: async (v) => { const { data } = await api.post('/evalue/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); if (!mcQueued(data)) toast.success(`SRC assigned: ${data.src_code}`) },
   })
+  const removeSrc = async (row) => {
+    if (!window.confirm(`Remove SRC from ${row.eko_trxn_id || row.utr || row.id}?\n\nIt reverts to the status it held before the tag.`)) return
+    try { const { data } = await api.post('/evalue/remove-src', { id: row.id, side: row._side }); if (!mcQueued(data)) toast.success('SRC removed'); reload() }
+    catch (e) { toast.error(e.response?.data?.detail || 'Remove failed') }
+  }
   const runModal = async (v) => {
     setModalBusy(true)
     try { await modal.action(v); setModal(null); reload() }
@@ -317,7 +322,7 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
                   <span className="text-[11px] text-gray-400">Bank statement &amp; wallet loads shown together · {rows.length} rows</span>
                 </div>
                 {loadingRows ? <p className="text-xs text-gray-400 py-4 text-center">Loading…</p>
-                  : <RowsTable rows={rows} onUnmatch={unmatch} onOverride={override} onAssignSrc={assignSrc} />}
+                  : <RowsTable rows={rows} onUnmatch={unmatch} onOverride={override} onAssignSrc={assignSrc} onRemoveSrc={removeSrc} />}
               </div>
             )}
           </div>
@@ -564,7 +569,7 @@ function Pill({ n, s }) {
   return <span className={`px-2 py-0.5 rounded-full ${m.cls}`}>{m.label}: {n}</span>
 }
 
-function RowsTable({ rows, onUnmatch, onOverride, onAssignSrc }) {
+function RowsTable({ rows, onUnmatch, onOverride, onAssignSrc, onRemoveSrc }) {
   const [colF, setColF] = useState({ side: '', detail: '', ref: '', match_id: '', recon: '' })
   const _kw = (v) => (v || '').split(/[\s,]+/).map(s => s.trim().toLowerCase()).filter(Boolean)
   const _hit = (cell, q) => { const ks = _kw(q); return !ks.length || ks.some(k => String(cell ?? '').toLowerCase().includes(k)) }
@@ -626,6 +631,8 @@ function RowsTable({ rows, onUnmatch, onOverride, onAssignSrc }) {
                     <button title="Override status" onClick={() => onOverride(r)} className="p-1 rounded hover:bg-amber-50 text-amber-600"><Tag size={12} /></button>
                     {SRC_STATUSES.includes(r.recon_status) &&
                       <button title="Assign SRC" onClick={() => onAssignSrc(r)} className="p-1 rounded hover:bg-yellow-50 text-yellow-600"><Coins size={12} /></button>}
+                    {r.src_code &&
+                      <button title="Remove SRC" onClick={() => onRemoveSrc(r)} className="p-1 rounded hover:bg-gray-100 text-gray-500 text-[11px] font-bold leading-none">✕</button>}
                   </div>
                 </td>
               </tr>

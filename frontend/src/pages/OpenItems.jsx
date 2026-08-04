@@ -185,6 +185,21 @@ export default function OpenItems() {
     } catch { toast.error('Failed') }
   }
 
+  // ── Remove SRC (revert the row to its status before the tag) ───────────────
+  const handleRemoveSrc = async () => {
+    try {
+      const it = srcModal
+      if (it.partner === 'evalue' || it.partner === 'bbps') {
+        await api.post(`/${it.partner}/remove-src`, { id: it.id, side: it.side })
+      } else {
+        await api.post('/recon/remove-src', { transaction_id: it.id })
+      }
+      toast.success('SRC removed')
+      setSrcModal(null)
+      load(page)
+    } catch (e) { toast.error(e.response?.data?.detail || 'Failed') }
+  }
+
   // ── Edit identifiers (TID / Tracking-RRN / UTR) — core ledger, un-matched only ──
   // Override-gated; the backend blocks matched rows and audits every change old→new.
   const MODULE_PARTNERS = new Set(['evalue', 'bbps'])
@@ -243,6 +258,38 @@ export default function OpenItems() {
       setBulkForm({ src_code: '', src_note: '' })
       load(page)
     } catch { toast.error('Bulk SRC failed') }
+    finally { setBulkSaving(false) }
+  }
+
+  // ── Bulk remove SRC (each row reverts to its own prior status) ─────────────
+  const handleBulkRemoveSrc = async () => {
+    setBulkSaving(true)
+    try {
+      const byProduct = { core: [], evalue: [], bbps: [] }
+      const sideById = {}
+      for (const it of items) {
+        if (!selected.has(it.id)) continue
+        const p = (it.partner === 'evalue' || it.partner === 'bbps') ? it.partner : 'core'
+        byProduct[p].push(it.id); sideById[it.id] = it.side
+      }
+      let reverted = 0
+      if (byProduct.core.length) {
+        const { data } = await api.post('/recon/remove-src-bulk', { transaction_ids: byProduct.core })
+        reverted += data.reverted || 0
+      }
+      for (const prod of ['evalue', 'bbps']) {
+        if (!byProduct[prod].length) continue
+        const bySide = {}
+        for (const id of byProduct[prod]) { const s = sideById[id]; (bySide[s] = bySide[s] || []).push(id) }
+        for (const [side, ids] of Object.entries(bySide)) {
+          const { data } = await api.post(`/${prod}/remove-src-bulk`, { ids, side })
+          reverted += data.reverted || 0
+        }
+      }
+      toast.success(`SRC removed from ${reverted} item(s)`)
+      setBulkSrcOpen(false)
+      load(page)
+    } catch { toast.error('Bulk remove SRC failed') }
     finally { setBulkSaving(false) }
   }
 
@@ -346,6 +393,11 @@ export default function OpenItems() {
               <button onClick={() => setBulkSrcOpen(true)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-yellow-50 text-yellow-700 hover:bg-yellow-100 border border-yellow-200 transition-colors">
                 <Tags size={14} /> Assign SRC ({selected.size})
+              </button>
+              <button onClick={() => { if (window.confirm(`Remove SRC from ${selected.size} selected item(s)? Each reverts to its status before the tag.`)) handleBulkRemoveSrc() }}
+                disabled={bulkSaving}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200 transition-colors disabled:opacity-50">
+                <Tags size={14} /> Remove SRC ({selected.size})
               </button>
               {hasOverride && (
                 <button onClick={() => setBulkOverrideOpen(true)}
@@ -619,7 +671,7 @@ export default function OpenItems() {
                             onClick={() => { setSrcModal(item); setSrcForm({ src_code: item.src_code || '', src_note: item.src_note || '' }) }}
                             className="text-xs text-primary hover:underline flex items-center gap-1"
                           >
-                            <Tag size={12} /> Assign SRC
+                            <Tag size={12} /> {item.src_code ? 'Edit / Remove SRC' : 'Assign SRC'}
                           </button>
                         )}
                         {canEditIds(item) && (
@@ -706,7 +758,7 @@ export default function OpenItems() {
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-gray-800">Assign Special Reason Code</h3>
+              <h3 className="font-semibold text-gray-800">{srcModal.src_code ? 'Edit' : 'Assign'} Special Reason Code</h3>
               <button onClick={() => setSrcModal(null)} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
             </div>
             <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-600 mb-4 space-y-1">
@@ -729,8 +781,10 @@ export default function OpenItems() {
               </div>
             </div>
             <div className="flex gap-3 mt-4">
+              {srcModal.src_code &&
+                <button onClick={handleRemoveSrc} className="btn-ghost text-red-600 hover:bg-red-50">Remove SRC</button>}
               <button onClick={() => setSrcModal(null)} className="btn-ghost flex-1">Cancel</button>
-              <button onClick={handleAssignSrc} className="btn-primary flex-1">Assign SRC</button>
+              <button onClick={handleAssignSrc} className="btn-primary flex-1">{srcModal.src_code ? 'Update SRC' : 'Assign SRC'}</button>
             </div>
           </div>
         </div>

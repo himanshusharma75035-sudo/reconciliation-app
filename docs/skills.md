@@ -420,6 +420,7 @@ Concrete, reusable, and each one cost real time.
 | De-dup "drop the internal leg" | Zeroes out internal self-matches (they have no bank leg) | Exempt them |
 | Blended health metric | One product masks another's failure | Per-product, name the worst |
 | Aggregations that query one ledger | New products silently missing everywhere | One shared aggregator |
+| A reversible disposition that overwrites the prior status | A tag (SRC/hold/etc.) that sets `status='tagged'` with no memory of what it replaced can't be undone to the *exact* prior state — revert has to guess ("→ unmatched"), silently reclassifying an `amount_mismatch` or `matched` row | Record `prev_status` at tag time (guarded, so a re-tag doesn't overwrite the real prior with `tagged`); revert restores it, falling back to the product's unmatched sentinel only for legacy rows tagged before prev was recorded or a corrupt self-referential prev. For a **read-time overlay** disposition (SBI keys tags by match_key, not a column), revert is just deleting the overlay row — the underlying status was never touched |
 | Deploying JS without CSS | App loads fully unstyled; naive checks pass | Upload all assets, fetch each, assert 200 |
 | Copying a directory over | Perms reset → every asset 404s, files look fine | Copy files in; verify dir mode |
 | Cached entry HTML | Users run the old bundle; your fix "didn't work" | `no-cache` the entry point |

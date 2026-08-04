@@ -251,6 +251,21 @@ function ProductReconTab({ slug, partners }) {
       },
     })
   }
+  const removeSrcRow = async (row) => {
+    if (!window.confirm(`Remove SRC from ${row.eko_tid || row.id}?\n\nIt reverts to the status it held before the tag.`)) return
+    try {
+      await api.post('/recon/remove-src', { transaction_id: row.id })
+      toast.success('SRC removed'); fetchRows()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Remove failed') }
+  }
+  const bulkRemoveSrc = async () => {
+    const ids = [...selected]; if (!ids.length) return
+    if (!window.confirm(`Remove SRC from ${ids.length} selected row(s)?\n\nEach reverts to its status before the tag.`)) return
+    try {
+      const { data } = await api.post('/recon/remove-src-bulk', { transaction_ids: ids })
+      toast.success(`SRC removed from ${data.reverted ?? ids.length} rows`); clearSel(); fetchRows()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Bulk remove failed') }
+  }
   const bulkDelete = async () => {
     const ids = [...selected]; if (!ids.length) return
     if (!window.confirm(`Delete ${ids.length} selected row(s)?\n\nMatched counterparts are safely reverted to unmatched, and the rows go to the Recycle Bin (restorable for 30 days).`)) return
@@ -568,6 +583,7 @@ function ProductReconTab({ slug, partners }) {
             <span className="text-xs font-medium text-primary">{selected.size} selected</span>
             <button onClick={bulkAssign} className="px-3 py-1 rounded text-xs font-medium bg-indigo-600 text-white hover:bg-indigo-700">Assign owner</button>
             <button onClick={bulkSrc} className="px-3 py-1 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-700">Bulk assign SRC</button>
+            <button onClick={bulkRemoveSrc} className="px-3 py-1 rounded text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200">Bulk remove SRC</button>
             <button onClick={bulkOverride} className="px-3 py-1 rounded text-xs font-medium bg-amber-600 text-white hover:bg-amber-700">Bulk override status</button>
             <button onClick={bulkDelete} className="px-3 py-1 rounded text-xs font-medium bg-red-600 text-white hover:bg-red-700">Delete selected</button>
             <button onClick={clearSel} className="text-xs text-gray-500 hover:text-gray-700 ml-auto">Clear</button>
@@ -654,6 +670,8 @@ function ProductReconTab({ slug, partners }) {
                   <button title="Assign owner" onClick={() => assignRow(r)} className="p-1 rounded hover:bg-indigo-50 text-indigo-600"><UserPlus size={12} /></button>
                   <button title="Override status" onClick={() => overrideRow(r)} className="p-1 rounded hover:bg-amber-50 text-amber-600"><Tag size={12} /></button>
                   <button title="Assign SRC" onClick={() => assignSrcRow(r)} className="p-1 rounded hover:bg-blue-50 text-blue-600"><GitMerge size={12} /></button>
+                  {(r.recon_status === 'src_assigned' || r.src_code) &&
+                    <button title="Remove SRC" onClick={() => removeSrcRow(r)} className="p-1 rounded hover:bg-gray-100 text-gray-500 text-[11px] font-bold leading-none">✕</button>}
                 </div></td>
               </tr>
             ))}</tbody>

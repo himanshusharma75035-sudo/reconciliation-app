@@ -811,6 +811,8 @@ def do_assign_src_bulk(req: BulkSRCRequest, db: Session = Depends(get_db),
     ).all()
 
     for txn in txns:
+        if txn.recon_status != ReconStatus.src_assigned:
+            txn.prev_recon_status = str(txn.recon_status)   # for remove-src revert
         txn.src_code    = req.src_code
         txn.src_note    = req.src_note
         txn.recon_status = ReconStatus.src_assigned
@@ -821,6 +823,68 @@ def do_assign_src_bulk(req: BulkSRCRequest, db: Session = Depends(get_db),
         "transaction_ids": req.transaction_ids[:20]   # cap log size
     })
     return {"updated": len(txns), "src_code": req.src_code}
+
+
+class SRCRemoveRequest(BaseModel):
+    transaction_id: str
+
+
+class BulkSRCRemoveRequest(BaseModel):
+    transaction_ids: List[str]
+
+
+@router.post("/remove-src")
+def do_remove_src(req: SRCRemoveRequest, db: Session = Depends(get_db),
+                  current_user: User = Depends(require_permission("src_assign"))):
+    """Remove an SRC tag and revert the transaction to the status it held BEFORE the tag
+    (falls back to 'unmatched' for rows tagged before prev-status was recorded). Covers every
+    core-ledger product — DMT, AePS, IndoNepal, QR, PG, digikhata, and any future partner."""
+    txn = db.query(Transaction).filter(Transaction.id == req.transaction_id).first()
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if txn.recon_status != ReconStatus.src_assigned:
+        raise HTTPException(status_code=400, detail="Transaction is not SRC-tagged")
+    prev = txn.prev_recon_status
+    if not prev or prev == ReconStatus.src_assigned:
+        prev = ReconStatus.unmatched
+    old_code = txn.src_code
+    txn.recon_status      = prev
+    txn.src_code          = None
+    txn.src_note          = None
+    txn.prev_recon_status = None
+    txn.override_by       = current_user.username
+    txn.override_at       = datetime.datetime.utcnow()
+    db.commit()
+    _log(db, current_user, "remove_src", "transaction", txn.id,
+         {"reverted_to": str(prev), "removed_src_code": old_code})
+    return {"message": "SRC removed", "transaction_id": txn.id, "reverted_to": str(prev)}
+
+
+@router.post("/remove-src-bulk")
+def do_remove_src_bulk(req: BulkSRCRemoveRequest, db: Session = Depends(get_db),
+                       current_user: User = Depends(require_permission("src_assign"))):
+    """Remove SRC tags from many transactions at once; each reverts to its OWN prior status
+    (else 'unmatched'). Only src_assigned rows are touched."""
+    if not req.transaction_ids:
+        raise HTTPException(status_code=400, detail="No transaction IDs provided")
+    txns = db.query(Transaction).filter(
+        Transaction.id.in_(req.transaction_ids),
+        Transaction.recon_status == ReconStatus.src_assigned
+    ).all()
+    for txn in txns:
+        prev = txn.prev_recon_status
+        if not prev or prev == ReconStatus.src_assigned:
+            prev = ReconStatus.unmatched
+        txn.recon_status      = prev
+        txn.src_code          = None
+        txn.src_note          = None
+        txn.prev_recon_status = None
+        txn.override_by       = current_user.username
+        txn.override_at       = datetime.datetime.utcnow()
+    db.commit()
+    _log(db, current_user, "bulk_remove_src", "transaction",
+         detail={"count": len(txns), "transaction_ids": req.transaction_ids[:20]})
+    return {"reverted": len(txns)}
 
 @router.post("/manual-match")
 def do_manual_match(req: ManualMatchRequest, db: Session = Depends(get_db),

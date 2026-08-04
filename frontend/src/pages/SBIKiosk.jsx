@@ -257,21 +257,30 @@ const mcQueued = (data) => {
 
 function SrcModal({ process, procLabel, row, summary, onClose, onDone }) {
   const srcCodes = useSrcCodes()
-  const [form, setForm] = useState({ src_code: '', src_note: '' })
+  const tagged = !!row.src_code
+  const [form, setForm] = useState({ src_code: row.src_code || '', src_note: row.src_note || '' })
   const [saving, setSaving] = useState(false)
   const submit = async () => {
     if (!form.src_code) { toast.error('Pick a reason code'); return }
     setSaving(true)
     try {
       await api.post('/sbi/assign-src', { process, result_id: row.id, src_code: form.src_code, src_note: form.src_note?.trim() || null })
-      toast.success('SRC assigned'); onDone()
+      toast.success(tagged ? 'SRC updated' : 'SRC assigned'); onDone()
     } catch (e) { toast.error(e.response?.data?.detail || 'Assign SRC failed') }
+    finally { setSaving(false) }
+  }
+  const remove = async () => {
+    setSaving(true)
+    try {
+      await api.post('/sbi/remove-src', { process, result_id: row.id })
+      toast.success('SRC removed'); onDone()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Remove SRC failed') }
     finally { setSaving(false) }
   }
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-5" onClick={e => e.stopPropagation()}>
-        <h3 className="font-semibold text-gray-800 mb-1">Assign SRC — {procLabel}</h3>
+        <h3 className="font-semibold text-gray-800 mb-1">{tagged ? 'Edit' : 'Assign'} SRC — {procLabel}</h3>
         <p className="text-xs text-gray-500 mb-3">{summary} Tags this unmatched row with a disposition reason for reporting. <strong>Persists across re-runs.</strong></p>
         <label className="text-xs text-gray-500 block mb-1">Reason code (required)</label>
         <select className="select w-full mb-3" value={form.src_code} onChange={e => setForm({ ...form, src_code: e.target.value })}>
@@ -280,9 +289,14 @@ function SrcModal({ process, procLabel, row, summary, onClose, onDone }) {
         </select>
         <label className="text-xs text-gray-500 block mb-1">Note (optional)</label>
         <textarea className="input w-full mb-4" rows={3} value={form.src_note} onChange={e => setForm({ ...form, src_note: e.target.value })} placeholder="Optional context for this disposition" />
-        <div className="flex justify-end gap-2">
-          <button onClick={onClose} className="btn-ghost">Cancel</button>
-          <button onClick={submit} disabled={saving} className="btn-primary">{saving ? 'Saving…' : 'Assign SRC'}</button>
+        <div className="flex justify-between gap-2">
+          {tagged
+            ? <button onClick={remove} disabled={saving} className="btn-ghost text-red-600 hover:bg-red-50">Remove SRC</button>
+            : <span />}
+          <div className="flex gap-2">
+            <button onClick={onClose} className="btn-ghost">Cancel</button>
+            <button onClick={submit} disabled={saving} className="btn-primary">{saving ? 'Saving…' : (tagged ? 'Update SRC' : 'Assign SRC')}</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1145,6 +1159,20 @@ function UnifiedTab({ reconDate, setReconDate }) {
     } catch (e) { toast.error(e.response?.data?.detail || 'Bulk SRC failed') }
     finally { setBulkBusy(false) }
   }
+  // Bulk REMOVE: clear the SRC tag from every tagged row currently in view.
+  const removable = rows.filter(r => r.result_process && r.result_id && r.src_code)
+  const applyBulkRemoveSrc = async () => {
+    if (!removable.length) return toast.error('No SRC-tagged rows in view')
+    if (!window.confirm(`Remove SRC from ${removable.length} tagged row(s) in view?`)) return
+    setBulkBusy(true)
+    try {
+      const items = removable.map(r => ({ process: r.result_process, result_id: r.result_id }))
+      const { data: res } = await api.post('/sbi/remove-src-bulk', { items })
+      toast.success(`Removed SRC from ${res.removed} row${res.removed === 1 ? '' : 's'}` + (res.skipped ? ` · ${res.skipped} skipped` : ''))
+      setBulkOpen(false); load()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Bulk remove failed') }
+    finally { setBulkBusy(false) }
+  }
 
   return (
     <div>
@@ -1282,9 +1310,14 @@ function UnifiedTab({ reconDate, setReconDate }) {
             </select>
             <label className="text-xs text-gray-500 block mb-1">Note (optional)</label>
             <textarea className="input w-full mb-4" rows={2} value={bulkNote} onChange={e => setBulkNote(e.target.value)} placeholder="Optional context for this disposition" />
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setBulkOpen(false)} className="btn-ghost">Cancel</button>
-              <button onClick={applyBulkSrc} disabled={bulkBusy || !bulkCode} className="btn-primary">{bulkBusy ? 'Tagging…' : `Tag ${taggable.length}`}</button>
+            <div className="flex justify-between gap-2">
+              {removable.length > 0
+                ? <button onClick={applyBulkRemoveSrc} disabled={bulkBusy} className="btn-ghost text-red-600 hover:bg-red-50">{bulkBusy ? '…' : `Remove SRC (${removable.length})`}</button>
+                : <span />}
+              <div className="flex gap-2">
+                <button onClick={() => setBulkOpen(false)} className="btn-ghost">Cancel</button>
+                <button onClick={applyBulkSrc} disabled={bulkBusy || !bulkCode} className="btn-primary">{bulkBusy ? 'Tagging…' : `Tag ${taggable.length}`}</button>
+              </div>
             </div>
           </div>
         </div>

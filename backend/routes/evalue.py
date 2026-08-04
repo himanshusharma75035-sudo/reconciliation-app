@@ -886,6 +886,81 @@ def assign_src_bulk(body: EvalueBulkSRCIn, db: Session = Depends(get_db), user=D
     return {"updated": len(rows), "src_code": body.src_code}
 
 
+class EvalueSRCRemoveIn(BaseModel):
+    id: str
+    side: str            # bank | internal (wallet load)
+
+
+class EvalueBulkSRCRemoveIn(BaseModel):
+    ids: list
+    side: str
+
+
+def _ev_open_default(side):
+    return "unmatched_bank" if side == "bank" else "unmatched_load"
+
+
+@router.post("/remove-src")
+def remove_src(body: EvalueSRCRemoveIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Remove the SRC tag from one E-Value row and revert it to the status it held before the
+    tag (falls back to unmatched_bank / unmatched_load for pre-existing rows)."""
+    Model = EvalueBankTxn if body.side == "bank" else EvalueWalletLoad
+    row = db.query(Model).filter(Model.id == body.id).first()
+    if not row:
+        raise HTTPException(404, "Row not found")
+    if row.recon_status != "src_assigned":
+        raise HTTPException(400, "Row is not SRC-tagged")
+    queued = maker_checker.intercept(
+        db, user, "evalue_remove_src",
+        payload={"id": body.id, "side": body.side},
+        summary=f"E-Value remove SRC -> {body.side} {body.id}", partner="evalue")
+    if queued:
+        return queued
+    prev = row.prev_recon_status
+    if not prev or prev == "src_assigned":
+        prev = _ev_open_default(body.side)
+    old_code = row.src_code
+    row.recon_status = prev
+    row.src_code = None
+    row.src_note = None
+    row.prev_recon_status = None
+    row.override_by = getattr(user, "username", None)
+    row.override_at = datetime.datetime.utcnow()
+    _ev_audit(db, user, "evalue_remove_src",
+              {"id": body.id, "side": body.side, "reverted_to": prev, "removed_src_code": old_code},
+              entity_id=body.id)
+    db.commit()
+    return {"message": "SRC removed", "id": body.id, "reverted_to": prev}
+
+
+@router.post("/remove-src-bulk")
+def remove_src_bulk(body: EvalueBulkSRCRemoveIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Remove SRC tags from many E-Value rows; each reverts to its own prior status."""
+    Model = EvalueBankTxn if body.side == "bank" else EvalueWalletLoad
+    rows = db.query(Model).filter(Model.id.in_(body.ids or []),
+                                  Model.recon_status == "src_assigned").all()
+    queued = maker_checker.intercept(
+        db, user, "evalue_remove_src_bulk",
+        payload={"ids": body.ids, "side": body.side},
+        summary=f"E-Value remove SRC -> {len(body.ids or [])} {body.side} rows", partner="evalue")
+    if queued:
+        return queued
+    default = _ev_open_default(body.side)
+    for row in rows:
+        prev = row.prev_recon_status
+        if not prev or prev == "src_assigned":
+            prev = default
+        row.recon_status = prev
+        row.src_code = None
+        row.src_note = None
+        row.prev_recon_status = None
+        row.override_by = getattr(user, "username", None)
+        row.override_at = datetime.datetime.utcnow()
+    _ev_audit(db, user, "evalue_remove_src_bulk", {"side": body.side, "count": len(rows)})
+    db.commit()
+    return {"reverted": len(rows), "side": body.side}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  CROSS-PRODUCT INTERBANK MATCHING
 #  An E-Value bank entry can correspond to a transfer that appears as a credit /

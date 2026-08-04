@@ -193,6 +193,11 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
       ] },
     action: async (v) => { const { data } = await api.post('/bbps/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); if (!mcQueued(data)) toast.success(`SRC assigned: ${data.src_code}`) },
   })
+  const removeSrc = async (row) => {
+    if (!window.confirm(`Remove SRC from ${row.client_ref || row.eko_trxn_id || row.id}?\n\nIt reverts to the status it held before the tag.`)) return
+    try { const { data } = await api.post('/bbps/remove-src', { id: row.id, side: row._side }); if (!mcQueued(data)) toast.success('SRC removed'); fetchRows(); refresh() }
+    catch (e) { toast.error(e.response?.data?.detail || 'Remove failed') }
+  }
   const runModal = async (v) => {
     setModalBusy(true)
     try { await modal.action(v); setModal(null); fetchRows(); refresh() }
@@ -292,6 +297,7 @@ function ReconView({ summary, refresh, exportXlsx, runRecon, busy, dates, setDat
                     {r.match_id && <button title="Unmatch" onClick={() => unmatch(r.match_id)} className="p-1 rounded hover:bg-red-50 text-red-500"><Undo2 size={12} /></button>}
                     <button title="Override" onClick={() => override(r)} className="p-1 rounded hover:bg-amber-50 text-amber-600"><Tag size={12} /></button>
                     {SRC_ASSIGNABLE.includes(r.recon_status) && <button title="Assign SRC" onClick={() => assignSrc(r)} className="p-1 rounded hover:bg-yellow-50 text-yellow-700"><Tags size={12} /></button>}
+                    {r.src_code && <button title="Remove SRC" onClick={() => removeSrc(r)} className="p-1 rounded hover:bg-gray-100 text-gray-500 text-[11px] font-bold leading-none">✕</button>}
                   </div></td>
                 </tr>
               )

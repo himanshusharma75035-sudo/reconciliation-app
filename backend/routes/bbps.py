@@ -435,3 +435,78 @@ def assign_src_bulk(body: BbpsBulkSRCIn, db: Session = Depends(get_db), user=Dep
     _audit(db, user, "bbps_assign_src_bulk", {"side": body.side, "src_code": body.src_code, "count": len(rows)})
     db.commit()
     return {"updated": len(rows), "src_code": body.src_code}
+
+
+class BbpsSRCRemoveIn(BaseModel):
+    id: str
+    side: str            # bank | internal
+
+
+class BbpsBulkSRCRemoveIn(BaseModel):
+    ids: list
+    side: str
+
+
+def _bbps_open_default(side):
+    return "unmatched_bank" if side == "bank" else "unmatched_internal"
+
+
+@router.post("/remove-src")
+def remove_src(body: BbpsSRCRemoveIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Remove the SRC tag from one BBPS row and revert it to the status it held before the tag
+    (falls back to unmatched_bank / unmatched_internal for pre-existing rows)."""
+    Model = BbpsBankTxn if body.side == "bank" else BbpsInternal
+    row = db.query(Model).filter(Model.id == body.id).first()
+    if not row:
+        raise HTTPException(404, "Row not found")
+    if row.recon_status != "src_assigned":
+        raise HTTPException(400, "Row is not SRC-tagged")
+    queued = maker_checker.intercept(
+        db, user, "bbps_remove_src",
+        payload={"id": body.id, "side": body.side},
+        summary=f"BBPS remove SRC -> {body.side} {body.id}", partner="bbps")
+    if queued:
+        return queued
+    prev = row.prev_recon_status
+    if not prev or prev == "src_assigned":
+        prev = _bbps_open_default(body.side)
+    old_code = row.src_code
+    row.recon_status = prev
+    row.src_code = None
+    row.src_note = None
+    row.prev_recon_status = None
+    row.override_by = getattr(user, "username", None)
+    row.override_at = datetime.datetime.utcnow()
+    _audit(db, user, "bbps_remove_src",
+           {"id": body.id, "side": body.side, "reverted_to": prev, "removed_src_code": old_code},
+           entity_id=body.id)
+    db.commit()
+    return {"message": "SRC removed", "id": body.id, "reverted_to": prev}
+
+
+@router.post("/remove-src-bulk")
+def remove_src_bulk(body: BbpsBulkSRCRemoveIn, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """Remove SRC tags from many BBPS rows; each reverts to its own prior status."""
+    Model = BbpsBankTxn if body.side == "bank" else BbpsInternal
+    rows = db.query(Model).filter(Model.id.in_(body.ids or []),
+                                  Model.recon_status == "src_assigned").all()
+    queued = maker_checker.intercept(
+        db, user, "bbps_remove_src_bulk",
+        payload={"ids": body.ids, "side": body.side},
+        summary=f"BBPS remove SRC -> {len(body.ids or [])} {body.side} rows", partner="bbps")
+    if queued:
+        return queued
+    default = _bbps_open_default(body.side)
+    for row in rows:
+        prev = row.prev_recon_status
+        if not prev or prev == "src_assigned":
+            prev = default
+        row.recon_status = prev
+        row.src_code = None
+        row.src_note = None
+        row.prev_recon_status = None
+        row.override_by = getattr(user, "username", None)
+        row.override_at = datetime.datetime.utcnow()
+    _audit(db, user, "bbps_remove_src_bulk", {"side": body.side, "count": len(rows)})
+    db.commit()
+    return {"reverted": len(rows), "side": body.side}

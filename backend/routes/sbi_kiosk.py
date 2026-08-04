@@ -3497,6 +3497,80 @@ def assign_src_bulk(
     return {"updated": updated, "skipped": skipped, "src_code": body.src_code}
 
 
+class SBISRCRemoveIn(BaseModel):
+    process: str
+    result_id: str
+
+
+class SBIBulkSRCRemoveIn(BaseModel):
+    items: List[SBIBulkSRCItem]   # each {process, result_id}
+
+
+def _sbi_find_src_overlay(db, p, result_id):
+    """Resolve a (process, result_id) to its SBISrcAssignment overlay row, or None."""
+    model = {"p01": SBIP01Result, "p02": SBIP02Result, "p03": SBIP03Result, "p04": SBIP04Result}.get(p)
+    if not model:
+        return None
+    row = db.query(model).filter(model.id == result_id).first()
+    if not row:
+        return None
+    key = _src_key(p, {c.name: getattr(row, c.name) for c in model.__table__.columns})
+    if not key:
+        return None
+    return db.query(SBISrcAssignment).filter(
+        SBISrcAssignment.recon_date == row.recon_date,
+        SBISrcAssignment.process == p,
+        SBISrcAssignment.match_key == key).first()
+
+
+@router.post("/remove-src")
+def remove_src(body: SBISRCRemoveIn, db: Session = Depends(get_db),
+               current_user=Depends(require_permission("src_assign"))):
+    """Remove an SBI SRC tag by (process, result_id) — deletes the overlay so the row reverts
+    to untagged. (SBI SRC is a read-time overlay, so there is no stored status to restore.)"""
+    p = (body.process or "").lower()
+    sa = _sbi_find_src_overlay(db, p, body.result_id)
+    if not sa:
+        raise HTTPException(status_code=404, detail="No SRC tag on this row")
+    sa_id, mk = sa.id, sa.match_key
+    db.delete(sa)
+    try:
+        db.add(AuditLog(user_id=current_user.id, username=current_user.username,
+                        action="sbi_unassign_src", action_type="human", entity_type="sbi", entity_id=sa_id,
+                        detail=json.dumps({"process": p, "result_id": body.result_id, "match_key": mk})))
+    except Exception:
+        pass
+    db.commit()
+    return {"removed": sa_id}
+
+
+@router.post("/remove-src-bulk")
+def remove_src_bulk(body: SBIBulkSRCRemoveIn, db: Session = Depends(get_db),
+                    current_user=Depends(require_permission("src_assign"))):
+    """Remove SBI SRC tags from many rows at once (by process + result_id)."""
+    removed = skipped = 0
+    seen = set()
+    for it in body.items or []:
+        p = (it.process or "").lower()
+        if (p, it.result_id) in seen:
+            continue
+        seen.add((p, it.result_id))
+        sa = _sbi_find_src_overlay(db, p, it.result_id)
+        if not sa:
+            skipped += 1
+            continue
+        db.delete(sa)
+        removed += 1
+    try:
+        db.add(AuditLog(user_id=current_user.id, username=current_user.username,
+                        action="sbi_unassign_src_bulk", action_type="human", entity_type="sbi", entity_id=None,
+                        detail=json.dumps({"removed": removed, "skipped": skipped})))
+    except Exception:
+        pass
+    db.commit()
+    return {"removed": removed, "skipped": skipped}
+
+
 @router.get("/summary")
 def get_summary(
     date_from: Optional[str] = None,
