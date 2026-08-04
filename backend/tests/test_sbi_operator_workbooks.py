@@ -170,6 +170,69 @@ def test_failed_source_row_is_closed_not_unmatched(db):
     assert all(r["Reference Number"] != "61960000000000009999" for r in rep["unmatched_source"])
 
 
+def test_partial_ko_settlement_is_per_row_not_partial(db):
+    """Rajendra 2026-08: on a PARTIAL KO-day (some withdrawals settled, one still open) the
+    Limit & Settlement sheet must resolve EACH withdrawal per-amount — settled ones 'Matched',
+    the open one 'Unmatched' — and NEVER stamp the whole-KO 'Partial' on an individual
+    transaction. That whole-KO label was the report↔app desync (a fully-settled row shown
+    'Partial' in the report while the app showed it Matched). Mirrors matched_amounts exactly."""
+    import json
+    for amt in (50000.0, 60000.0, 70000.0):           # two settle, one stays open
+        db.add(SBIKOLimits(txn_date=D1, txn_datetime=f"{D1} 13:00:00", ko_id="KOP",
+                           txn_type="KO Withdrawal", amount=amt, limit_configured_by="BC1"))
+    db.add(SBIP01Result(recon_date=D1, ko_id="KOP", status="partial",
+                        matched_amounts=json.dumps([50000.0, 60000.0])))
+    _bank(db, D1, debit=50000.0, desc="EKOSETTLEMENT KO deduction", ko_id="KOP",
+          is_settlement=True)
+    db.commit()
+    ls = _wb(build_source_match_report(db, D1))["Limit & Settlement"]
+    labels = {r[_col(ls, "Amount")]: r[_col(ls, "Settlement Status (P01)")]
+              for r in _rows(ls) if r[_col(ls, "KO ID")] == "KOP"}
+    assert labels == {50000.0: "Matched", 60000.0: "Matched", 70000.0: "Unmatched"}
+    assert "Partial" not in labels.values()   # KO is 'partial' by day, no txn row says so
+
+
+def test_partial_ko_duplicate_amounts_resolve_one_each(db):
+    """Two withdrawals of the SAME amount, only one settled → exactly one 'Matched' + one
+    'Unmatched' (the per-(date,KO) counter is consumed across rows), never two Matched."""
+    import json
+    for _ in range(2):
+        db.add(SBIKOLimits(txn_date=D1, txn_datetime=f"{D1} 13:00:00", ko_id="KOD",
+                           txn_type="KO Withdrawal", amount=30000.0, limit_configured_by="BC1"))
+    db.add(SBIP01Result(recon_date=D1, ko_id="KOD", status="partial",
+                        matched_amounts=json.dumps([30000.0])))
+    _bank(db, D1, debit=30000.0, desc="EKOSETTLEMENT KO deduction", ko_id="KOD",
+          is_settlement=True)
+    db.commit()
+    ls = _wb(build_source_match_report(db, D1))["Limit & Settlement"]
+    got = sorted(r[_col(ls, "Settlement Status (P01)")]
+                 for r in _rows(ls) if r[_col(ls, "KO ID")] == "KOD")
+    assert got == ["Matched", "Unmatched"]
+
+
+def test_partial_ko_deposit_row_is_na_not_partial(db):
+    """A KO DEPOSIT on a partial KO-day reads '—' (N/A), never the whole-KO 'Partial' — P01
+    settles only withdrawals, so a deposit has no settlement leg (sweep residual). The KO's two
+    withdrawals still resolve per-amount (one settled, one open)."""
+    import json
+    db.add(SBIKOLimits(txn_date=D1, txn_datetime=f"{D1} 13:00:00", ko_id="KOX",
+                       txn_type="KO Withdrawal", amount=50000.0, limit_configured_by="BC1"))
+    db.add(SBIKOLimits(txn_date=D1, txn_datetime=f"{D1} 13:30:00", ko_id="KOX",
+                       txn_type="KO Withdrawal", amount=70000.0, limit_configured_by="BC1"))
+    db.add(SBIKOLimits(txn_date=D1, txn_datetime=f"{D1} 14:00:00", ko_id="KOX",
+                       txn_type="KO Deposit", amount=90000.0, limit_configured_by="BC1"))
+    db.add(SBIP01Result(recon_date=D1, ko_id="KOX", status="partial",
+                        matched_amounts=json.dumps([50000.0])))
+    _bank(db, D1, debit=50000.0, desc="EKOSETTLEMENT KO deduction", ko_id="KOX",
+          is_settlement=True)
+    db.commit()
+    ls = _wb(build_source_match_report(db, D1))["Limit & Settlement"]
+    byamt = {r[_col(ls, "Amount")]: r[_col(ls, "Settlement Status (P01)")]
+             for r in _rows(ls) if r[_col(ls, "KO ID")] == "KOX"}
+    assert byamt == {50000.0: "Matched", 70000.0: "Unmatched", 90000.0: "—"}
+    assert "Partial" not in byamt.values()   # a KO Deposit must NEVER inherit the whole-KO label
+
+
 # ── 2/3. range: sums + no cross-date matching + duplicates date column ─────────
 def test_range_never_matches_across_dates(db):
     _fixture(db)
@@ -209,9 +272,10 @@ def test_range_source_match_per_date_p01_and_sums(db):
     ls = wb["Limit & Settlement"]
     rows = _rows(ls)
     assert [r[_col(ls, "Sr. No.")] for r in rows] == [1, 2]
-    # same KO, two dates, two DIFFERENT P01 statuses — per-date lookup, no collision
-    assert rows[0][_col(ls, "Settlement Status (P01)")] == "Matched"      # D1 status='matched'
-    assert rows[1][_col(ls, "Settlement Status (P01)")] == "Unmatched"    # D2 status='unmatched'
+    # D1 row is a KO Withdrawal on a matched KO → Matched. D2 row is a KO DEPOSIT: P01 settles
+    # only withdrawals, so a deposit's settlement status is N/A ('—'), never the whole-KO label.
+    assert rows[0][_col(ls, "Settlement Status (P01)")] == "Matched"      # D1 KO Withdrawal, matched
+    assert rows[1][_col(ls, "Settlement Status (P01)")] == "—"            # D2 KO Deposit → N/A
     wd = wb["Withdrawal"]
     ms = {(r[_col(wd, "Reference Number")]): r[_col(wd, "Match Status")] for r in _rows(wd)}
     assert ms[R1] == "Matched" and ms[R3] == "Matched"

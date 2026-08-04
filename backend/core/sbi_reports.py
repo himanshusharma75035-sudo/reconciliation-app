@@ -611,6 +611,41 @@ _P01_LABEL = {"matched": "Matched", "unmatched": "Unmatched", "partial": "Partia
               "EXCESS": "Unmatched", "PARTIAL": "Unmatched"}
 
 
+def _p01_row_label(result, ctr_store, key, txn_type, amount):
+    """Per-ROW P01 settlement label for the Limit & Settlement sheet — the SAME per-amount
+    resolution the app's unified view, P02's deferral and reconcile()'s _p01_settles all use
+    (matched_amounts). So a KO Withdrawal that actually settled reads 'Matched' even while OTHER
+    withdrawals on the same KO-day are still open. 'Partial' is a KO-DAY aggregate and must never
+    tag an individual transaction — that whole-KO label was the report↔app desync Rajendra hit
+    (fully-settled rows shown 'Partial' in the report while the app showed them Matched). P01 pairs
+    ONLY KO Withdrawals, so any other txn_type keeps the KO's aggregate label. Legacy rows with no
+    matched_amounts fall back to the all-or-nothing status. `ctr_store` (per (date, KO)) is consumed
+    across rows so two same-amount withdrawals resolve correctly (one Matched, one Unmatched)."""
+    if result is None:
+        return "—"
+    if (txn_type or "") != "KO Withdrawal":
+        return "—"   # P01 settlement pairs ONLY KO Withdrawals; a KO Deposit / other row has no
+        # settlement leg, so its status is N/A. (Returning the whole-KO label here would leak
+        # 'Partial' onto a deposit row on a partial KO-day — the very thing this must never do.)
+    if key not in ctr_store:
+        import json as _json
+        from collections import Counter as _Counter
+        raw = getattr(result, "matched_amounts", None)
+        try:
+            amts = [round(float(a), 2) for a in _json.loads(raw)] if raw else []
+        except Exception:
+            amts = []
+        ctr_store[key] = _Counter(amts) if amts else None
+    c = ctr_store[key]
+    if c is None:
+        return "Matched" if result.status == "matched" else "Unmatched"
+    a = round(float(amount or 0), 2)
+    if c.get(a, 0) > 0:
+        c[a] -= 1
+        return "Matched"
+    return "Unmatched"
+
+
 def build_source_match_report(db, recon_date: str) -> io.BytesIO:
     return _write_source_match_workbook(db, [reconcile(db, recon_date)])
 
@@ -673,15 +708,19 @@ def _write_source_match_workbook(db, results) -> io.BytesIO:
             d = R["recon_date"]
             ko = (db.query(SBIKOLimits).filter(SBIKOLimits.txn_date == d)
                     .order_by(SBIKOLimits.amount).all())
-            p01 = {r.ko_id: r.status for r in
-                   db.query(SBIP01Result).filter(SBIP01Result.recon_date == d).all()}
+            # Full P01 result per KO (not just the status) so each row resolves per-amount, and a
+            # per-(date,KO) counter store consumed across rows — same as the app / reconcile().
+            p01res = {r.ko_id: r for r in
+                      db.query(SBIP01Result).filter(SBIP01Result.recon_date == d).all()}
+            p01ctr = {}
             ls_rows += [{
                 "Sr. No.": len(ls_rows) + j + 1, "Date of Transaction": r.txn_datetime or "",
                 "Limit Configured By": r.limit_configured_by or "", "KO ID": r.ko_id or "",
                 "Opening Limit": r.opening_limit if r.opening_limit is not None else "",
                 "Type of Transaction": r.txn_type or "", "Amount": r.amount or 0,
                 "Closing Limit": r.closing_limit if r.closing_limit is not None else "",
-                "Settlement Status (P01)": _P01_LABEL.get(p01.get(r.ko_id, ""), p01.get(r.ko_id, "") or "—"),
+                "Settlement Status (P01)": _p01_row_label(
+                    p01res.get(r.ko_id), p01ctr, (d, r.ko_id), r.txn_type, r.amount),
             } for j, r in enumerate(ko)]
         _write_sheet(writer, "Limit & Settlement", ls_rows,
                      ["Sr. No.", "Date of Transaction", "Limit Configured By", "KO ID",

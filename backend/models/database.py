@@ -2153,13 +2153,29 @@ def migrate_sbi_p01_statuses(db):
     (matched / unmatched), effective 2026-07-27. Idempotent — after the first run no
     legacy value remains, so it is a no-op. run_p01 also recomputes each date it runs;
     this covers dates whose source files were cleared and can no longer be re-run, and
-    guarantees NO consumer ever sees a stale CREDITED/PENDING/PARTIAL/EXCESS."""
+    guarantees NO consumer ever sees a stale CREDITED/PENDING/PARTIAL/EXCESS.
+
+    CASE-SENSITIVITY IS LOAD-BEARING: the legacy tokens are UPPERCASE, but the sub-pair
+    matcher (2026-07-31) writes a legitimate LOWERCASE 'partial' status. On MySQL prod the
+    status column is utf8mb4_unicode_ci (case-INSENSITIVE), so a naive `IN ('PARTIAL')` also
+    matches 'partial' and silently flips every sub-pair partial → 'unmatched' on EVERY startup
+    (SQLite dev is case-sensitive, so it never reproduced). Force a binary/case-sensitive match
+    on MySQL so ONLY the uppercase legacy token is caught. matched_amounts is untouched either
+    way, so per-amount readers stayed correct — but the KO-level 'partial' signal was being lost."""
     from models.database import SBIP01Result
+    # On MySQL, compare with a binary collation so 'PARTIAL' can never match 'partial'. SQLite is
+    # already case-sensitive for these ASCII tokens and has no utf8mb4_bin collation, so skip it.
+    col = SBIP01Result.status
     try:
-        n1 = db.query(SBIP01Result).filter(SBIP01Result.status == "CREDITED").update(
+        if db.get_bind().dialect.name == "mysql":
+            col = col.collate("utf8mb4_bin")
+    except Exception:
+        pass
+    try:
+        n1 = db.query(SBIP01Result).filter(col == "CREDITED").update(
             {"status": "matched"}, synchronize_session=False)
         n2 = db.query(SBIP01Result).filter(
-            SBIP01Result.status.in_(["PENDING", "PARTIAL", "EXCESS"])).update(
+            col.in_(["PENDING", "PARTIAL", "EXCESS"])).update(
             {"status": "unmatched"}, synchronize_session=False)
         if n1 or n2:
             db.commit()

@@ -90,3 +90,21 @@ def test_matched_day_count_is_monotonic(db):
     # fully-paired days, same rule as before the change
     res = run_p01(recon_date=RD, db=db, current_user=USER)
     assert res["summary"] == {"matched": 1, "partial": 1, "unmatched": 1}
+
+
+def test_legacy_status_migration_never_touches_lowercase_partial(db):
+    """The legacy relabel must convert UPPERCASE legacy tokens but leave the sub-pair matcher's
+    lowercase 'partial' alone. On MySQL (case-insensitive collation) a naive IN('PARTIAL') also
+    caught 'partial' and wiped it on every restart; the fix forces a case-sensitive match. This
+    locks the intent (SQLite is already case-sensitive, so it guards against a future regression
+    that drops the collate or re-adds 'partial' to the list)."""
+    from models.database import migrate_sbi_p01_statuses
+    db.add(SBIP01Result(recon_date="2026-06-01", ko_id="LOW", status="partial",
+                        matched_amounts=json.dumps([100.0])))
+    db.add(SBIP01Result(recon_date="2026-06-01", ko_id="UP", status="PARTIAL"))   # legacy uppercase
+    db.commit()
+    migrate_sbi_p01_statuses(db)
+    low = db.query(SBIP01Result).filter(SBIP01Result.ko_id == "LOW").one()
+    up = db.query(SBIP01Result).filter(SBIP01Result.ko_id == "UP").one()
+    assert low.status == "partial"       # sub-pair partial survives
+    assert up.status == "unmatched"      # legacy uppercase still folds to the two-state model
