@@ -236,13 +236,19 @@ function ResultsView({ summary, busy, runOne, refresh, dates = { from: '', to: '
     action: async (v) => { const { data } = await api.post('/evalue/override-status', { id: row.id, side: row._side, status: v.status, note: v.note }); if (!mcQueued(data)) toast.success('Status updated') },
   })
   const assignSrc = (row) => setModal({
-    config: { title: 'Assign SRC', confirmLabel: 'Assign',
-      description: `${row.eko_trxn_id || row.utr || row.id} — current status: ${row.recon_status}${row.src_code ? ` · SRC: ${row.src_code}` : ''}`,
+    config: { title: row.src_code ? 'Edit SRC' : 'Assign SRC', confirmLabel: 'Apply',
+      description: `${row.eko_trxn_id || row.utr || row.id} — current status: ${row.recon_status}${row.src_code ? ` · SRC: ${row.src_code} · pick "No SRC" to remove` : ''}`,
       fields: [
-        { name: 'src_code', label: 'SRC code', type: 'select', options: srcCodes, required: true, default: row.src_code || 'UNCLAIMED' },
+        // "No SRC" (only when already tagged) removes the tag — the row reverts to its prior state.
+        { name: 'src_code', label: 'SRC code', type: 'select',
+          options: [...(row.src_code ? [{ value: '__none__', label: 'No SRC (remove tag)' }] : []), ...srcCodes],
+          required: true, default: row.src_code || 'UNCLAIMED' },
         { name: 'src_note', label: 'Note (optional)', placeholder: 'Optional — recorded with the SRC', default: row.src_note || '' },
       ] },
-    action: async (v) => { const { data } = await api.post('/evalue/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); if (!mcQueued(data)) toast.success(`SRC assigned: ${data.src_code}`) },
+    action: async (v) => {
+      if (v.src_code === '__none__') { const { data } = await api.post('/evalue/remove-src', { id: row.id, side: row._side }); if (!mcQueued(data)) toast.success('SRC removed') }
+      else { const { data } = await api.post('/evalue/assign-src', { id: row.id, side: row._side, src_code: v.src_code, src_note: v.src_note }); if (!mcQueued(data)) toast.success(`SRC assigned: ${data.src_code}`) }
+    },
   })
   const removeSrc = async (row) => {
     if (!window.confirm(`Remove SRC from ${row.eko_trxn_id || row.utr || row.id}?\n\nIt reverts to the status it held before the tag.`)) return

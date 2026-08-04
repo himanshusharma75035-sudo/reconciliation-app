@@ -260,43 +260,41 @@ function SrcModal({ process, procLabel, row, summary, onClose, onDone }) {
   const tagged = !!row.src_code
   const [form, setForm] = useState({ src_code: row.src_code || '', src_note: row.src_note || '' })
   const [saving, setSaving] = useState(false)
-  const submit = async () => {
-    if (!form.src_code) { toast.error('Pick a reason code'); return }
+  // "No SRC" (empty) on a tagged row = remove the tag; on an untagged row it's just the empty
+  // placeholder (Apply disabled). Removal lives inside the dropdown — pick No SRC and apply.
+  const willRemove = tagged && !form.src_code
+  const apply = async () => {
     setSaving(true)
     try {
-      await api.post('/sbi/assign-src', { process, result_id: row.id, src_code: form.src_code, src_note: form.src_note?.trim() || null })
-      toast.success(tagged ? 'SRC updated' : 'SRC assigned'); onDone()
-    } catch (e) { toast.error(e.response?.data?.detail || 'Assign SRC failed') }
-    finally { setSaving(false) }
-  }
-  const remove = async () => {
-    setSaving(true)
-    try {
-      await api.post('/sbi/remove-src', { process, result_id: row.id })
-      toast.success('SRC removed'); onDone()
-    } catch (e) { toast.error(e.response?.data?.detail || 'Remove SRC failed') }
+      if (willRemove) {
+        await api.post('/sbi/remove-src', { process, result_id: row.id })
+        toast.success('SRC removed')
+      } else {
+        await api.post('/sbi/assign-src', { process, result_id: row.id, src_code: form.src_code, src_note: form.src_note?.trim() || null })
+        toast.success(tagged ? 'SRC updated' : 'SRC assigned')
+      }
+      onDone()
+    } catch (e) { toast.error(e.response?.data?.detail || (willRemove ? 'Remove SRC failed' : 'Assign SRC failed')) }
     finally { setSaving(false) }
   }
   return (
     <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-5" onClick={e => e.stopPropagation()}>
         <h3 className="font-semibold text-gray-800 mb-1">{tagged ? 'Edit' : 'Assign'} SRC — {procLabel}</h3>
-        <p className="text-xs text-gray-500 mb-3">{summary} Tags this unmatched row with a disposition reason for reporting. <strong>Persists across re-runs.</strong></p>
-        <label className="text-xs text-gray-500 block mb-1">Reason code (required)</label>
+        <p className="text-xs text-gray-500 mb-3">{summary} Tags this unmatched row with a disposition reason for reporting. Choose <strong>No SRC</strong> to remove the tag — the row reverts to its previous state. <strong>Persists across re-runs.</strong></p>
+        <label className="text-xs text-gray-500 block mb-1">Reason code</label>
         <select className="select w-full mb-3" value={form.src_code} onChange={e => setForm({ ...form, src_code: e.target.value })}>
-          <option value="">Select a reason…</option>
+          <option value="">No SRC{tagged ? ' (remove tag)' : ''}</option>
           {srcCodes.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
         <label className="text-xs text-gray-500 block mb-1">Note (optional)</label>
-        <textarea className="input w-full mb-4" rows={3} value={form.src_note} onChange={e => setForm({ ...form, src_note: e.target.value })} placeholder="Optional context for this disposition" />
-        <div className="flex justify-between gap-2">
-          {tagged
-            ? <button onClick={remove} disabled={saving} className="btn-ghost text-red-600 hover:bg-red-50">Remove SRC</button>
-            : <span />}
-          <div className="flex gap-2">
-            <button onClick={onClose} className="btn-ghost">Cancel</button>
-            <button onClick={submit} disabled={saving} className="btn-primary">{saving ? 'Saving…' : (tagged ? 'Update SRC' : 'Assign SRC')}</button>
-          </div>
+        <textarea className="input w-full mb-4" rows={3} value={form.src_note} onChange={e => setForm({ ...form, src_note: e.target.value })} placeholder="Optional context for this disposition" disabled={willRemove} />
+        <div className="flex justify-end gap-2">
+          <button onClick={onClose} className="btn-ghost">Cancel</button>
+          <button onClick={apply} disabled={saving || (!form.src_code && !tagged)}
+            className={willRemove ? 'btn-primary bg-red-600 hover:bg-red-700' : 'btn-primary'}>
+            {saving ? 'Saving…' : willRemove ? 'Remove SRC' : (tagged ? 'Update SRC' : 'Assign SRC')}
+          </button>
         </div>
       </div>
     </div>
@@ -1148,7 +1146,7 @@ function UnifiedTab({ reconDate, setReconDate }) {
   // which is what the SBI overlay assign-src-bulk needs.
   const taggable = rows.filter(r => r.result_process && r.result_id && (r.status || '').startsWith('Unmatched'))
   const applyBulkSrc = async () => {
-    if (!bulkCode) return toast.error('Pick a reason code')
+    if (!bulkCode || bulkCode === '__none__') return toast.error('Pick a reason code')
     if (!taggable.length) return
     setBulkBusy(true)
     try {
@@ -1302,22 +1300,20 @@ function UnifiedTab({ reconDate, setReconDate }) {
         <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={() => setBulkOpen(false)}>
           <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-5" onClick={e => e.stopPropagation()}>
             <h3 className="font-semibold text-gray-800 mb-1">Bulk SRC — {taggable.length} row{taggable.length === 1 ? '' : 's'}</h3>
-            <p className="text-xs text-gray-500 mb-3">Applies one reason code to every SRC-eligible row currently shown. Narrow with the status / process / side / search filters first. Persists across re-runs.</p>
-            <label className="text-xs text-gray-500 block mb-1">Reason code (required)</label>
+            <p className="text-xs text-gray-500 mb-3">Applies one reason code to every SRC-eligible row currently shown, or pick <strong>No SRC</strong> to remove the tag from every tagged row shown. Narrow with the status / process / side / search filters first. Persists across re-runs.</p>
+            <label className="text-xs text-gray-500 block mb-1">Reason code</label>
             <select className="select w-full mb-3" value={bulkCode} onChange={e => setBulkCode(e.target.value)}>
               <option value="">Select a reason…</option>
+              {removable.length > 0 && <option value="__none__">No SRC (remove tag from {removable.length})</option>}
               {srcCodes.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
             <label className="text-xs text-gray-500 block mb-1">Note (optional)</label>
-            <textarea className="input w-full mb-4" rows={2} value={bulkNote} onChange={e => setBulkNote(e.target.value)} placeholder="Optional context for this disposition" />
-            <div className="flex justify-between gap-2">
-              {removable.length > 0
-                ? <button onClick={applyBulkRemoveSrc} disabled={bulkBusy} className="btn-ghost text-red-600 hover:bg-red-50">{bulkBusy ? '…' : `Remove SRC (${removable.length})`}</button>
-                : <span />}
-              <div className="flex gap-2">
-                <button onClick={() => setBulkOpen(false)} className="btn-ghost">Cancel</button>
-                <button onClick={applyBulkSrc} disabled={bulkBusy || !bulkCode} className="btn-primary">{bulkBusy ? 'Tagging…' : `Tag ${taggable.length}`}</button>
-              </div>
+            <textarea className="input w-full mb-4" rows={2} value={bulkNote} onChange={e => setBulkNote(e.target.value)} placeholder="Optional context for this disposition" disabled={bulkCode === '__none__'} />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setBulkOpen(false)} className="btn-ghost">Cancel</button>
+              {bulkCode === '__none__'
+                ? <button onClick={applyBulkRemoveSrc} disabled={bulkBusy || !removable.length} className="btn-primary bg-red-600 hover:bg-red-700">{bulkBusy ? '…' : `Remove SRC (${removable.length})`}</button>
+                : <button onClick={applyBulkSrc} disabled={bulkBusy || !bulkCode} className="btn-primary">{bulkBusy ? 'Tagging…' : `Tag ${taggable.length}`}</button>}
             </div>
           </div>
         </div>

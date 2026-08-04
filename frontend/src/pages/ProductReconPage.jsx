@@ -12,6 +12,7 @@ import AepsSettlement from './AepsSettlement'
 import QRSettlement from './QRSettlement'
 import ActionModal from '../components/ActionModal'
 import { PRODUCT_BY_ID } from '../productRegistry'
+import { useSrcCodes } from '../srcCodes'
 
 import { inr, today } from '../utils/formatters'
 import { STATUS_COLOR } from '../utils/statusColors'
@@ -90,6 +91,7 @@ function ProductReconTab({ slug, partners }) {
   const [page, setPage]       = useState(1)
   const PAGE_SIZE = 100
   const [loading, setLoading] = useState(false)
+  const srcCodes = useSrcCodes()
   const [selected, setSelected] = useState(() => new Set())
   const [assignedFilter, setAssignedFilter] = useState('')   // '' | 'me' | 'unassigned' | username
 
@@ -223,31 +225,46 @@ function ProductReconTab({ slug, partners }) {
   })
   const assignSrcRow = (row) => setModal({
     config: {
-      title: 'Assign SRC code', confirmLabel: 'Assign',
-      description: `Transaction ${row.eko_tid || row.id}`,
+      title: row.src_code ? 'Edit SRC code' : 'Assign SRC code', confirmLabel: 'Apply',
+      description: `Transaction ${row.eko_tid || row.id}${row.src_code ? ` — SRC: ${row.src_code} · pick "No SRC" to remove` : ''}`,
       fields: [
-        { name: 'code', label: 'SRC code', required: true, placeholder: 'e.g. SRC01' },
-        { name: 'note', label: 'Note', placeholder: 'optional' },
+        // "No SRC" (only when already tagged) removes the tag — the row reverts to its prior state.
+        { name: 'code', label: 'SRC code', type: 'select',
+          options: [...(row.src_code ? [{ value: '__none__', label: 'No SRC (remove tag)' }] : []), ...srcCodes],
+          required: true, default: row.src_code || (srcCodes[0] || '') },
+        { name: 'note', label: 'Note', placeholder: 'optional', default: row.src_note || '' },
       ],
     },
     action: async (v) => {
-      await api.post('/recon/assign-src', { transaction_id: row.id, src_code: v.code, src_note: v.note || '' })
-      toast.success('SRC assigned')
+      if (v.code === '__none__') {
+        await api.post('/recon/remove-src', { transaction_id: row.id }); toast.success('SRC removed')
+      } else {
+        await api.post('/recon/assign-src', { transaction_id: row.id, src_code: v.code, src_note: v.note || '' })
+        toast.success('SRC assigned')
+      }
     },
   })
   const bulkSrc = () => {
     const ids = [...selected]; if (!ids.length) return
     setModal({
       config: {
-        title: `Bulk assign SRC — ${ids.length} rows`, confirmLabel: 'Assign to all',
+        title: `Bulk SRC — ${ids.length} rows`, confirmLabel: 'Apply to all',
+        description: 'Pick a code to tag every selected row, or "No SRC" to remove the tag from each.',
         fields: [
-          { name: 'code', label: 'SRC code', required: true, placeholder: 'e.g. SRC01' },
+          { name: 'code', label: 'SRC code', type: 'select',
+            options: [{ value: '__none__', label: 'No SRC (remove tag)' }, ...srcCodes],
+            required: true, default: srcCodes[0] || '' },
           { name: 'note', label: 'Note', placeholder: 'optional' },
         ],
       },
       action: async (v) => {
-        const { data } = await api.post('/recon/assign-src-bulk', { transaction_ids: ids, src_code: v.code, src_note: v.note || '' })
-        toast.success(`SRC assigned to ${data.updated ?? ids.length} rows`); clearSel()
+        if (v.code === '__none__') {
+          const { data } = await api.post('/recon/remove-src-bulk', { transaction_ids: ids })
+          toast.success(`SRC removed from ${data.reverted ?? ids.length} rows`); clearSel()
+        } else {
+          const { data } = await api.post('/recon/assign-src-bulk', { transaction_ids: ids, src_code: v.code, src_note: v.note || '' })
+          toast.success(`SRC assigned to ${data.updated ?? ids.length} rows`); clearSel()
+        }
       },
     })
   }

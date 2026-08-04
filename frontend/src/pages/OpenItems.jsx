@@ -185,6 +185,9 @@ export default function OpenItems() {
     } catch { toast.error('Failed') }
   }
 
+  // Apply the modal: a tagged row with "No SRC" selected (empty) → remove; otherwise assign.
+  const handleSrcApply = () => (srcModal?.src_code && !srcForm.src_code) ? handleRemoveSrc() : handleAssignSrc()
+
   // ── Remove SRC (revert the row to its status before the tag) ───────────────
   const handleRemoveSrc = async () => {
     try {
@@ -770,7 +773,7 @@ export default function OpenItems() {
               <div>
                 <label className="text-xs font-medium text-gray-500 block mb-1">SRC Code</label>
                 <select className="select" value={srcForm.src_code} onChange={e => setSrcForm({...srcForm, src_code: e.target.value})}>
-                  <option value="">Select code</option>
+                  <option value="">{srcModal.src_code ? 'No SRC (remove tag)' : 'Select code'}</option>
                   {SRC_CODES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
                 </select>
               </div>
@@ -781,10 +784,11 @@ export default function OpenItems() {
               </div>
             </div>
             <div className="flex gap-3 mt-4">
-              {srcModal.src_code &&
-                <button onClick={handleRemoveSrc} className="btn-ghost text-red-600 hover:bg-red-50">Remove SRC</button>}
               <button onClick={() => setSrcModal(null)} className="btn-ghost flex-1">Cancel</button>
-              <button onClick={handleAssignSrc} className="btn-primary flex-1">{srcModal.src_code ? 'Update SRC' : 'Assign SRC'}</button>
+              <button onClick={handleSrcApply}
+                className={`flex-1 text-white rounded-lg px-4 py-2 text-sm font-medium ${srcModal.src_code && !srcForm.src_code ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:opacity-90'}`}>
+                {srcModal.src_code ? (srcForm.src_code ? 'Update SRC' : 'Remove SRC') : 'Assign SRC'}
+              </button>
             </div>
           </div>
         </div>
