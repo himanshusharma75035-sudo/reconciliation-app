@@ -3129,9 +3129,24 @@ def manual_pair_open_items(
                     report_open_ids = None   # fail open — fall back to the raw unified set
         for e in _unified_entries(db, d, include_deposits=True, sides={side}):
             e.pop("_result", None)
-            if e["side"] != side or e["status"] in _CLOSED_UNIFIED:   # matched OR failed(closed) → not open
+            if e["side"] != side:
                 continue
-            if side == "bank" and report_open_ids is not None and e["id"] not in report_open_ids:
+            # A manual pair already reconciled the row (both legs) — exclude on BOTH sides. The
+            # report can't see manual pairs, so this can't be left to report_open_ids below.
+            if e["status"] == "Manual_Matched":
+                continue
+            if side == "bank" and report_open_ids is not None:
+                # Exclude only rows RELIABLY reconciled (P01 settlement / P02 20-digit-ref match) —
+                # then defer to the reconciliation report, the source of truth for the bank side.
+                # A bank CREDIT can read 'Matched' in the unified view via the WEAK (csp/ko, amount)
+                # P03 overlay (result_process 'p03') while the report correctly leaves it Unmatched;
+                # that weak match must NOT hide a real report-open item from the picker (Rajendra
+                # 2026-08: rows shown unmatched in the report were missing from Manual Match).
+                if e["status"] in _MATCHED_UNIFIED and e.get("result_process") in ("p01", "p02"):
+                    continue
+                if e["id"] not in report_open_ids:
+                    continue
+            elif e["status"] in _CLOSED_UNIFIED:   # data side, or bank fail-open fallback (no report set)
                 continue
             rows.append(e)
     if search:

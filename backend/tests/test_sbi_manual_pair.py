@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 
 from models.database import (
     Base, User, SBIBankTransaction, SBITxnReport, SBIKOLimits,
-    SBIP02Result, SBIManualPair,
+    SBIP02Result, SBIP03Result, SBIManualPair,
 )
 from routes.sbi_kiosk import (
     manual_pair_open_items, create_manual_pairs, delete_manual_pair, list_manual_pairs,
@@ -251,6 +251,24 @@ def test_ko_deposit_cannot_be_paired_twice(db):
     out = _pair_data(db, w2, "KO Withdrawal", d, "KO Deposit")   # reuse the same deposit
     assert out["paired"] == 0 and out["errors"] == 1
     assert "already" in out["results"][0]["error"].lower()
+
+
+def test_report_open_bank_credit_shows_even_when_unified_ghost_matched(db):
+    """Rajendra 2026-08: a bank CREDIT the unified view marks 'Matched' via the weak (csp,amount)
+    P03 overlay, but which the reconciliation report leaves Unmatched (its 20-digit ref isn't in
+    any source file), must STILL appear in the pair-picker's bank side — the report is the source
+    of truth there, so a report-open row is a real open item even if the unified status says
+    Matched. (It was being hidden by the picker's status-closed filter.)"""
+    REF = "62101614158300006350"                  # a 20-digit bank ref, not in any source file
+    _bank(db, REF, ko="CSP1", credit=15000.0)      # money-IN credit
+    db.add(SBIP03Result(recon_date=DATE, csp_code="CSP1", txn_amount=15000.0,
+                        bank_amount=15000.0, match_status="Matched")); db.commit()
+    # unified view ghost-matches it via (csp, amount)
+    bank_row = next(r for r in _unified_rows(db) if r["ref"] == REF and r["side"] == "bank")
+    assert bank_row["status"] == "Matched"
+    # ...but the report leaves it Unmatched, so the picker MUST list it as an open bank item
+    pick = manual_pair_open_items(side="bank", date_from=DATE, db=db, current_user=USER)
+    assert any(e["ref"] == REF for e in pick["items"])
 
 
 def test_resolved_keys_path_is_id_independent(db):
