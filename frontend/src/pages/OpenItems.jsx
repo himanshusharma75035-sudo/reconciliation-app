@@ -203,6 +203,26 @@ export default function OpenItems() {
     } catch (e) { toast.error(e.response?.data?.detail || 'Failed') }
   }
 
+  // ── Remove from Fund Transfer (reopen an auto-closed row so it can net its refund) ──
+  const handleRemoveFundTransfer = async (it) => {
+    if (!window.confirm(`Remove "${it.tracking_number || it.eko_tid || it.id}" from Fund Transfer?\n\nIt reopens as unmatched and we try to net it against its same-tracking refund counterpart.`)) return
+    try {
+      const { data } = await api.post('/recon/remove-fund-transfer', { transaction_id: it.id })
+      toast.success(data.matched ? 'Removed — matched to its refund counterpart' : 'Removed from Fund Transfer (now open)')
+      load(page)
+    } catch (e) { toast.error(e.response?.data?.detail || 'Failed') }
+  }
+  const handleBulkRemoveFundTransfer = async () => {
+    const ids = [...selected]
+    if (!ids.length) return
+    if (!window.confirm(`Remove ${ids.length} selected row(s) from Fund Transfer?\n\nEach reopens; same-tracking refund round-trips are auto-netted. Non-Fund-Transfer rows are ignored.`)) return
+    try {
+      const { data } = await api.post('/recon/remove-fund-transfer-bulk', { transaction_ids: ids })
+      toast.success(`Reopened ${data.reopened} · matched ${data.matched_pairs} refund pair(s)`)
+      setSelected(new Set()); load(page)
+    } catch (e) { toast.error(e.response?.data?.detail || 'Bulk failed') }
+  }
+
   // ── Edit identifiers (TID / Tracking-RRN / UTR) — core ledger, un-matched only ──
   // Override-gated; the backend blocks matched rows and audits every change old→new.
   const MODULE_PARTNERS = new Set(['evalue', 'bbps'])
@@ -402,6 +422,13 @@ export default function OpenItems() {
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200 transition-colors disabled:opacity-50">
                 <Tags size={14} /> Remove SRC ({selected.size})
               </button>
+              {hasOverride && (
+                <button onClick={handleBulkRemoveFundTransfer}
+                  title="Reopen selected Fund-Transfer rows so mis-bucketed refunds can net (non-FT rows ignored)"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200 transition-colors">
+                  <Banknote size={14} /> Remove from Fund Transfer ({selected.size})
+                </button>
+              )}
               {hasOverride && (
                 <button onClick={() => setBulkOverrideOpen(true)}
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 transition-colors">
@@ -715,6 +742,16 @@ export default function OpenItems() {
                                 >
                                   <ArrowLeftRight size={12} /> Select (A)
                                 </button>
+                        )}
+                        {/* Remove from Fund Transfer — reopen so a mis-bucketed refund can net */}
+                        {hasOverride && item.recon_status === 'fund_transfer' && (
+                          <button
+                            onClick={() => handleRemoveFundTransfer(item)}
+                            className="text-xs text-teal-600 hover:underline flex items-center gap-1"
+                            title="Reopen this Fund-Transfer row so it can match its same-tracking refund counterpart"
+                          >
+                            <Banknote size={12} /> Remove from Fund Transfer
+                          </button>
                         )}
                         {/* Override buttons — only visible to users with override permission */}
                         {hasOverride && item.match_id && ['matched','manual_matched','interbank_matched'].includes(item.recon_status) && (

@@ -283,6 +283,21 @@ function ProductReconTab({ slug, partners }) {
       toast.success(`SRC removed from ${data.reverted ?? ids.length} rows`); clearSel(); fetchRows()
     } catch (e) { toast.error(e.response?.data?.detail || 'Bulk remove failed') }
   }
+  const removeFundTransferRow = async (row) => {
+    if (!window.confirm(`Remove ${row.tracking_number || row.eko_tid || row.id} from Fund Transfer?\n\nIt reopens as unmatched and we try to net it against its same-tracking refund counterpart.`)) return
+    try {
+      const { data } = await api.post('/recon/remove-fund-transfer', { transaction_id: row.id })
+      toast.success(data.matched ? 'Removed — matched to its refund counterpart' : 'Removed from Fund Transfer (now open)'); fetchRows()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Failed') }
+  }
+  const bulkRemoveFundTransfer = async () => {
+    const ids = [...selected]; if (!ids.length) return
+    if (!window.confirm(`Remove ${ids.length} selected row(s) from Fund Transfer?\n\nEach reopens; same-tracking refund round-trips are auto-netted. Non-Fund-Transfer rows are ignored.`)) return
+    try {
+      const { data } = await api.post('/recon/remove-fund-transfer-bulk', { transaction_ids: ids })
+      toast.success(`Reopened ${data.reopened} · matched ${data.matched_pairs} refund pair(s)`); clearSel(); fetchRows()
+    } catch (e) { toast.error(e.response?.data?.detail || 'Bulk failed') }
+  }
   const bulkDelete = async () => {
     const ids = [...selected]; if (!ids.length) return
     if (!window.confirm(`Delete ${ids.length} selected row(s)?\n\nMatched counterparts are safely reverted to unmatched, and the rows go to the Recycle Bin (restorable for 30 days).`)) return
@@ -602,6 +617,7 @@ function ProductReconTab({ slug, partners }) {
             <button onClick={bulkSrc} className="px-3 py-1 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-700">Bulk assign SRC</button>
             <button onClick={bulkRemoveSrc} className="px-3 py-1 rounded text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 border border-gray-200">Bulk remove SRC</button>
             <button onClick={bulkOverride} className="px-3 py-1 rounded text-xs font-medium bg-amber-600 text-white hover:bg-amber-700">Bulk override status</button>
+            <button onClick={bulkRemoveFundTransfer} title="Reopen selected Fund-Transfer rows so mis-bucketed refunds can net (non-FT rows ignored)" className="px-3 py-1 rounded text-xs font-medium bg-teal-50 text-teal-700 hover:bg-teal-100 border border-teal-200">Remove from Fund Transfer</button>
             <button onClick={bulkDelete} className="px-3 py-1 rounded text-xs font-medium bg-red-600 text-white hover:bg-red-700">Delete selected</button>
             <button onClick={clearSel} className="text-xs text-gray-500 hover:text-gray-700 ml-auto">Clear</button>
           </div>
@@ -689,6 +705,8 @@ function ProductReconTab({ slug, partners }) {
                   <button title="Assign SRC" onClick={() => assignSrcRow(r)} className="p-1 rounded hover:bg-blue-50 text-blue-600"><GitMerge size={12} /></button>
                   {(r.recon_status === 'src_assigned' || r.src_code) &&
                     <button title="Remove SRC" onClick={() => removeSrcRow(r)} className="p-1 rounded hover:bg-gray-100 text-gray-500 text-[11px] font-bold leading-none">✕</button>}
+                  {r.recon_status === 'fund_transfer' &&
+                    <button title="Remove from Fund Transfer — reopen so it can net its same-tracking refund" onClick={() => removeFundTransferRow(r)} className="p-1 rounded hover:bg-teal-50 text-teal-600"><ArrowLeftRight size={12} /></button>}
                 </div></td>
               </tr>
             ))}</tbody>

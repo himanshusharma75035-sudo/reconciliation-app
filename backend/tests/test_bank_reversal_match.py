@@ -166,6 +166,41 @@ def test_guard_a_defers_when_no_internal_side(db):
     assert run_bank_reversal_match("axis", DATE, db, "u1")["bank_reversal_matched"] == 1
 
 
+# ── Remove-from-Fund-Transfer action (Rajendra 2026-08) ───────────────────────
+def test_remove_fund_transfer_reopens_and_nets(db):
+    # The live shape: refund CR auto-closed 'fund_transfer' can't net its same-tracking open DR.
+    # The operator action reopens it → run_bank_reversal_match pairs the round trip.
+    from models.database import User
+    from routes.recon import do_remove_fund_transfer, RemoveFundTransferRequest
+    U = User(id="u1", username="raj", role="admin", permissions="{}")
+    _anchor(db)
+    dr = mk(db, tracking_number="622114772773", utr_number="622114772773",
+            amount=12500.0, dr_cr="DR", row_type="txn")
+    cr = mk(db, tracking_number="622114772773", eko_tid="916020056063", amount=12500.0,
+            dr_cr="CR", row_type="settlement_credit", recon_status=ReconStatus.fund_transfer)
+    db.commit()
+    assert run_bank_reversal_match("axis", DATE, db, "u1")["bank_reversal_matched"] == 0  # blocked
+    out = do_remove_fund_transfer(RemoveFundTransferRequest(transaction_id=cr.id),
+                                  db=db, current_user=U)
+    assert out["matched"] is True
+    db.refresh(dr); db.refresh(cr)
+    assert cr.recon_status == ReconStatus.reversal_matched
+    assert dr.recon_status == ReconStatus.reversal_matched
+    assert dr.match_id == cr.match_id and dr.match_id
+
+
+def test_remove_fund_transfer_rejects_non_fund_transfer(db):
+    from fastapi import HTTPException
+    from models.database import User
+    from routes.recon import do_remove_fund_transfer, RemoveFundTransferRequest
+    U = User(id="u1", username="raj", role="admin", permissions="{}")
+    t = mk(db, tracking_number="X", amount=1.0, dr_cr="CR", recon_status=ReconStatus.unmatched)
+    db.commit()
+    with pytest.raises(HTTPException) as e:
+        do_remove_fund_transfer(RemoveFundTransferRequest(transaction_id=t.id), db=db, current_user=U)
+    assert e.value.status_code == 400
+
+
 # ── Guard B: an OPEN internal row shares the tracking (even cross-date) → skip ──
 def test_guard_b_skips_tracking_held_by_open_internal_row(db):
     _anchor(db)

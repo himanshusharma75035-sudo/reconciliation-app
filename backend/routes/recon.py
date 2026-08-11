@@ -886,6 +886,79 @@ def do_remove_src_bulk(req: BulkSRCRemoveRequest, db: Session = Depends(get_db),
          detail={"count": len(txns), "transaction_ids": req.transaction_ids[:20]})
     return {"reverted": len(txns)}
 
+# ── Remove from Fund Transfer (Rajendra 2026-08) ──────────────────────────────
+# A bank CREDIT that is really a refund gets auto-classified 'settlement_credit' → recon_status
+# 'fund_transfer' (auto-closed) at ingest, so it can't net against its same-tracking open DEBIT.
+# run_bank_reversal_match ALREADY handles the DR↔CR refund round-trip (it deliberately ignores
+# row_type) but acts ONLY on 'unmatched' rows — so reopening the credit lets that netting pair it.
+# This action reopens the row and immediately re-runs the netting for its (partner, date).
+class RemoveFundTransferRequest(BaseModel):
+    transaction_id: str
+
+
+class BulkRemoveFundTransferRequest(BaseModel):
+    transaction_ids: List[str]
+
+
+def _rerun_bank_reversal(db, user_id, affected) -> int:
+    from core.matching_engine import run_bank_reversal_match
+    pairs = 0
+    for partner, date in affected:
+        if partner and date:
+            pairs += run_bank_reversal_match(partner, date, db, user_id).get("bank_reversal_matched", 0)
+    return pairs
+
+
+@router.post("/remove-fund-transfer")
+def do_remove_fund_transfer(req: RemoveFundTransferRequest, db: Session = Depends(get_db),
+                            current_user: User = Depends(require_permission("override"))):
+    """Reopen a bank row auto-closed as 'Fund Transfer' so it can be matched, then net the refund
+    round-trip. For refund CREDITS mis-bucketed as fund_transfer that should pair with their
+    same-tracking open DEBIT (Rajendra 2026-08). Core-ledger partners (DMT, AePS, …)."""
+    txn = db.query(Transaction).filter(Transaction.id == req.transaction_id).first()
+    if not txn:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if txn.recon_status != ReconStatus.fund_transfer:
+        raise HTTPException(status_code=400, detail="Transaction is not in Fund Transfer status")
+    txn.prev_recon_status = str(txn.recon_status)
+    txn.recon_status      = ReconStatus.unmatched
+    txn.override_by       = current_user.username
+    txn.override_at       = datetime.datetime.utcnow()
+    db.commit()
+    _rerun_bank_reversal(db, current_user.id, [(txn.partner, txn.recon_date)])
+    db.refresh(txn)
+    matched = txn.recon_status != ReconStatus.unmatched
+    _log(db, current_user, "remove_fund_transfer", "transaction", txn.id,
+         {"matched": matched, "new_status": str(txn.recon_status)})
+    return {"message": "Removed from Fund Transfer", "transaction_id": txn.id,
+            "matched": matched, "new_status": str(txn.recon_status)}
+
+
+@router.post("/remove-fund-transfer-bulk")
+def do_remove_fund_transfer_bulk(req: BulkRemoveFundTransferRequest, db: Session = Depends(get_db),
+                                 current_user: User = Depends(require_permission("override"))):
+    """Reopen many Fund-Transfer rows at once, then net refund round-trips per affected (partner,
+    date). Only rows currently in 'fund_transfer' are touched."""
+    if not req.transaction_ids:
+        raise HTTPException(status_code=400, detail="No transaction IDs provided")
+    txns = db.query(Transaction).filter(
+        Transaction.id.in_(req.transaction_ids),
+        Transaction.recon_status == ReconStatus.fund_transfer).all()
+    affected = set()
+    for txn in txns:
+        txn.prev_recon_status = str(txn.recon_status)
+        txn.recon_status      = ReconStatus.unmatched
+        txn.override_by       = current_user.username
+        txn.override_at       = datetime.datetime.utcnow()
+        if txn.partner and txn.recon_date:
+            affected.add((txn.partner, txn.recon_date))
+    db.commit()
+    pairs = _rerun_bank_reversal(db, current_user.id, affected)
+    _log(db, current_user, "bulk_remove_fund_transfer", "transaction",
+         detail={"reopened": len(txns), "matched_pairs": pairs, "dates": len(affected)})
+    return {"reopened": len(txns), "matched_pairs": pairs}
+
+
 @router.post("/manual-match")
 def do_manual_match(req: ManualMatchRequest, db: Session = Depends(get_db),
                     current_user: User = Depends(require_permission("manual_match"))):
