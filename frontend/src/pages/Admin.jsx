@@ -1061,45 +1061,133 @@ function APIKeysTab() {
 // ────────────────────────────────────────────────────────────────────────────
 // Main Admin Page
 // ────────────────────────────────────────────────────────────────────────────
+const AI_PRESETS = [
+  ['OpenAI',        'https://api.openai.com/v1',                          'gpt-4o-mini'],
+  ['OpenRouter',    'https://openrouter.ai/api/v1',                       'meta-llama/llama-3.3-70b-instruct'],
+  ['Groq',          'https://api.groq.com/openai/v1',                     'llama-3.3-70b-versatile'],
+  ['Together',      'https://api.together.xyz/v1',                        'meta-llama/Llama-3.3-70B-Instruct-Turbo'],
+  ['Ollama (local)','http://localhost:11434/v1',                         'llama3.1'],
+  ['vLLM (local)',  'http://localhost:8000/v1',                          ''],
+  ['Gemini',        'https://generativelanguage.googleapis.com/v1beta/openai', 'gemini-1.5-flash'],
+]
+
 function AIConfigTab() {
   const [cfg, setCfg] = useState(null)
-  const [key, setKey] = useState('')
+  const [provider, setProvider] = useState('anthropic')
+  const [aiKey, setAiKey] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [model, setModel] = useState('')
+  const [anthKey, setAnthKey] = useState('')
   const [saving, setSaving] = useState(false)
-  const load = () => api.get('/admin/ai-config').then(({ data }) => setCfg(data)).catch(() => toast.error('Failed to load AI config'))
+
+  const load = () => api.get('/admin/ai-config').then(({ data }) => {
+    setCfg(data)
+    setProvider(data.provider || 'anthropic')
+    setBaseUrl(data.base_url || '')
+    setModel(data.model || '')
+  }).catch(() => toast.error('Failed to load AI config'))
   useEffect(() => { load() }, [])
-  const save = async (clear = false) => {
-    if (!clear && !key.trim()) { toast.error('Paste an API key first'); return }
+
+  const saveRecon = async () => {
     setSaving(true)
     try {
-      await api.post('/admin/ai-config', { api_key: clear ? '' : key.trim() })
-      toast.success(clear ? 'API key cleared' : 'API key saved')
-      setKey(''); load()
+      const body = { provider, base_url: baseUrl.trim(), model: model.trim() }
+      if (aiKey.trim()) body.ai_api_key = aiKey.trim()      // blank keeps the stored key
+      await api.post('/admin/ai-config', body)
+      toast.success('Reconciliation AI settings saved'); setAiKey(''); load()
     } catch (e) { toast.error(e?.response?.data?.detail || 'Save failed') }
     setSaving(false)
   }
+  const saveAnth = async (clear = false) => {
+    if (!clear && !anthKey.trim()) { toast.error('Paste an API key first'); return }
+    setSaving(true)
+    try {
+      await api.post('/admin/ai-config', { api_key: clear ? '' : anthKey.trim() })
+      toast.success(clear ? 'Anthropic key cleared' : 'Anthropic key saved'); setAnthKey(''); load()
+    } catch (e) { toast.error(e?.response?.data?.detail || 'Save failed') }
+    setSaving(false)
+  }
+
   return (
-    <div className="max-w-2xl">
-      <div className="mb-4">
-        <h3 className="font-semibold text-gray-700">AI — Anthropic API Key</h3>
-        <p className="text-sm text-gray-500">Powers the Developer Portal agent and AI reconciliation. Stored in the database (never shown or logged) so nobody has to edit backend files.</p>
+    <div className="max-w-2xl space-y-8">
+      {/* Reconciliation AI — any provider */}
+      <div>
+        <div className="mb-3">
+          <h3 className="font-semibold text-gray-700">Reconciliation AI</h3>
+          <p className="text-sm text-gray-500">Powers suggested matches, anomaly detection and insights. Use Anthropic, OpenAI, or any OpenAI-compatible endpoint — including open-source models via Ollama, vLLM, OpenRouter, Groq or Together. Keys are stored in the database, never shown or logged.</p>
+        </div>
+        <div className="card space-y-4">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-gray-500">Status:</span>
+            {cfg?.ai_configured
+              ? <span className="text-green-700 font-medium">● Ready <span className="text-gray-400 font-normal">· {cfg.provider} · <span className="font-mono">{cfg.model}</span></span></span>
+              : <span className="text-gray-400">Not configured</span>}
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Provider</label>
+              <select className="select w-full" value={provider} onChange={e => setProvider(e.target.value)}>
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="openai">OpenAI / OpenAI-compatible (incl. open-source)</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Model</label>
+              <input className="input w-full font-mono" placeholder={provider === 'anthropic' ? 'claude-opus-4-8' : 'gpt-4o-mini'}
+                value={model} onChange={e => setModel(e.target.value)} />
+            </div>
+          </div>
+          {provider === 'openai' && (
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">API base URL</label>
+              <input className="input w-full font-mono" placeholder="https://api.openai.com/v1"
+                value={baseUrl} onChange={e => setBaseUrl(e.target.value)} />
+              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                {AI_PRESETS.map(([name, url, m]) => (
+                  <button key={name} type="button" onClick={() => { setBaseUrl(url); if (m && !model.trim()) setModel(m) }}
+                    className="text-[11px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200">{name}</button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div>
+            <label className="text-xs text-gray-400 block mb-1">
+              API key {provider === 'openai' ? '(leave blank for a keyless local endpoint like Ollama)' : '(blank = use the Anthropic key below)'}
+            </label>
+            <input type="password" className="input w-full font-mono" autoComplete="off"
+              placeholder={provider === 'anthropic' ? 'sk-ant-…' : 'provider key'} value={aiKey} onChange={e => setAiKey(e.target.value)} />
+            {cfg?.ai_masked
+              ? <p className="text-[11px] text-gray-400 mt-1">Stored key <span className="font-mono">{cfg.ai_masked}</span> — leave blank to keep it.</p>
+              : <p className="text-[11px] text-gray-400 mt-1">Write-only — never returned to the browser.</p>}
+          </div>
+          <button onClick={saveRecon} disabled={saving} className="btn">Save reconciliation AI</button>
+        </div>
       </div>
-      <div className="card space-y-4">
-        <div className="flex items-center gap-2 text-sm">
-          <span className="text-gray-500">Status:</span>
-          {cfg?.configured
-            ? <span className="text-green-700 font-medium">● Configured <span className="font-mono text-gray-400">{cfg.masked}</span> <span className="text-gray-400">(from {cfg.source})</span></span>
-            : <span className="text-gray-400">Not configured</span>}
+
+      {/* Developer Portal / Builder agent — Anthropic only */}
+      <div>
+        <div className="mb-3">
+          <h3 className="font-semibold text-gray-700">Developer Portal / Builder agent</h3>
+          <p className="text-sm text-gray-500">The autonomous agent runs on Anthropic. This key also acts as the fallback for Reconciliation AI when its provider is set to Anthropic.</p>
         </div>
-        <div>
-          <label className="text-xs text-gray-400 block mb-1">Anthropic API key</label>
-          <input type="password" className="input w-full font-mono" placeholder="sk-ant-…" value={key}
-            onChange={e => setKey(e.target.value)} autoComplete="off" />
-          <p className="text-[11px] text-gray-400 mt-1">A new key replaces the stored one. Write-only — it's never returned to the browser.</p>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={() => save(false)} disabled={saving} className="btn">Save key</button>
-          {cfg?.configured && cfg.source === 'config' &&
-            <button onClick={() => save(true)} disabled={saving} className="btn-ghost text-red-600">Clear</button>}
+        <div className="card space-y-4">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-gray-500">Status:</span>
+            {cfg?.configured
+              ? <span className="text-green-700 font-medium">● Configured <span className="font-mono text-gray-400">{cfg.masked}</span> <span className="text-gray-400">(from {cfg.source})</span></span>
+              : <span className="text-gray-400">Not configured</span>}
+          </div>
+          <div>
+            <label className="text-xs text-gray-400 block mb-1">Anthropic API key</label>
+            <input type="password" className="input w-full font-mono" placeholder="sk-ant-…" value={anthKey}
+              onChange={e => setAnthKey(e.target.value)} autoComplete="off" />
+            <p className="text-[11px] text-gray-400 mt-1">Write-only — never returned to the browser.</p>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={() => saveAnth(false)} disabled={saving} className="btn">Save key</button>
+            {cfg?.configured && cfg.source === 'config' &&
+              <button onClick={() => saveAnth(true)} disabled={saving} className="btn-ghost text-red-600">Clear</button>}
+          </div>
         </div>
       </div>
     </div>

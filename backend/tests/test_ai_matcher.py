@@ -24,13 +24,14 @@ def _row(rid, amount, **kw):
 
 
 def _enable(monkeypatch):
-    monkeypatch.setattr(ai_matcher, "portal_agent",
-                        SimpleNamespace(is_enabled=lambda: True, _api_key=lambda: "sk-test"),
+    monkeypatch.setattr(ai_matcher, "ai_client",
+                        SimpleNamespace(is_enabled=lambda: True,
+                                        call_tool=lambda *a, **k: {"pairs": []}),
                         raising=False)
 
 
 def test_disabled_returns_error_not_exception(monkeypatch):
-    monkeypatch.setattr(ai_matcher, "portal_agent",
+    monkeypatch.setattr(ai_matcher, "ai_client",
                         SimpleNamespace(is_enabled=lambda: False), raising=False)
     out = ai_matcher.suggest_matches([_row("b1", 100)], [_row("i1", 100)])
     assert out["suggestions"] == []

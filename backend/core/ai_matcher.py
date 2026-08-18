@@ -14,14 +14,13 @@ Claude to propose likely bank↔internal pairs. It is ADVISORY ONLY:
   • It never raises to the caller — on any failure it returns
     {"suggestions": [], "error": "..."} so the window degrades gracefully.
 
-Uses the same Anthropic key as the Developer Portal (core.portal_agent._api_key,
-which reads the Config-stored key first, then the env var) and the same model.
+Provider-agnostic via core.ai_client — Anthropic, OpenAI, or any OpenAI-compatible / open-source
+endpoint, configured in Configuration → AI. Model + key resolution live entirely in ai_client.
 """
-import os
 import json
 import logging
 
-from core import portal_agent
+from core import ai_client
 from core.ai_deident import deidentify_rows, assert_no_pii
 
 logger = logging.getLogger("eko_recon.ai_matcher")
@@ -76,30 +75,16 @@ _TOOL = {
 
 
 def _call_model(bank_payload, internal_payload):
-    """Send the de-identified payloads to Claude and return the raw pairs list.
-    Isolated so tests can monkeypatch it without touching the network."""
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=portal_agent._api_key())
-    model = os.getenv("PORTAL_AGENT_MODEL", "claude-opus-4-8")
+    """Send the de-identified payloads to the configured model and return the raw pairs list.
+    Provider-agnostic via core.ai_client (Anthropic, OpenAI, or any OpenAI-compatible / open-source
+    endpoint). Isolated so tests can monkeypatch it without touching the network."""
     user = (
         "BANK rows (unmatched):\n" + json.dumps(bank_payload, separators=(",", ":")) +
         "\n\nINTERNAL rows (unmatched):\n" + json.dumps(internal_payload, separators=(",", ":")) +
         "\n\nCall propose_matches with the confident pairs."
     )
-    resp = client.messages.create(
-        model=model,
-        max_tokens=4000,
-        system=_SYSTEM,
-        tools=[_TOOL],
-        tool_choice={"type": "tool", "name": "propose_matches"},
-        messages=[{"role": "user", "content": user}],
-    )
-    for block in resp.content:
-        if getattr(block, "type", "") == "tool_use" and block.name == "propose_matches":
-            data = block.input if isinstance(block.input, dict) else {}
-            return data.get("pairs", []) or []
-    return []
+    data = ai_client.call_tool(_SYSTEM, user, _TOOL, max_tokens=4000)
+    return (data or {}).get("pairs", []) or []
 
 
 def _disp(r):
@@ -125,9 +110,9 @@ def suggest_matches(bank_rows, internal_rows, *, limit=50, max_side=MAX_SIDE):
     internal_rows = list(internal_rows)
     total_bank, total_internal = len(bank_rows), len(internal_rows)
 
-    if not portal_agent.is_enabled():
+    if not ai_client.is_enabled():
         return {"suggestions": [], "bank_unmatched": total_bank, "internal_unmatched": total_internal,
-                "error": "AI is not configured. Set the Anthropic key in Configuration → AI."}
+                "error": "AI is not configured. Set a provider and key in Configuration → AI."}
     if not bank_rows or not internal_rows:
         return {"suggestions": [], "bank_unmatched": total_bank, "internal_unmatched": total_internal}
 

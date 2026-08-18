@@ -438,7 +438,16 @@ def delete_bank_account(account_id: str, db: Session = Depends(get_db),
 # 'api_key' from the change log, and the audit row we write carries no key material.
 
 class AIConfigIn(BaseModel):
-    api_key: str
+    # Anthropic key powers the Developer-Portal / Builder agent AND is the fallback for recon-AI
+    # when its provider is 'anthropic'. The recon-AI provider fields below are independent, so
+    # reconciliation intelligence can run on Anthropic, OpenAI, or any OpenAI-compatible /
+    # open-source endpoint (Ollama, vLLM, OpenRouter, Groq, Together, Gemini-openai, …).
+    # Any field left null is unchanged; "" clears it.
+    api_key:    Optional[str] = None       # -> anthropic_api_key
+    provider:   Optional[str] = None       # -> ai_provider : 'anthropic' | 'openai'
+    ai_api_key: Optional[str] = None       # -> ai_api_key  (blank ⇒ use the Anthropic key when provider='anthropic')
+    base_url:   Optional[str] = None       # -> ai_base_url (blank ⇒ OpenAI default; set for self-hosted / other)
+    model:      Optional[str] = None       # -> ai_model
 
 
 def _mask_key(k: str) -> str:
@@ -448,34 +457,55 @@ def _mask_key(k: str) -> str:
     return (k[:7] + "…" + k[-4:]) if len(k) > 14 else "set"
 
 
+def _ai_status(db) -> dict:
+    """The Configuration → AI view: recon-AI provider state + the (separate) Anthropic key that
+    powers the Builder agent. Key material is never returned — only masked previews."""
+    from core import ai_client
+
+    def _val(k):
+        r = db.query(SystemSetting).filter(SystemSetting.key == k).first()
+        return ((r.value if r else "") or "").strip()
+    cfg = ai_client.ai_config()
+    anth = _val("anthropic_api_key") or (os.getenv("ANTHROPIC_API_KEY") or "").strip()
+    return {
+        # reconciliation AI (multi-provider)
+        "provider":     cfg["provider"],
+        "base_url":     _val("ai_base_url"),
+        "model":        cfg["model"],
+        "ai_configured": ai_client.is_enabled(),
+        "ai_masked":    _mask_key(_val("ai_api_key")),
+        # Developer-Portal / Builder agent (Anthropic only)
+        "configured":   bool(anth),
+        "masked":       _mask_key(anth),
+        "source":       "config" if _val("anthropic_api_key") else ("env" if (os.getenv("ANTHROPIC_API_KEY") or "").strip() else "none"),
+    }
+
+
 @router.get("/ai-config")
 def get_ai_config(db: Session = Depends(get_db), _=Depends(require_admin)):
-    row = db.query(SystemSetting).filter(SystemSetting.key == "anthropic_api_key").first()
-    cfg = (row.value if row else "") or ""
-    env = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
-    active = cfg.strip() or env
-    return {
-        "configured": bool(active),
-        "masked": _mask_key(active),
-        "source": "config" if cfg.strip() else ("env" if env else "none"),
-        "updated_by": getattr(row, "updated_by", None) if row else None,
-    }
+    return _ai_status(db)
 
 
 @router.post("/ai-config")
 def set_ai_config(body: AIConfigIn, db: Session = Depends(get_db), user=Depends(require_admin)):
-    key = (body.api_key or "").strip()
-    row = db.query(SystemSetting).filter(SystemSetting.key == "anthropic_api_key").first()
-    if not row:
-        row = SystemSetting(key="anthropic_api_key")
-        db.add(row)
-    row.value = key
-    row.updated_by = user.username
+    fields = {"anthropic_api_key": body.api_key, "ai_provider": body.provider,
+              "ai_api_key": body.ai_api_key, "ai_base_url": body.base_url, "ai_model": body.model}
+    changed = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+        if not row:
+            row = SystemSetting(key=key)
+            db.add(row)
+        row.value = (value or "").strip()
+        row.updated_by = user.username
+        changed.append(key)
     try:
         db.add(AuditLog(user_id=user.id, username=user.username, action="ai_config_set",
-                        action_type="human", entity_type="config", entity_id="anthropic_api_key",
-                        detail=json.dumps({"configured": bool(key)})))   # never log the key itself
+                        action_type="human", entity_type="config", entity_id="ai_config",
+                        detail=json.dumps({"changed": changed})))   # never log key material
     except Exception:
         pass
     db.commit()
-    return {"configured": bool(key), "masked": _mask_key(key)}
+    return _ai_status(db)
